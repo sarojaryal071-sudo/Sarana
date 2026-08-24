@@ -1,0 +1,45 @@
+# .gitignore — repo root. Created for deployment readiness: this repo has
+# never been a git repository before, so nothing has been committed yet —
+# this file exists specifically to keep secrets and local/private data out
+# from the very first commit onward.
+
+# ── Python ────────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# ── environment / secrets ───────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# config/api_keys.json holds the real Gemini API key plus local user_name/
+# assistant_name — never commit it. config/api_keys.example.json (placeholders
+# only) is fine and intentionally NOT covered by this pattern.
+config/api_keys.json
+config/certs/
+*.key
+*.crt
+
+# memory/long_term.json is live personal data (names, saved facts), not a
+# template — keep it local, don't ship it to a public repo.
+memory/long_term.json
+
+# user-uploaded files (dashboard/server.py's /api/upload target)
+uploads/
+
+# ── frontend (Vite/React) ───────────────────────────────────────────────
+# Mirrors frontend/.gitignore — listed here too since a root .gitignore is
+# also what protects these before `git init` even reaches the frontend/
+# subdirectory's own file.
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.*.local
+
+# ── OS cruft ─────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

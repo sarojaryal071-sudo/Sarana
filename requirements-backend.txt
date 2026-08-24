@@ -1,0 +1,24 @@
+# requirements-backend.txt — minimal dependency set for the headless Sarana
+# brain (server_main.py -> main.py -> JarvisLive), derived by tracing the
+# actual import graph, not by copying requirements.txt. See the Phase 2
+# migration report for exactly which top-level import in which file
+# justifies each entry below, and for the full list of desktop-only
+# packages deliberately excluded (they were traced and confirmed to be
+# either guarded with try/except ImportError, function-local, or entirely
+# unreachable from this import graph).
+
+google-genai>=2.8.0
+sounddevice
+numpy
+psutil
+playwright
+
+# Deployment readiness: dashboard/server.py's own dependency guard
+# (_DEPS_OK) treats these as optional so a plain desktop install without
+# them still runs main.py fine — but on Render the dashboard IS the
+# product, so they are required here, not optional. python-multipart is
+# specifically what FastAPI's UploadFile needs for /api/upload.
+fastapi
+uvicorn[standard]
+cryptography
+python-multipart

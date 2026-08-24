@@ -1,0 +1,117 @@
+// src/lib/audioOut.js — consumer for the existing /ws/audio-out endpoint
+// (Phase 4). The backend streams raw PCM16 mono @ 24000 Hz — the exact
+// same bytes main.py's _play_audio() writes to the local speaker, fanned
+// out unchanged (see dashboard/server.py's broadcast_audio()). This class
+// only turns those bytes into sound in the browser; it never talks back
+// to _play_audio() or affects local playback in any way.
+
+import { wsBaseUrl } from "./api";
+
+const SAMPLE_RATE = 24000; // matches main.py's RECEIVE_SAMPLE_RATE
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 15000;
+
+export class AudioOutPlayer {
+  /**
+   * @param {string} token
+   * @param {(state: "connecting"|"open"|"closed"|"error") => void} onState
+   * @param {() => void} [onActivity] - called once per chunk played, so a
+   *   caller can infer "currently speaking" from real audio arriving.
+   */
+  constructor(token, onState, onActivity) {
+    this._token = token;
+    this._onState = onState;
+    this._onActivity = onActivity;
+    this._ws = null;
+    this._closedByUser = false;
+    this._attempt = 0;
+    this._reconnectTimer = null;
+
+    this._ctx = null;
+    this._nextStartTime = 0;
+  }
+
+  connect() {
+    this._closedByUser = false;
+    this._open();
+  }
+
+  _ensureContext() {
+    if (!this._ctx) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      this._ctx = new Ctx({ sampleRate: SAMPLE_RATE });
+      this._nextStartTime = this._ctx.currentTime;
+    }
+    if (this._ctx.state === "suspended") {
+      this._ctx.resume().catch(() => {});
+    }
+    return this._ctx;
+  }
+
+  _open() {
+    this._onState?.("connecting");
+    const url = `${wsBaseUrl()}/ws/audio-out?token=${encodeURIComponent(this._token)}`;
+    let ws;
+    try {
+      ws = new WebSocket(url);
+    } catch {
+      this._onState?.("error");
+      this._scheduleReconnect();
+      return;
+    }
+    ws.binaryType = "arraybuffer";
+    this._ws = ws;
+
+    ws.onopen = () => {
+      this._attempt = 0;
+      this._onState?.("open");
+    };
+    ws.onclose = () => {
+      this._onState?.("closed");
+      if (!this._closedByUser) this._scheduleReconnect();
+    };
+    ws.onerror = () => this._onState?.("error");
+    ws.onmessage = (event) => {
+      if (event.data instanceof ArrayBuffer) this._playChunk(event.data);
+    };
+  }
+
+  _playChunk(buf) {
+    // Requires a user gesture to have unlocked audio in most browsers —
+    // the mic/interrupt buttons and the "Connect" action both satisfy this
+    // before any audio actually needs to play.
+    this._onActivity?.();
+    const ctx = this._ensureContext();
+
+    const int16 = new Int16Array(buf);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+    const audioBuffer = ctx.createBuffer(1, float32.length, SAMPLE_RATE);
+    audioBuffer.copyToChannel(float32, 0);
+
+    const src = ctx.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(ctx.destination);
+
+    // Schedule chunks back-to-back so gaps between WS messages don't turn
+    // into audible gaps in speech, but never schedule into the past.
+    const startAt = Math.max(this._nextStartTime, ctx.currentTime);
+    src.start(startAt);
+    this._nextStartTime = startAt + audioBuffer.duration;
+  }
+
+  _scheduleReconnect() {
+    if (this._closedByUser) return;
+    clearTimeout(this._reconnectTimer);
+    const delay = Math.min(RECONNECT_BASE_MS * 2 ** this._attempt, RECONNECT_MAX_MS);
+    this._attempt += 1;
+    this._reconnectTimer = setTimeout(() => this._open(), delay);
+  }
+
+  close() {
+    this._closedByUser = true;
+    clearTimeout(this._reconnectTimer);
+    this._ws?.close();
+  }
+}
