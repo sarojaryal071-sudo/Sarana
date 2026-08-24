@@ -12,7 +12,18 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import sounddevice as sd
+
+# Render/headless fix: same reasoning as main.py's guarded import — the
+# native PortAudio library sounddevice binds to isn't installed on Render,
+# so the bare import raises OSError there (not ImportError), before any
+# runtime guard gets a chance to run. This module is imported unconditionally
+# by main.py (`from actions.screen_processor import _capture_camera,
+# _capture_screen`), so this guard is load-bearing for `from main import
+# JarvisLive` to succeed at all headlessly — not just defensive.
+try:
+    import sounddevice as sd
+except (ImportError, OSError):
+    sd = None
 
 try:
     import cv2
@@ -360,13 +371,27 @@ class _VisionSession:
             raise  
 
     async def _play_loop(self) -> None:
-        stream = sd.RawOutputStream(
-            samplerate=_RECEIVE_SAMPLE_RATE,
-            channels=_CHANNELS,
-            dtype="int16",
-            blocksize=_CHUNK_SIZE,
-        )
-        stream.start()
+        # Render/headless: this vision session already needs a local camera
+        # or screen to be worth anything, so it's not meaningfully usable
+        # headlessly regardless — but the module import must never crash,
+        # and if this task group ever does run with no local speaker, skip
+        # local playback rather than raising into the sibling TaskGroup
+        # (_send_loop/_recv_loop keep working — vision analysis and its
+        # text transcript log are unaffected by no local audio output).
+        if sd is None:
+            print("[Vision] No local speaker available — skipping local audio playback.")
+            return
+        try:
+            stream = sd.RawOutputStream(
+                samplerate=_RECEIVE_SAMPLE_RATE,
+                channels=_CHANNELS,
+                dtype="int16",
+                blocksize=_CHUNK_SIZE,
+            )
+            stream.start()
+        except Exception as e:
+            print(f"[Vision] No local speaker available, skipping local audio playback: {e}")
+            return
         try:
             while True:
                 chunk = await self._audio_in.get()

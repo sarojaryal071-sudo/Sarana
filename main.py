@@ -27,7 +27,17 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-import sounddevice as sd
+# Render/headless fix: sounddevice binds to the native PortAudio library,
+# which Render's containers don't have installed — `import sounddevice`
+# itself raises OSError there (not just stream construction), before any
+# of _listen_audio()/_play_audio()'s own runtime guards ever get a chance
+# to run. Guarding the import makes `from main import JarvisLive` (what
+# server_main.py does) succeed regardless; sd is checked at every use site
+# below, same pattern actions/screen_processor.py and core/tts.py now use.
+try:
+    import sounddevice as sd
+except (ImportError, OSError):
+    sd = None
 from google import genai
 from google.genai import types
 from core.assistant_surface import AssistantSurface
@@ -1061,6 +1071,21 @@ class JarvisLive:
         # would cancel every sibling task, including _play_audio()'s
         # browser-facing audio-out broadcast. Desktop behavior is
         # unchanged — real hardware opens exactly as before.
+        def _no_mic(reason: str) -> None:
+            # ASCII-only on purpose: this print() has crashed under a
+            # non-UTF-8 console codepage during this exact deployment-audit
+            # work (see the Phase 6 report's pre-existing-bug note for the
+            # same failure mode elsewhere in this file) — avoiding emoji
+            # here specifically sidesteps it rather than reproducing it.
+            print(f"[JARVIS] No local microphone available, continuing without it: {reason}")
+            self.ui.write_log("SYS: No local microphone detected — voice input via browser/phone mic still works.")
+
+        # sounddevice/PortAudio not installed at all (e.g. Render) — the
+        # import itself is guarded at the top of this file, sd is None here.
+        if sd is None:
+            _no_mic("sounddevice/PortAudio not available")
+            return
+
         try:
             stream = sd.InputStream(
                 samplerate=SEND_SAMPLE_RATE,
@@ -1070,13 +1095,7 @@ class JarvisLive:
                 callback=callback,
             )
         except Exception as e:
-            # ASCII-only on purpose: this new print() has crashed under a
-            # non-UTF-8 console codepage during this exact deployment-audit
-            # work (see the Phase 6 report's pre-existing-bug note for the
-            # same failure mode elsewhere in this file) — avoiding emoji
-            # here specifically sidesteps it rather than reproducing it.
-            print(f"[JARVIS] No local microphone available, continuing without it: {e}")
-            self.ui.write_log("SYS: No local microphone detected — voice input via browser/phone mic still works.")
+            _no_mic(str(e))
             return
 
         # ASCII-only prints in this function on purpose: these run
@@ -1235,21 +1254,29 @@ class JarvisLive:
         # audio-out broadcast. Desktop behavior is unchanged — real
         # hardware opens exactly as before, and stream stays a real
         # RawOutputStream for the entire session.
-        stream = None
-        try:
-            stream = sd.RawOutputStream(
-                samplerate=RECEIVE_SAMPLE_RATE,
-                channels=CHANNELS,
-                dtype="int16",
-                blocksize=CHUNK_SIZE,
-            )
-            stream.start()
-        except Exception as e:
+        def _no_speaker(reason: str) -> None:
             # ASCII-only on purpose — see the matching note in
             # _listen_audio() above for why.
-            print(f"[JARVIS] No local speaker available, streaming to browser only: {e}")
+            print(f"[JARVIS] No local speaker available, streaming to browser only: {reason}")
             self.ui.write_log("SYS: No local speaker detected — audio will still reach connected browsers.")
-            stream = None
+
+        stream = None
+        if sd is None:
+            # sounddevice/PortAudio not installed at all (e.g. Render) —
+            # the import itself is guarded at the top of this file.
+            _no_speaker("sounddevice/PortAudio not available")
+        else:
+            try:
+                stream = sd.RawOutputStream(
+                    samplerate=RECEIVE_SAMPLE_RATE,
+                    channels=CHANNELS,
+                    dtype="int16",
+                    blocksize=CHUNK_SIZE,
+                )
+                stream.start()
+            except Exception as e:
+                _no_speaker(str(e))
+                stream = None
 
         try:
             while True:

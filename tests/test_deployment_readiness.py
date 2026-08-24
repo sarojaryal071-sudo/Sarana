@@ -144,6 +144,84 @@ def test_headless_still_no_pyqt6() -> None:
     print("test_headless_still_no_pyqt6: PASS — sys.modules has no PyQt6 entries")
 
 
+# ── PortAudio-not-installed (Render): the import itself, not just stream
+# construction, must never crash — see main.py's guarded `import
+# sounddevice as sd` / `sd = None` fallback. ──────────────────────────────
+
+def test_listen_audio_returns_cleanly_when_sd_is_none() -> None:
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface())
+        with patch.object(main, "sd", None):
+            await asyncio.wait_for(jarvis._listen_audio(), timeout=2)
+    asyncio.run(_run())
+    print("test_listen_audio_returns_cleanly_when_sd_is_none: PASS")
+
+
+def test_play_audio_continues_broadcasting_when_sd_is_none() -> None:
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface())
+        jarvis.audio_in_queue = asyncio.Queue()
+        broadcasts = []
+
+        class _FakeDashboard:
+            async def broadcast_audio(self, chunk):
+                broadcasts.append(chunk)
+
+        jarvis._dashboard = _FakeDashboard()
+
+        with patch.object(main, "sd", None):
+            await jarvis.audio_in_queue.put(b"\x00\x01" * 100)
+            task = asyncio.create_task(jarvis._play_audio())
+            await asyncio.sleep(0.3)
+            task.cancel()
+            results = await asyncio.gather(task, return_exceptions=True)
+
+        result = results[0]
+        if result is not None:
+            assert isinstance(result, asyncio.CancelledError), (
+                f"_play_audio() must not raise when sd is None — got {result!r}"
+            )
+        assert broadcasts, (
+            "audio must still reach the browser via broadcast_audio() even when sd is None"
+        )
+
+    asyncio.run(_run())
+    print("test_play_audio_continues_broadcasting_when_sd_is_none: PASS")
+
+
+def test_main_module_imports_with_sounddevice_unavailable() -> None:
+    """The literal repro from the PortAudio bug report: `from main import
+    JarvisLive` must succeed even when sounddevice/PortAudio can't be
+    imported at all (OSError at import time), not just when a stream
+    later fails to open. Uses a real subprocess with a fake sounddevice
+    module shadowing the real one via PYTHONPATH — the most faithful
+    simulation of Render's actual failure short of removing PortAudio
+    from this machine.
+    """
+    import subprocess
+
+    with tempfile.TemporaryDirectory() as fake_dir:
+        Path(fake_dir, "sounddevice.py").write_text(
+            'raise OSError("PortAudio library not found")\n', encoding="utf-8"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = fake_dir + os.pathsep + env.get("PYTHONPATH", "")
+        repo_root = Path(__file__).resolve().parent.parent
+
+        result = subprocess.run(
+            [sys.executable, "-c", "from main import JarvisLive; print('IMPORT_OK')"],
+            cwd=str(repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, f"stderr:\n{result.stderr}"
+        assert "IMPORT_OK" in result.stdout, result.stdout
+
+    print("test_main_module_imports_with_sounddevice_unavailable: PASS")
+
+
 if __name__ == "__main__":
     test_env_var_takes_priority_over_json()
     test_json_fallback_still_works_without_env_var()
@@ -152,5 +230,8 @@ if __name__ == "__main__":
     test_port_respects_env_var()
     test_listen_audio_returns_cleanly_without_local_mic()
     test_play_audio_continues_broadcasting_without_local_speaker()
+    test_listen_audio_returns_cleanly_when_sd_is_none()
+    test_play_audio_continues_broadcasting_when_sd_is_none()
+    test_main_module_imports_with_sounddevice_unavailable()
     test_headless_still_no_pyqt6()
     print("\nAll deployment-readiness tests passed.")

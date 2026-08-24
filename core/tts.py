@@ -14,7 +14,19 @@ import threading
 from typing import Callable, Optional
 
 import numpy as np
-import sounddevice as sd
+
+# Render/headless fix: same reasoning as main.py's guarded import — the
+# native PortAudio library sounddevice binds to isn't installed on Render,
+# so the bare import raises OSError there. This module is currently not
+# imported by anything else in the app (main.py's active brain speaks to
+# Gemini Live directly, not through this TTS layer), so this guard is
+# precautionary rather than load-bearing today — but it's cheap, keeps this
+# file consistent with main.py/screen_processor.py's pattern, and removes a
+# landmine if this module is ever wired in later.
+try:
+    import sounddevice as sd
+except (ImportError, OSError):
+    sd = None
 
 
 
@@ -81,12 +93,18 @@ def _play_np(samples, sample_rate: int) -> None:
     """Play float32 mono (or stereo) audio via sounddevice.
     Accepts numpy arrays or PyTorch tensors.
     """
+    if sd is None:
+        print("[TTS] No local audio output available — sounddevice/PortAudio not installed.")
+        return
     sd.play(_to_numpy(samples), sample_rate)
     sd.wait()
 
 
 def _play_audio_bytes(audio_bytes: bytes) -> None:
     """Decode MP3/WAV/OGG bytes and play via sounddevice (uses miniaudio)."""
+    if sd is None:
+        print("[TTS] No local audio output available — sounddevice/PortAudio not installed.")
+        return
     import miniaudio
     decoded = miniaudio.decode(
         audio_bytes,
@@ -417,7 +435,8 @@ class TTSPlayer:
                 on_done()
 
     def stop(self) -> None:
-        sd.stop()
+        if sd is not None:
+            sd.stop()
         with self._lock:
             self._playing = False
 
