@@ -61,6 +61,26 @@ it is not a new or weaker auth path, just a headless-friendly way to reach
 the console output the desktop UI already shows visually, since
 server_main.py has no window to click a button in.
 
+── Production CORS fix ─────────────────────────────────────────────────────
+
+Live-verified bug: the deployed Vercel frontend (https://sarana-psi.vercel.app)
+got no Access-Control-Allow-Origin header from the Render backend at all
+(confirmed with a direct curl against the live URL, not assumed) — the
+CORSMiddleware mechanism itself was correct, but nothing had actually put
+that origin into the allowlist yet. _cors_allowed_origins() now:
+  1. Accepts EITHER SARANA_ALLOWED_ORIGINS (plural, the originally
+     documented name) OR SARANA_ALLOWED_ORIGIN (singular) — removes the
+     exact-name-guessing risk as a failure mode entirely.
+  2. Strips whitespace AND a trailing slash from every configured origin —
+     "https://x.vercel.app/" (trailing slash) silently would never match
+     "https://x.vercel.app" under CORS's exact-string comparison, a very
+     common way to configure this "correctly" and still have it fail.
+  3. Includes this specific confirmed-production origin as a baked-in
+     default, alongside the existing localhost dev defaults — so this
+     already-known-real origin works even before/without Render's env var
+     being set correctly, while the env var remains the primary, documented
+     way to add or change a production origin later.
+
 ── Phase 8 additions ────────────────────────────────────────────────────────
 
 POST /login/username — lightweight, temporary username IDENTIFICATION, not
@@ -478,22 +498,42 @@ def _read(name: str) -> str:
 _DEFAULT_DEV_ORIGINS = [
     "http://localhost:5173", "http://127.0.0.1:5173",   # Vite default
     "http://localhost:3000", "http://127.0.0.1:3000",   # common alt dev port
+    "https://sarana-psi.vercel.app",                    # confirmed production frontend — see module docstring
 ]
+
+
+def _normalize_origin(origin: str) -> str:
+    """CORS origin comparison is an exact string match — a trailing slash
+    or stray whitespace silently makes an otherwise-"correct" value never
+    match. Strip both so a value like "https://x.vercel.app/ " still works."""
+    return origin.strip().rstrip("/")
 
 
 def _cors_allowed_origins() -> list[str]:
     """Explicit origin allowlist for the plain-HTTP API routes (not the
     WebSocket routes — browsers don't apply CORS to WS handshakes).
-    Defaults to common local Vite/dev-server ports; SARANA_ALLOWED_ORIGINS
-    (comma-separated) overrides/extends this for a real deployed frontend
-    origin later. Never a wildcard, so this never broadly opens the
-    production backend to arbitrary origins.
+    Defaults to common local Vite/dev-server ports plus the confirmed
+    production frontend; SARANA_ALLOWED_ORIGINS (comma-separated) — or its
+    singular alias SARANA_ALLOWED_ORIGIN, accepted for the same purpose —
+    extends this for whichever origin(s) come next. Never a wildcard, so
+    this never broadly opens the production backend to arbitrary origins.
     """
-    extra = os.environ.get("SARANA_ALLOWED_ORIGINS", "")
-    origins = list(_DEFAULT_DEV_ORIGINS)
+    extra = (
+        os.environ.get("SARANA_ALLOWED_ORIGINS")
+        or os.environ.get("SARANA_ALLOWED_ORIGIN")
+        or ""
+    )
+    origins = [_normalize_origin(o) for o in _DEFAULT_DEV_ORIGINS]
     if extra:
-        origins += [o.strip() for o in extra.split(",") if o.strip()]
-    return origins
+        origins += [_normalize_origin(o) for o in extra.split(",") if o.strip()]
+    # Dedupe while preserving order (a user-supplied origin may repeat a default).
+    seen: set[str] = set()
+    deduped = []
+    for o in origins:
+        if o not in seen:
+            seen.add(o)
+            deduped.append(o)
+    return deduped
 
 
 # ── DashboardServer ───────────────────────────────────────────────────────────

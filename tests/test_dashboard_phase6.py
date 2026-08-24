@@ -10,8 +10,10 @@ that contract, not a reason to re-litigate it.
 Run with:
     .venv/Scripts/python.exe -m tests.test_dashboard_phase6
 """
+import os
 import sys
 import time
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -55,6 +57,61 @@ def test_cors_origin_list_has_no_wildcard() -> None:
     assert "*" not in origins, origins
     assert any("5173" in o for o in origins), origins
     print(f"test_cors_origin_list_has_no_wildcard: PASS — {origins}")
+
+
+# ── Production CORS fix (live bug: sarana-psi.vercel.app got no
+# Access-Control-Allow-Origin header at all) ─────────────────────────────
+
+def test_cors_allows_confirmed_production_origin_by_default() -> None:
+    """The live, confirmed Vercel frontend must work out of the box, not
+    only if Render's env var happens to be set/spelled correctly."""
+    server = _server_with_token("test-token-cors-prod")
+    client = TestClient(server.app)
+    resp = client.get("/api/session", headers={"Origin": "https://sarana-psi.vercel.app"})
+    assert resp.status_code == 200
+    assert resp.headers.get("access-control-allow-origin") == "https://sarana-psi.vercel.app", resp.headers
+    print("test_cors_allows_confirmed_production_origin_by_default: PASS")
+
+
+def test_cors_accepts_singular_env_var_alias() -> None:
+    """SARANA_ALLOWED_ORIGIN (singular) must work exactly like the
+    originally-documented SARANA_ALLOWED_ORIGINS (plural) — removes the
+    exact-name-guessing risk as a way for this to silently misconfigure."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SARANA_ALLOWED_ORIGIN")}
+    env["SARANA_ALLOWED_ORIGIN"] = "https://singular-alias-test.example.com"
+    with patch.dict(os.environ, env, clear=True):
+        origins = _cors_allowed_origins()
+    assert "https://singular-alias-test.example.com" in origins, origins
+    print("test_cors_accepts_singular_env_var_alias: PASS")
+
+
+def test_cors_normalizes_trailing_slash() -> None:
+    """A configured origin with a trailing slash must still match — CORS
+    origin comparison is an exact string match, so this is a real, common
+    way to configure it "correctly" and have it silently never match."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SARANA_ALLOWED_ORIGIN")}
+    env["SARANA_ALLOWED_ORIGINS"] = "https://trailing-slash-test.example.com/"
+    with patch.dict(os.environ, env, clear=True):
+        origins = _cors_allowed_origins()
+    assert "https://trailing-slash-test.example.com" in origins, origins
+    assert "https://trailing-slash-test.example.com/" not in origins, origins
+    print("test_cors_normalizes_trailing_slash: PASS")
+
+
+def test_cors_headers_present_on_error_response() -> None:
+    """CORSMiddleware wraps the whole response cycle, including error
+    responses — /api/command without auth (401) from an allowed origin
+    must still carry the CORS header, not just the 200 success path."""
+    server = _server_with_token("test-token-cors-err")
+    client = TestClient(server.app)
+    resp = client.post(
+        "/api/command",
+        json={"text": "hello"},
+        headers={"Origin": "https://sarana-psi.vercel.app"},
+    )
+    assert resp.status_code == 401, resp.text
+    assert resp.headers.get("access-control-allow-origin") == "https://sarana-psi.vercel.app", resp.headers
+    print("test_cors_headers_present_on_error_response: PASS")
 
 
 def test_session_endpoint_matches_frontend_expectations() -> None:
@@ -125,6 +182,10 @@ if __name__ == "__main__":
     test_cors_allows_configured_dev_origin()
     test_cors_rejects_unlisted_origin()
     test_cors_origin_list_has_no_wildcard()
+    test_cors_allows_confirmed_production_origin_by_default()
+    test_cors_accepts_singular_env_var_alias()
+    test_cors_normalizes_trailing_slash()
+    test_cors_headers_present_on_error_response()
     test_session_endpoint_matches_frontend_expectations()
     test_ws_command_round_trip_still_works()
     test_ws_rejects_bad_token_closes_immediately()
