@@ -3,11 +3,12 @@
 // two entry points into the same session mechanism, both reusing existing/
 // added backend routes unchanged:
 //
-//   Username (default/primary) — POST /login/username (Phase 8/9).
-//   Lightweight IDENTIFICATION, not authentication: any non-empty name is
-//   accepted, no registration, no password. Logging in also starts Jarvis
-//   automatically (Phase 9 — see dashboard/server.py's /login/username) —
-//   there is no separate WAKE step in this flow.
+//   Username + PIN (default/primary) — POST /login/username, authenticated
+//   against the backend's local SQLite profile store (users/user_db.py) —
+//   a fixed, hand-seeded set of known profiles, not open registration.
+//   Logging in also starts Jarvis automatically (Phase 9 — see dashboard/
+//   server.py's /login/username) — there is no separate WAKE step in this
+//   flow.
 //
 //   Remote Access (secondary, tucked behind a small link) — POST /login
 //   (Phase 3, the original PIN pairing flow), completely unchanged. This is
@@ -52,22 +53,26 @@ export function clearStoredToken() {
 
 function UsernameForm({ assistantName, onAuthenticated, error }) {
   const [username, setUsername] = useState("");
+  const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState(null);
 
   async function submit(e) {
     e.preventDefault();
     const trimmed = username.trim();
-    if (!trimmed || busy) return;
+    if (!trimmed || !pin.trim() || busy) return;
     setBusy(true);
     setLocalError(null);
     try {
-      const res = await loginWithUsername(trimmed);
+      const res = await loginWithUsername(trimmed, pin.trim());
       if (res?.ok && res.token) {
         const session = { token: res.token, username: res.username, authMode: "username" };
         storeSession(session);
         onAuthenticated(session);
       } else {
+        // Backend deliberately returns one generic message for both an
+        // unknown username and a wrong PIN — see dashboard/server.py's
+        // /login/username — so nothing more specific is ever shown here.
         setLocalError(res?.error || "Could not start a session");
       }
     } catch (e) {
@@ -89,8 +94,18 @@ function UsernameForm({ assistantName, onAuthenticated, error }) {
         disabled={busy}
         className="login-name-input"
       />
+      <p className="login-label">PIN</p>
+      <input
+        value={pin}
+        onChange={(e) => setPin(e.target.value)}
+        placeholder="••••"
+        maxLength={12}
+        type="password"
+        inputMode="numeric"
+        disabled={busy}
+      />
       {(localError || error) && <div className="error">{localError || error}</div>}
-      <button className="btn primary" type="submit" disabled={busy || !username.trim()}>
+      <button className="btn primary" type="submit" disabled={busy || !username.trim() || !pin.trim()}>
         {busy ? "LOGGING IN…" : "▸ LOGIN"}
       </button>
     </form>
@@ -154,7 +169,7 @@ export default function LoginScreen({ assistantName, onAuthenticated, error }) {
         <h1>◈ {mode === "username" ? "USER LOGIN" : "REMOTE ACCESS"}</h1>
         {mode === "username" && (
           <>
-            <p>Enter your name to start {assistantName || "Sarana"}.</p>
+            <p>Enter your name and PIN to start {assistantName || "Sarana"}.</p>
             <UsernameForm assistantName={assistantName} onAuthenticated={onAuthenticated} error={error} />
             <button type="button" className="login-alt-link" onClick={() => setMode("remote")}>
               ◉ Remote Access — connect to a specific desktop instead

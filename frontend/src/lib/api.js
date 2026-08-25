@@ -55,16 +55,18 @@ export async function loginWithPin(pin) {
   return asJson(resp);
 }
 
-/** POST /login/username — Phase 8: lightweight username IDENTIFICATION,
- * not authentication (no password, no registration). Returns {ok, token,
- * username}. Distinct from loginWithPin: this never implies control of a
- * particular physical desktop.
+/** POST /login/username — username+PIN login against the backend's local
+ * SQLite user/profile store (see users/user_db.py). Returns {ok, token,
+ * username} on success — the PIN itself, and every other profile field,
+ * stay server-side; this never sees or returns a password hash or the
+ * rest of the profile. Distinct from loginWithPin: this never implies
+ * control of a particular physical desktop.
  *
  * Also sends the browser's own IANA timezone (its native detection
  * mechanism — no geolocation, no hardcoded zone) so the backend reports
  * the user's actual device-local time instead of the server's — see
  * dashboard/server.py's /login/username and main.py's _local_now(). */
-export async function loginWithUsername(username) {
+export async function loginWithUsername(username, pin) {
   let timezone;
   try {
     timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -74,7 +76,7 @@ export async function loginWithUsername(username) {
   const resp = await fetch(`${BACKEND_URL}/login/username`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, timezone }),
+    body: JSON.stringify({ username, pin, timezone }),
   });
   return asJson(resp);
 }

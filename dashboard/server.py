@@ -100,6 +100,21 @@ username login IS the start signal for the web flow now, no separate WAKE
 press needed. PIN-based Remote Access (/login, /auto-login, /api/device-
 login) is intentionally untouched — it keeps requiring its own explicit
 start where that matters.
+
+── SQLite user/profile addition ────────────────────────────────────────────
+
+/login/username is now real authentication against users/user_db.py's local
+SQLite store (data/sarana.db), instead of accepting any non-empty name:
+requires a matching "pin" field, verified with a salted PBKDF2 hash — see
+that module's docstring for schema/seeding. set_username_callback() keeps
+its exact old wiring/meaning (fires with the resolved display name, still
+just a string) so everything built on it (ADDRESS clause, greeting re-arm)
+is untouched; a new set_profile_callback() fires separately with the full
+structured profile dict (nickname/pronunciation/gender/assistant_name/
+voice_preference/language_preference — never pin_hash) for main.py's new
+[USER PROFILE] context block. The response shape returned to the browser
+is unchanged ({"ok", "token", "username"}) — profile details never reach
+the frontend.
 """
 
 import asyncio
@@ -112,6 +127,8 @@ import socket
 import string
 import time
 from pathlib import Path
+
+from users import user_db
 
 _DEPS_OK = False
 try:
@@ -541,6 +558,12 @@ def _cors_allowed_origins() -> list[str]:
 class DashboardServer:
 
     def __init__(self):
+        # Idempotent: creates data/sarana.db + seeds the known profiles on
+        # first run, no-ops (preserving existing data) on every run after —
+        # see users/user_db.py. Safe to call unconditionally here since a
+        # DashboardServer is constructed exactly once per process, both on
+        # desktop and headless/web.
+        user_db.init_db()
         self._ip                          = _local_ip()
         self._tokens: set[str]            = set()
         self._token_keys: dict[str, str]  = {}   # auth_token → session_key
@@ -555,6 +578,7 @@ class DashboardServer:
         self._username_callback           = None   # Phase 8: fires on a successful /login/username
         self._interrupt_callback          = None   # web interrupt control: fires main.py's interrupt()
         self._timezone_callback           = None   # fires on a successful /login/username with a timezone
+        self._profile_callback            = None   # fires with the full users/user_db.py profile dict
         self._session_timezones: dict[str, str] = {}   # token → IANA timezone (username logins only)
         # Phase 8: lightweight session bookkeeping — which auth path issued a
         # token, and (for username logins only) which name. Not a user
@@ -644,6 +668,16 @@ class DashboardServer:
         JarvisLive can use the device's actual local time instead of the
         server's (see main.py's _local_now())."""
         self._timezone_callback = fn
+
+    def set_profile_callback(self, fn) -> None:
+        """fn(profile: dict) is called on a successful /login/username,
+        with the authenticated user's full users/user_db.py profile
+        (nickname, pronunciation, gender, assistant_name, voice_preference,
+        language_preference — never pin_hash). Separate from
+        set_username_callback(), which keeps firing with just the resolved
+        display-name string for the existing ADDRESS-clause/greeting
+        wiring (see main.py's _set_web_username)."""
+        self._profile_callback = fn
 
     # ── broadcast ────────────────────────────────────────────────────────
 
@@ -753,25 +787,31 @@ class DashboardServer:
 
         @app.post("/login/username")
         async def login_username(req: Request):
-            """Phase 8: lightweight, temporary username IDENTIFICATION — not
-            authentication. Any non-empty username is accepted; there is no
-            registration, no password, no account. This exists so the
-            current Jarvis session can address the user by name (see
-            main.py's set_username_callback wiring / _build_config's ADDRESS
-            clause) — it does not grant control of any particular physical
-            desktop the way a Remote Access PIN does (see has_desktop_
-            connected()/_client_roles, untouched by this route).
+            """Username+PIN login, authenticated against the local SQLite
+            profile store (users/user_db.py) — a fixed, hand-seeded set of
+            known profiles, not open registration. Distinct from Remote
+            Access: a username login never implies control of any
+            particular physical desktop (see has_desktop_connected()/
+            _client_roles, untouched by this route).
 
             Reuses the exact same token mechanism /login (PIN) already
             uses — the returned token works unchanged for /ws, /api/command,
             /api/wake, /ws/audio-out, and /ws/phone-audio.
 
-            The character allowlist below exists specifically because this
-            value is woven directly into JarvisLive's Gemini system
-            instruction (not just spoken back as conversation) — restricting
-            it to name-shaped text is a cheap, worthwhile guard against
-            embedding prompt-injection payloads via the "username" field,
-            even though this endpoint is not meant to be hardened auth.
+            The username character allowlist below exists specifically
+            because the resolved display name is woven directly into
+            JarvisLive's Gemini system instruction (not just spoken back as
+            conversation) — restricting it to name-shaped text is a cheap,
+            worthwhile guard against embedding prompt-injection payloads via
+            the "username" field.
+
+            PIN failures and unknown usernames return the exact same 401
+            error — see users/user_db.py's authenticate() docstring for why
+            (never let a client distinguish "no such user" from "wrong
+            PIN"). The response body only ever contains the token and the
+            resolved display name — pin_hash and the rest of the profile
+            never reach the client (see set_profile_callback() for how the
+            rest of the profile reaches JarvisLive instead, server-side).
 
             Optional "timezone" field: the browser's own IANA timezone name
             (Intl.DateTimeFormat().resolvedOptions().timeZone), used so
@@ -797,6 +837,23 @@ class DashboardServer:
                     status_code=400,
                 )
 
+            pin = str(body.get("pin", "")).strip()
+            if not pin:
+                return JSONResponse({"ok": False, "error": "PIN is required"}, status_code=400)
+
+            profile = user_db.authenticate(username, pin)
+            if profile is None:
+                # Deliberately generic — never reveals whether the username
+                # itself was even recognized (see user_db.authenticate()).
+                return JSONResponse({"ok": False, "error": "Invalid username or PIN"}, status_code=401)
+
+            # What JarvisLive actually calls the user / uses for TTS
+            # addressing — pronunciation (a phonetic spelling, when the
+            # profile has one) beats the plain nickname, which beats the
+            # canonical username. Never the raw login alias typed in
+            # (Bandana/Radhe both still address as "Sana"/"Saanaa").
+            display_name = profile["pronunciation"] or profile["nickname"] or profile["username"]
+
             timezone = str(body.get("timezone", "")).strip()
             # IANA names are things like "Asia/Kathmandu" or "UTC" — loose
             # shape check only; main.py does the real validity check via
@@ -807,12 +864,14 @@ class DashboardServer:
             tok = secrets.token_urlsafe(32)
             self._tokens.add(tok)
             self._session_auth_mode[tok] = "username"
-            self._session_usernames[tok] = username
+            self._session_usernames[tok] = display_name
             if timezone:
                 self._session_timezones[tok] = timezone
 
             if self._username_callback:
-                self._username_callback(username)
+                self._username_callback(display_name)
+            if self._profile_callback:
+                self._profile_callback(profile)
             if timezone and self._timezone_callback:
                 self._timezone_callback(timezone)
             # Phase 9: logging in IS the start signal for this flow — the
@@ -822,9 +881,9 @@ class DashboardServer:
             if self._wake_callback:
                 self._wake_callback()
             asyncio.create_task(self.broadcast(
-                {"type": "sys", "text": f"{username} connected."}
+                {"type": "sys", "text": f"{display_name} connected."}
             ))
-            return JSONResponse({"ok": True, "token": tok, "username": username})
+            return JSONResponse({"ok": True, "token": tok, "username": display_name})
 
         @app.get("/auto-login")
         async def auto_login(key: str = ""):

@@ -137,6 +137,26 @@ def _time_of_day_category(hour: int) -> str:
         return "evening"
     return "night"              # 21:00-23:59
 
+
+# users/user_db.py's voice_preference -> a Gemini Live prebuilt voice name.
+# Explicit preference, NOT derived from gender (see users/user_db.py's seed
+# data: Saanaa's profile is female with voice_preference "Male", Saroj's is
+# male with voice_preference "Female" — the map only ever looks at this
+# value). "Charon" stays the default for no-preference/desktop sessions,
+# identical to the hardcoded value this replaces.
+_VOICE_PREFERENCE_MAP = {
+    "male": "Charon",
+    "female": "Kore",
+}
+_DEFAULT_VOICE_NAME = "Charon"
+
+
+def _voice_name_for_preference(preference: str | None) -> str:
+    if not preference:
+        return _DEFAULT_VOICE_NAME
+    return _VOICE_PREFERENCE_MAP.get(preference.strip().lower(), _DEFAULT_VOICE_NAME)
+
+
 TOOL_DECLARATIONS = [
     {
         "name": "open_app",
@@ -612,6 +632,15 @@ class JarvisLive:
         # reads the local machine's own clock/timezone correctly and needs
         # no override (see _local_now()).
         self._web_timezone: str | None = None
+        # Authenticated SQLite profile (users/user_db.py), if the current
+        # web session came from a successful username+PIN login — set via
+        # set_profile_callback()/_set_web_profile(). None on desktop and on
+        # any session that hasn't logged in with a known profile. Consumed
+        # by _build_config() for the [USER PROFILE] block, a personalized
+        # assistant_name, language_preference, and voice_preference —
+        # never for authentication itself, which is entirely dashboard/
+        # server.py's job before this is ever set.
+        self._web_profile: dict | None = None
         # Web login greeting (see _set_web_username()/run()): "session" for
         # the web surface means "a login", not "a process launch" the way it
         # does for desktop's own _briefing_sent — a long-lived Render process
@@ -785,6 +814,13 @@ class JarvisLive:
             self._asst_name = (_cfg.get("assistant_name") or "SARANA").strip()
         except Exception:
             self._asst_name = "SARANA"
+        # Personalized assistant identity (users/user_db.py's profile) takes
+        # priority over local config, same "web session overrides local
+        # config" pattern already used for the user's own name below —
+        # profiles without an assistant_name (or no profile at all, e.g.
+        # desktop) leave the existing default untouched.
+        if self._web_profile and self._web_profile.get("assistant_name"):
+            self._asst_name = self._web_profile["assistant_name"].strip() or self._asst_name
         _user_name = self._current_user_name()
 
         memory     = load_memory()
@@ -859,6 +895,44 @@ class JarvisLive:
             "entire message in another language — a single mixed-language word "
             "or phrase is not that."
         )
+        # Integrates users/user_db.py's language_preference into this SAME
+        # LANGUAGE line rather than a second language mechanism — a no-op
+        # for the current seed users (both "Nepali", already the default
+        # above), but a real per-profile override for any future profile
+        # whose stored preference differs.
+        if self._web_profile and self._web_profile.get("language_preference"):
+            _pref = self._web_profile["language_preference"].strip()
+            if _pref and _pref.lower() != "nepali":
+                _lang += (
+                    f" This user's stored language preference is {_pref} — use "
+                    f"it as the default for this session instead of Nepali, "
+                    f"unless they explicitly ask otherwise."
+                )
+
+        # [USER PROFILE]: structured context from the authenticated
+        # users/user_db.py profile, when a web session logged in with one
+        # (see _set_web_profile()) — never hand-duplicated into the prompt
+        # separately from the database. Omitted entirely (no empty section)
+        # on desktop or an unauthenticated web session.
+        _profile_ctx = ""
+        if self._web_profile:
+            p = self._web_profile
+            _lines = ["[USER PROFILE]"]
+            if p.get("nickname"):
+                _lines.append(f"Nickname: {p['nickname']}")
+            if p.get("pronunciation"):
+                _lines.append(f"Pronunciation: {p['pronunciation']}")
+            if p.get("gender"):
+                _lines.append(f"Gender: {p['gender']}")
+            if p.get("assistant_name"):
+                _lines.append(f"Assistant name: {p['assistant_name']}")
+            if p.get("voice_preference"):
+                _lines.append(f"Voice preference: {p['voice_preference']}")
+            if p.get("language_preference"):
+                _lines.append(f"Language preference: {p['language_preference']}")
+            if len(_lines) > 1:   # header alone would be a pointless empty section
+                _profile_ctx = "\n".join(_lines) + "\n\n"
+
         identity_ctx = (
             f"[IDENTITY]\n"
             f"Your name is {self._asst_name}. "
@@ -868,6 +942,8 @@ class JarvisLive:
         )
 
         parts = [time_ctx, identity_ctx]
+        if _profile_ctx:
+            parts.append(_profile_ctx)
         if mem_str:
             parts.append(mem_str)
         parts.append(sys_prompt)
@@ -887,7 +963,9 @@ class JarvisLive:
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon"
+                        voice_name=_voice_name_for_preference(
+                            self._web_profile.get("voice_preference") if self._web_profile else None
+                        )
                     )
                 )
             ),
@@ -1643,6 +1721,17 @@ class JarvisLive:
         else:
             self._pending_web_greeting = True
 
+    def _set_web_profile(self, profile: dict) -> None:
+        """Fired by dashboard/server.py's /login/username via
+        set_profile_callback(), with the authenticated users/user_db.py
+        profile (never includes pin_hash — see that module). Purely
+        additive context for _build_config() ([USER PROFILE] block,
+        personalized assistant_name, language_preference note, voice_
+        preference) — does not itself touch the ADDRESS clause or the
+        greeting; that's still set_username_callback()/_set_web_username()'s
+        job, fired separately by the same login (see dashboard/server.py)."""
+        self._web_profile = profile
+
     def _set_web_timezone(self, tz_name: str) -> None:
         """Fired by dashboard/server.py's /login/username via
         set_timezone_callback(), given the IANA zone name the browser's own
@@ -1720,6 +1809,9 @@ class JarvisLive:
             # session's username (from /login/username) reaches JarvisLive
             # here, exactly like set_connect_callback/set_wake_callback.
             self._dashboard.set_username_callback(self._set_web_username)
+            # SQLite user/profile system: the authenticated profile reaches
+            # JarvisLive the same wiring way as everything else above.
+            self._dashboard.set_profile_callback(self._set_web_profile)
             # Device-local time fix: browser-reported IANA timezone reaches
             # _local_now() the same way username/interrupt already reach
             # their own JarvisLive methods.

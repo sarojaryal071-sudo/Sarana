@@ -2,8 +2,9 @@
 tests/test_dashboard_phase8.py — Phase 8 username-login tests.
 
 Covers:
-  - POST /login/username: accepted, rejected (empty/whitespace/too long/
-    disallowed characters), token usable on /ws
+  - POST /login/username: accepted (with a valid seeded username+PIN),
+    rejected (empty/whitespace/too long/disallowed characters — checked
+    before any DB lookup), token usable on /ws
   - existing PIN /login (Remote Access) still works unchanged
   - a username-issued token distinguishes itself in dashboard bookkeeping
     (_session_auth_mode / _session_usernames) from a PIN-issued one
@@ -11,6 +12,12 @@ Covers:
     without ever touching config/api_keys.json or hardcoding a name
   - Phase 7 regression: username login alone does NOT start the connect
     loop / Gemini — only the existing wake mechanism does
+
+Since the SQLite user/profile system, /login/username requires a real
+seeded username+PIN (see users/user_db.py) — "Saroj"/"2057" is used
+throughout as the known-good credential; exhaustive DB/alias/PIN
+correctness coverage lives in tests/test_user_db.py and
+tests/test_login_profile.py instead of being duplicated here.
 
 Run with:
     .venv/Scripts/python.exe -m tests.test_dashboard_phase8
@@ -38,7 +45,7 @@ def _server() -> DashboardServer:
 def test_username_login_accepted() -> None:
     server = _server()
     client = TestClient(server.app)
-    resp = client.post("/login/username", json={"username": "Saroj"})
+    resp = client.post("/login/username", json={"username": "Saroj", "pin": "2057"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["ok"] is True
@@ -49,14 +56,32 @@ def test_username_login_accepted() -> None:
     print("test_username_login_accepted: PASS")
 
 
-def test_username_login_accepts_a_different_name_too() -> None:
-    """No registration check — any non-empty name is accepted, per spec."""
+def test_username_login_rejects_unknown_username() -> None:
+    """Now real authentication against users/user_db.py — an unrecognized
+    username (even if perfectly shaped) is rejected, unlike the old
+    accept-anything behavior this endpoint used to have."""
     server = _server()
     client = TestClient(server.app)
-    resp = client.post("/login/username", json={"username": "Alex"})
-    assert resp.status_code == 200
-    assert resp.json()["username"] == "Alex"
-    print("test_username_login_accepts_a_different_name_too: PASS")
+    resp = client.post("/login/username", json={"username": "Alex", "pin": "1234"})
+    assert resp.status_code == 401
+    assert resp.json()["ok"] is False
+    print("test_username_login_rejects_unknown_username: PASS")
+
+
+def test_username_login_rejects_wrong_pin() -> None:
+    server = _server()
+    client = TestClient(server.app)
+    resp = client.post("/login/username", json={"username": "Saroj", "pin": "0000"})
+    assert resp.status_code == 401
+    print("test_username_login_rejects_wrong_pin: PASS")
+
+
+def test_username_login_rejects_missing_pin() -> None:
+    server = _server()
+    client = TestClient(server.app)
+    resp = client.post("/login/username", json={"username": "Saroj"})
+    assert resp.status_code == 400
+    print("test_username_login_rejects_missing_pin: PASS")
 
 
 def test_username_login_rejects_empty() -> None:
@@ -79,7 +104,7 @@ def test_username_login_rejects_whitespace_only() -> None:
 def test_username_login_trims_whitespace() -> None:
     server = _server()
     client = TestClient(server.app)
-    resp = client.post("/login/username", json={"username": "  Saroj  "})
+    resp = client.post("/login/username", json={"username": "  Saroj  ", "pin": "2057"})
     assert resp.status_code == 200
     assert resp.json()["username"] == "Saroj"
     print("test_username_login_trims_whitespace: PASS")
@@ -108,7 +133,7 @@ def test_username_login_rejects_disallowed_characters() -> None:
 def test_username_token_works_on_ws() -> None:
     server = _server()
     client = TestClient(server.app)
-    token = client.post("/login/username", json={"username": "Saroj"}).json()["token"]
+    token = client.post("/login/username", json={"username": "Saroj", "pin": "2057"}).json()["token"]
     with client.websocket_connect(f"/ws?token={token}") as ws:
         ws.send_json({"type": "command", "text": "hello from username session"})
         time.sleep(0.05)
@@ -122,9 +147,24 @@ def test_username_callback_fires() -> None:
     received = []
     server.set_username_callback(lambda name: received.append(name))
     client = TestClient(server.app)
-    client.post("/login/username", json={"username": "Saroj"})
+    client.post("/login/username", json={"username": "Saroj", "pin": "2057"})
     assert received == ["Saroj"]
     print("test_username_callback_fires: PASS")
+
+
+def test_profile_callback_fires_with_full_profile_no_pin_hash() -> None:
+    server = _server()
+    received = []
+    server.set_profile_callback(lambda profile: received.append(profile))
+    client = TestClient(server.app)
+    client.post("/login/username", json={"username": "Saroj", "pin": "2057"})
+    assert len(received) == 1
+    profile = received[0]
+    assert profile["assistant_name"] == "Sara"
+    assert profile["voice_preference"] == "Female"
+    assert profile["language_preference"] == "Nepali"
+    assert "pin_hash" not in profile
+    print("test_profile_callback_fires_with_full_profile_no_pin_hash: PASS")
 
 
 # ── existing Remote Access (PIN) — unchanged ─────────────────────────────
@@ -224,7 +264,9 @@ def test_headless_still_no_pyqt6() -> None:
 
 if __name__ == "__main__":
     test_username_login_accepted()
-    test_username_login_accepts_a_different_name_too()
+    test_username_login_rejects_unknown_username()
+    test_username_login_rejects_wrong_pin()
+    test_username_login_rejects_missing_pin()
     test_username_login_rejects_empty()
     test_username_login_rejects_whitespace_only()
     test_username_login_trims_whitespace()
@@ -232,6 +274,7 @@ if __name__ == "__main__":
     test_username_login_rejects_disallowed_characters()
     test_username_token_works_on_ws()
     test_username_callback_fires()
+    test_profile_callback_fires_with_full_profile_no_pin_hash()
     test_pin_login_still_works_unchanged()
     test_username_reaches_build_config_address_clause()
     test_no_web_username_falls_back_to_config_exactly_as_before()

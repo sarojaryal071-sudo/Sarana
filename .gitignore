@@ -28,6 +28,12 @@ config/certs/
 # template — keep it local, don't ship it to a public repo.
 memory/long_term.json
 
+# data/sarana.db is the local SQLite user/profile store (users/user_db.py)
+# — created and seeded automatically at startup, holds pin_hash values.
+# Never ship a live database file to a public repo.
+data/*.db
+data/*.db-journal
+
 # user-uploaded files (dashboard/server.py's /api/upload target)
 uploads/
 

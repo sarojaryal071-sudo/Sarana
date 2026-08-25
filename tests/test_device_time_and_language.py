@@ -135,7 +135,10 @@ def test_login_username_stores_and_forwards_valid_timezone() -> None:
     server.set_timezone_callback(lambda tz: received.append(tz))
     client = TestClient(server.app)
 
-    resp = client.post("/login/username", json={"username": "Saroj", "timezone": "Asia/Kathmandu"})
+    resp = client.post(
+        "/login/username",
+        json={"username": "Saroj", "pin": "2057", "timezone": "Asia/Kathmandu"},
+    )
     assert resp.status_code == 200
     token = resp.json()["token"]
     assert server._session_timezones.get(token) == "Asia/Kathmandu"
@@ -149,7 +152,10 @@ def test_login_username_ignores_malformed_timezone_without_failing_login() -> No
     server.set_timezone_callback(lambda tz: received.append(tz))
     client = TestClient(server.app)
 
-    resp = client.post("/login/username", json={"username": "Saroj", "timezone": "<script>bad</script>"})
+    resp = client.post(
+        "/login/username",
+        json={"username": "Saroj", "pin": "2057", "timezone": "<script>bad</script>"},
+    )
     assert resp.status_code == 200, "a malformed timezone must not break login itself"
     token = resp.json()["token"]
     assert token not in server._session_timezones
@@ -158,11 +164,11 @@ def test_login_username_ignores_malformed_timezone_without_failing_login() -> No
 
 
 def test_login_username_works_unchanged_without_timezone_field() -> None:
-    """Backward compatible — an older/unmodified client that never sends
-    "timezone" at all must still log in exactly as before."""
+    """Backward compatible — a client that never sends "timezone" at all
+    (it's optional) must still log in exactly as before."""
     server = DashboardServer()
     client = TestClient(server.app)
-    resp = client.post("/login/username", json={"username": "Saroj"})
+    resp = client.post("/login/username", json={"username": "Saroj", "pin": "2057"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     print("test_login_username_works_unchanged_without_timezone_field: PASS")

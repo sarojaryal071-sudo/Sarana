@@ -69,6 +69,35 @@ safe to run.
 | `PORT` | Not needed | Which port `dashboard/server.py` binds to | — | No | **Yes** — Render sets this automatically; don't configure it manually |
 | `SARANA_ALLOWED_ORIGINS` | Required once Vercel is deployed | Additional CORS origin(s) `_cors_allowed_origins()` accepts, on top of the built-in localhost dev origins | `https://your-vercel-domain.vercel.app` | No — public URL | No |
 
+### SQLite persistence on Render
+
+`users/user_db.py` stores the username/PIN profile store at `data/sarana.db`,
+a plain local file — deliberately no external database (see that module's
+docstring). This repo's current Render setup is a plain **Web Service with
+no persistent disk configured** (there's no `render.yaml`/disk mount here —
+see "Why no `render.yaml`" below), and Render's default filesystem for a
+Web Service is **ephemeral**: it does not survive a redeploy, and on some
+plans not even a restart.
+
+Practical effect today: `init_db()` runs on every process start and reseeds
+the two known profiles (Sana/Bandana/Radhe and Saroj) if they're missing —
+so the app never breaks from a wiped disk, it just silently resets back to
+the seed data. That's fine for this feature's current scope (a fixed,
+hand-seeded profile set — reseeding is a no-op in the common case), but it
+means **any future data written to this database beyond the seed users
+(new profiles, edited preferences) will NOT survive a Render redeploy**
+without one of:
+
+- Adding a Render **persistent disk** mount for `data/` (Render dashboard →
+  service → Disks — not configured automatically by this change, per the
+  explicit scope of this feature; a deliberate infra decision for later).
+- Moving to a managed database (explicitly out of scope for this feature —
+  SQLite/local-file was a hard requirement here).
+
+No action was taken beyond documenting this — the current implementation's
+goal was the SQLite architecture and deterministic seeding, not Render
+volume provisioning.
+
 ---
 
 ## C. Vercel setup

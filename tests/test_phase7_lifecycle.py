@@ -49,6 +49,7 @@ class _FakeDashboard:
         self._username_callback = None  # Phase 8
         self._interrupt_fn = None
         self._timezone_fn = None
+        self._profile_fn = None
         self._command_queue = asyncio.Queue()
         self._phone_audio_queue = asyncio.Queue()  # touched by _relay_phone_audio
 
@@ -66,6 +67,9 @@ class _FakeDashboard:
 
     def set_timezone_callback(self, fn):
         self._timezone_fn = fn
+
+    def set_profile_callback(self, fn):
+        self._profile_fn = fn
 
     async def serve(self):
         await asyncio.Event().wait()  # never returns — mimics a live server

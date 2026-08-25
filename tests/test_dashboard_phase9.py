@@ -28,7 +28,7 @@ def test_username_login_also_fires_wake() -> None:
     woke = []
     server.set_wake_callback(lambda: woke.append(True))
     client = TestClient(server.app)
-    resp = client.post("/login/username", json={"username": "Saroj"})
+    resp = client.post("/login/username", json={"username": "Saroj", "pin": "2057"})
     assert resp.status_code == 200
     assert woke == [True], "logging in with a username must also start Jarvis (no separate WAKE press)"
     print("test_username_login_also_fires_wake: PASS")
