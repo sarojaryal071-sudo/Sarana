@@ -123,4 +123,16 @@ export async function sendInterrupt(token) {
   return asJson(resp);
 }
 
+/** POST /api/logout — removes this token and its session bookkeeping
+ * server-side (see dashboard/server.py's _forget_token()). Safe to call
+ * with an already-invalid/expired token — always resolves {"ok": true},
+ * never throws for that reason. */
+export async function logout(token) {
+  const resp = await fetch(`${BACKEND_URL}/api/logout`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return asJson(resp);
+}
+
 export { ApiError };

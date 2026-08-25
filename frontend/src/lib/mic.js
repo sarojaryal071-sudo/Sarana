@@ -99,6 +99,17 @@ export class MicStreamer {
 
         // Buffer to ~1024 samples (64 ms @ 16 kHz) before sending, matching
         // the desktop mic's own chunk size and avoiding server-side flooding.
+        //
+        // Perf audit (item 5): re-checked whether this can safely be
+        // lowered. main.py's own local mic uses sd.InputStream(blocksize=
+        // CHUNK_SIZE) with CHUNK_SIZE=1024 at SEND_SAMPLE_RATE=16000 —
+        // i.e. desktop's own native microphone chunking is ALSO 64ms.
+        // This value isn't a web-specific inefficiency to shrink; it's
+        // already matched to the same granularity the rest of the
+        // pipeline (out_queue → _send_realtime() → Gemini) already
+        // operates at on desktop. Shrinking it here would only add more,
+        // smaller WebSocket frames without reducing the actual floor
+        // latency anywhere downstream — left unchanged.
         let pending = [];
         let pendingLen = 0;
         node.port.onmessage = (e) => {

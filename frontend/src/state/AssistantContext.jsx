@@ -4,6 +4,19 @@
 // connection state across components.
 import { createContext, useContext, useReducer } from "react";
 
+// Resource-cleanup fix: `messages` (the Activity Log's data — see
+// SidePanel.jsx/LogPanel.jsx) used to grow for the entire life of a
+// session with no cap, in both the array itself and its per-message
+// re-render cost whenever the log panel is open. 300 mirrors the
+// backend's own _history cap in dashboard/server.py — plenty for a
+// single session's actual activity log, bounded either way.
+const MAX_MESSAGES = 300;
+
+function appendMessage(messages, message) {
+  const next = [...messages, message];
+  return next.length > MAX_MESSAGES ? next.slice(-MAX_MESSAGES) : next;
+}
+
 const initialState = {
   connectionState: "disconnected", // disconnected | connecting | connected | reconnecting | error
   authenticationState: "unauthenticated", // unauthenticated | authenticating | authenticated | error
@@ -83,12 +96,12 @@ function reducer(state, action) {
     case "LOG_MESSAGE":
       return {
         ...state,
-        messages: [...state.messages, { speaker: action.speaker, text: action.text, ts: action.ts }],
+        messages: appendMessage(state.messages, { speaker: action.speaker, text: action.text, ts: action.ts }),
       };
     case "SYS_MESSAGE":
       return {
         ...state,
-        messages: [...state.messages, { speaker: "sys", text: action.text, ts: action.ts }],
+        messages: appendMessage(state.messages, { speaker: "sys", text: action.text, ts: action.ts }),
       };
     case "CONTENT_MESSAGE":
       return { ...state, content: { title: action.title, text: action.text } };

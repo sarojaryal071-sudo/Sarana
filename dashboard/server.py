@@ -115,6 +115,18 @@ voice_preference/language_preference — never pin_hash) for main.py's new
 [USER PROFILE] context block. The response shape returned to the browser
 is unchanged ({"ok", "token", "username"}) — profile details never reach
 the frontend.
+
+── Resource-cleanup addition ───────────────────────────────────────────────
+
+Every issued token used to live in _tokens/_token_keys/_session_auth_mode/
+_session_usernames/_session_timezones forever — nothing ever removed one.
+POST /api/logout now removes a token's bookkeeping immediately and
+explicitly (see _forget_token()); a passive, rate-limited TTL sweep
+(_purge_stale_tokens(), hooked into _auth()) catches anything that never
+called it (browser closed/crashed). Neither touches _device_sessions (persistent device pairing, meant to
+outlive a session) or has any effect on an already-open /ws,
+/ws/audio-out, or /ws/phone-audio connection, which are torn down
+client-side as before.
 """
 
 import asyncio
@@ -156,6 +168,16 @@ STATIC_DIR  = Path(__file__).parent / "static"
 # local/desktop development, where PORT is normally unset.
 PORT        = int(os.environ.get("PORT", 8000))
 MAX_UPLOAD_MB = 500
+
+# Resource-cleanup fix: a passive safety net for tokens no explicit
+# POST /api/logout ever cleaned up (browser closed/crashed, network died
+# mid-session). 24h is generous — this is not primary auth expiry (tokens
+# still work for a normal day-long session), just a bound so an
+# abandoned token can't live in memory forever. Swept lazily (see _auth()
+# in _build_app()), rate-limited by _TOKEN_SWEEP_INTERVAL_SECONDS so a
+# busy server isn't scanning every token dict on every single request.
+_TOKEN_TTL_SECONDS = 24 * 60 * 60
+_TOKEN_SWEEP_INTERVAL_SECONDS = 10 * 60
 
 
 def _make_uploads_dir() -> Path:
@@ -586,9 +608,20 @@ class DashboardServer:
         # lifetime — see /login/username's docstring for why.
         self._session_auth_mode: dict[str, str] = {}   # token → "username" | "remote"
         self._session_usernames: dict[str, str] = {}   # token → username (username logins only)
+        # Resource-cleanup fix: every token used to live in these dicts/set
+        # forever — nothing ever removed one, so a long-lived process
+        # (or the same account logging in/out repeatedly) grew them
+        # without bound. _token_created_at + _purge_stale_tokens() is the
+        # passive safety net (a token untouched by an explicit logout
+        # eventually gets swept — see _TOKEN_TTL_SECONDS); POST /api/logout
+        # (see _build_app()) is the active/immediate path a real logout
+        # takes. Both funnel through the one _forget_token() below.
+        self._token_created_at: dict[str, float] = {}
+        self._last_token_sweep: float = 0.0
         self._pending_keys: dict[str, float] = {}
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
+        self._phone_audio_dropped: int            = 0   # instrumentation — see phone_audio_ws's QueueFull handler
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
@@ -679,6 +712,37 @@ class DashboardServer:
         wiring (see main.py's _set_web_username)."""
         self._profile_callback = fn
 
+    # ── token/session cleanup ────────────────────────────────────────────
+
+    def _forget_token(self, tok: str) -> None:
+        """Removes every bookkeeping entry associated with one session
+        token — the single place that happens, used identically by
+        POST /api/logout (immediate, explicit) and _purge_stale_tokens()
+        (passive TTL safety net). Idempotent: calling this on an unknown
+        or already-removed token is a harmless no-op, so logging out an
+        already-invalid/expired token never errors.
+
+        Does NOT touch self._device_sessions (persistent "remember this
+        device" pairing — intentionally outlives any one session token)
+        or self._aes_cache (keyed by PIN/session_key, not by token; shared
+        across whichever tokens were derived from the same PIN).
+        """
+        self._tokens.discard(tok)
+        self._token_created_at.pop(tok, None)
+        self._token_keys.pop(tok, None)
+        self._session_auth_mode.pop(tok, None)
+        self._session_usernames.pop(tok, None)
+        self._session_timezones.pop(tok, None)
+
+    def _purge_stale_tokens(self) -> None:
+        now = time.time()
+        stale = [
+            tok for tok, created in self._token_created_at.items()
+            if now - created > _TOKEN_TTL_SECONDS
+        ]
+        for tok in stale:
+            self._forget_token(tok)
+
     # ── broadcast ────────────────────────────────────────────────────────
 
     async def broadcast(self, msg: dict) -> None:
@@ -737,6 +801,14 @@ class DashboardServer:
         )
 
         def _auth(req: Request) -> bool:
+            # Rate-limited passive sweep — see _purge_stale_tokens()'s own
+            # docstring. Every authenticated request already calls this,
+            # so it's a convenient, cheap place to hook the safety net
+            # without a dedicated background task.
+            now = time.time()
+            if now - self._last_token_sweep > _TOKEN_SWEEP_INTERVAL_SECONDS:
+                self._last_token_sweep = now
+                self._purge_stale_tokens()
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
             return bool(tok) and tok in self._tokens
 
@@ -772,6 +844,7 @@ class DashboardServer:
                 del self._pending_keys[entered]          # one-time use
                 tok = secrets.token_urlsafe(32)
                 self._tokens.add(tok)
+                self._token_created_at[tok] = time.time()
                 self._token_keys[tok] = entered
                 self._session_auth_mode[tok] = "remote"   # Phase 8 bookkeeping
                 self._aes_key(entered)                   # pre-derive & cache
@@ -863,6 +936,7 @@ class DashboardServer:
 
             tok = secrets.token_urlsafe(32)
             self._tokens.add(tok)
+            self._token_created_at[tok] = time.time()
             self._session_auth_mode[tok] = "username"
             self._session_usernames[tok] = display_name
             if timezone:
@@ -912,6 +986,7 @@ class DashboardServer:
             tok     = secrets.token_urlsafe(32)
             dev_tok = secrets.token_urlsafe(32)
             self._tokens.add(tok)
+            self._token_created_at[tok] = time.time()
             self._token_keys[tok] = key
             self._session_auth_mode[tok] = "remote"   # Phase 8 bookkeeping
             self._aes_key(key)
@@ -953,6 +1028,7 @@ class DashboardServer:
             session_key = self._device_sessions[dev_tok]["session_key"]
             tok = secrets.token_urlsafe(32)
             self._tokens.add(tok)
+            self._token_created_at[tok] = time.time()
             self._token_keys[tok] = session_key
             self._session_auth_mode[tok] = "remote"   # Phase 8 bookkeeping
             self._aes_key(session_key)
@@ -1022,6 +1098,32 @@ class DashboardServer:
                 self._interrupt_callback()
             return JSONResponse({"ok": True})
 
+        @app.post("/api/logout")
+        async def logout_ep(req: Request):
+            """Backend counterpart to the frontend's Logout action (see
+            App.jsx's handleLogout()) — removes this token and every
+            session bookkeeping entry tied to it (see _forget_token()).
+
+            Deliberately does NOT require _auth(req) / a still-valid
+            token: logging out an already-invalid or expired token must
+            be a harmless no-op, not a 401 — a client retrying a logout
+            it's unsure went through, or logging out after the passive
+            TTL sweep already removed it, are both completely normal.
+            Always returns {"ok": True} either way, and never reveals
+            whether the token was valid — same "don't leak account state"
+            principle as /login/username's generic error.
+
+            Does not forcibly close any already-open /ws, /ws/audio-out,
+            or /ws/phone-audio connection using this token — those are
+            torn down client-side (see App.jsx's socket-teardown effect,
+            which already runs on every auth-state change); this only
+            prevents the token being used to open new ones.
+            """
+            tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            if tok:
+                self._forget_token(tok)
+            return JSONResponse({"ok": True})
+
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 
         @app.websocket("/ws/phone-audio")
@@ -1042,7 +1144,23 @@ class DashboardServer:
                             {"data": data, "mime_type": "audio/pcm"}
                         )
                     except asyncio.QueueFull:
-                        pass  # drop frame rather than block
+                        # Instrumentation (item 4 audit): this used to be a
+                        # completely silent drop — no way to tell whether
+                        # browser mic audio was ever actually being lost
+                        # here vs. just feeling slow. Still drops (correct,
+                        # existing backpressure behavior — never block a
+                        # live mic stream waiting for room), just now
+                        # observable. self._phone_audio_dropped is the
+                        # cumulative counter; the print is rate-limited so
+                        # a genuine flood doesn't itself become a new
+                        # source of overhead/log spam.
+                        self._phone_audio_dropped += 1
+                        if self._phone_audio_dropped % 50 == 1:
+                            print(
+                                f"[Dashboard] phone-audio queue full — "
+                                f"{self._phone_audio_dropped} frame(s) dropped so far "
+                                f"(qsize={self._phone_audio_queue.qsize()})"
+                            )
             except WebSocketDisconnect:
                 pass
             finally:

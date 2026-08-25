@@ -87,6 +87,15 @@ SEND_SAMPLE_RATE    = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE          = 1024
 
+# Resource-cleanup fix: self._session_log (conversation turns for
+# _save_session_summary()/proactive context) used to grow without bound
+# for the life of a single, never-reconnected session. _save_session_summary()
+# only ever reads the last 40 entries (log[-40:]) and proactive mode only
+# ever reads the last 8 (self._session_log[-8:]) — 50 keeps both of those
+# exactly as they already behave, with a little headroom, while making the
+# list's maximum size explicit and bounded instead of unbounded.
+SESSION_LOG_MAX_ENTRIES = 50
+
 def _get_api_key() -> str:
     """Deployment-readiness: GEMINI_API_KEY environment variable takes
     priority (this is how Render provides it — never committed to the
@@ -683,6 +692,7 @@ class JarvisLive:
         self._is_speaking         = False
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
+        self._phone_relay_dropped = 0       # instrumentation — see _relay_phone_audio()'s QueueFull handler
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
         self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
@@ -1270,6 +1280,19 @@ class JarvisLive:
             print(f"[JARVIS] Local microphone stopped, continuing without it: {e}")
             self.ui.write_log("SYS: Local microphone stopped — continuing without it.")
 
+    def _append_session_log(self, entry: str) -> None:
+        """The one place self._session_log is ever appended to — keeps it
+        bounded at SESSION_LOG_MAX_ENTRIES (see that constant's docstring)
+        instead of growing for the entire life of a session. Trimming from
+        the front preserves exactly what every existing reader already
+        relies on: _save_session_summary()'s log[-40:] and proactive
+        mode's self._session_log[-8:] both keep seeing the same *recent*
+        entries as before — only the unbounded middle/oldest history is
+        ever dropped, which nothing reads anyway."""
+        self._session_log.append(entry)
+        if len(self._session_log) > SESSION_LOG_MAX_ENTRIES:
+            self._session_log = self._session_log[-SESSION_LOG_MAX_ENTRIES:]
+
     async def _receive_audio(self):
         # ASCII-only print — deployment-readiness note: this one crashing
         # under a non-UTF-8 console (unrelated to audio hardware) forces
@@ -1327,7 +1350,7 @@ class JarvisLive:
                             full_in = " ".join(in_buf).strip()
                             if full_in:
                                 self.ui.write_log(f"You: {full_in}")
-                                self._session_log.append(f"User: {full_in}")
+                                self._append_session_log(f"User: {full_in}")
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "user",
@@ -1339,7 +1362,7 @@ class JarvisLive:
                             full_out = " ".join(out_buf).strip()
                             if full_out:
                                 self.ui.write_log(f"{self._asst_name}: {full_out}")
-                                self._session_log.append(f"{self._asst_name}: {full_out}")
+                                self._append_session_log(f"{self._asst_name}: {full_out}")
                                 if self._dashboard:
                                     asyncio.create_task(self._dashboard.broadcast({
                                         "type": "log", "speaker": "jarvis",
@@ -1380,11 +1403,45 @@ class JarvisLive:
                                 asyncio.create_task(_cam_close())
 
                     if response.tool_call:
+                        # Item 6 audit (highest-risk item — deliberately
+                        # NOT restructured): each fc is awaited in-line,
+                        # sequentially, on this same receive loop, so the
+                        # `async for` above is paused (no further Gemini
+                        # events drained for THIS response stream) for the
+                        # duration of every tool call in a turn. A
+                        # background-task/concurrent version was
+                        # considered and rejected: google-genai's
+                        # send_tool_response() has no documented contract
+                        # for being called concurrently from overlapping
+                        # tasks on the same session, and getting that
+                        # wrong risks exactly what this task warns
+                        # against — out-of-order or duplicate tool
+                        # responses — with no live Gemini connection
+                        # available in this environment to verify it's
+                        # actually safe. Instrumented instead, so a real
+                        # decision can be made from real numbers rather
+                        # than guessing: logs any tool call whose
+                        # run_in_executor work takes long enough to be a
+                        # user-noticeable pause.
+                        _tool_batch_start = time.monotonic()
                         fn_responses = []
                         for fc in response.tool_call.function_calls:
                             print(f"[JARVIS] 📞 {fc.name}")
+                            _tool_start = time.monotonic()
                             fr = await self._execute_tool(fc)
+                            _tool_elapsed = time.monotonic() - _tool_start
+                            if _tool_elapsed > 0.3:
+                                print(
+                                    f"[JARVIS] Tool '{fc.name}' took {_tool_elapsed:.2f}s "
+                                    f"— receive loop was paused for this long"
+                                )
                             fn_responses.append(fr)
+                        _tool_batch_elapsed = time.monotonic() - _tool_batch_start
+                        if _tool_batch_elapsed > 0.3:
+                            print(
+                                f"[JARVIS] Tool-call batch ({len(fn_responses)} call(s)) "
+                                f"took {_tool_batch_elapsed:.2f}s total"
+                            )
                         await self.session.send_tool_response(
                             function_responses=fn_responses
                         )
@@ -1767,7 +1824,19 @@ class JarvisLive:
     # ── Phone audio relay ────────────────────────────────────────────────────────
 
     async def _relay_phone_audio(self) -> None:
-        """Forward phone mic PCM chunks from dashboard queue into the Gemini Live session."""
+        """Forward phone mic PCM chunks from dashboard queue into the Gemini Live session.
+
+        Audit finding (item 4, transport optimization): the timeout=1.0
+        below does NOT add per-chunk latency — asyncio.wait_for only waits
+        the full timeout when the queue is genuinely empty; a chunk
+        already sitting in q resolves q.get() immediately. The timeout
+        exists purely to detect "phone mic went idle for a full second"
+        (give control back to the local PC mic) — it is idle-state
+        detection, not a polling interval on the hot path. Confirmed by
+        inspection, not changed, per the audit's "do not introduce
+        polling delays" / "measure before changing" instructions — this
+        one was never a delay to begin with.
+        """
         q = self._dashboard._phone_audio_queue
         while True:
             try:
@@ -1783,7 +1852,17 @@ class JarvisLive:
                 try:
                     self.out_queue.put_nowait(chunk)
                 except asyncio.QueueFull:
-                    pass
+                    # Instrumentation (item 4 audit) — same reasoning as
+                    # dashboard/server.py's phone_audio_ws: was a silent
+                    # drop, now observable, still correct backpressure
+                    # (never block realtime audio waiting for queue room).
+                    self._phone_relay_dropped += 1
+                    if self._phone_relay_dropped % 50 == 1:
+                        print(
+                            f"[JARVIS] out_queue full — "
+                            f"{self._phone_relay_dropped} phone-audio frame(s) dropped so far "
+                            f"(qsize={self.out_queue.qsize()})"
+                        )
 
     def _on_phone_connected(self) -> None:
         self.ui.write_log("SYS: Phone connected via Remote Dashboard.")

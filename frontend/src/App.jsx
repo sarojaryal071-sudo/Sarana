@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAssistantDispatch, useAssistantState } from "./state/AssistantContext";
-import { fetchSession, sendCommand, sendInterrupt, ApiError } from "./lib/api";
+import { fetchSession, sendCommand, sendInterrupt, logout, ApiError } from "./lib/api";
 import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
 import { MicStreamer } from "./lib/mic";
@@ -189,20 +189,34 @@ export default function App() {
     });
   }
 
-  // Sidebar "Logout": clears the stored token (same helper LoginScreen's
-  // session-expiry path already uses) and resets to unauthenticated via
-  // the existing RESET_FOR_LOGOUT action — one dispatch does both, since
-  // its target state already IS "unauthenticated" (see AssistantContext.jsx).
-  // That state flip alone unwinds everything else through mechanisms that
+  // Sidebar "Logout": tells the backend first (POST /api/logout — removes
+  // this token/session bookkeeping server-side, see dashboard/server.py's
+  // _forget_token()) so it isn't left to the passive TTL sweep, THEN
+  // clears the stored token (same helper LoginScreen's session-expiry
+  // path already uses) and resets to unauthenticated via the existing
+  // RESET_FOR_LOGOUT action — one dispatch does both, since its target
+  // state already IS "unauthenticated" (see AssistantContext.jsx). That
+  // state flip alone unwinds everything else through mechanisms that
   // already exist: the /ws + /ws/audio-out effect tears itself down and
   // stops the mic (see its cleanup above), the activity log/username/
   // profile-derived labels clear with it, and the login overlay reappears
   // because `authenticated` below goes false. No previous user's activity
-  // or profile is left visible.
-  function handleLogout() {
-    clearStoredToken();
+  // or profile is left visible. The local state is cleared in `finally`
+  // regardless of whether the backend call succeeds — an unreachable
+  // backend must never trap the user in a "logged in" UI they can't
+  // actually use; the stale token is still safely cleaned up eventually
+  // by the server's own TTL sweep either way.
+  async function handleLogout() {
+    const token = state.token;
     setMenuOpen(false);
-    dispatch({ type: "RESET_FOR_LOGOUT" });
+    try {
+      if (token) await logout(token);
+    } catch {
+      /* backend unreachable/erroring — local state still clears below */
+    } finally {
+      clearStoredToken();
+      dispatch({ type: "RESET_FOR_LOGOUT" });
+    }
   }
 
   // Item 2: web equivalent of the desktop INTERRUPT button — stops the
