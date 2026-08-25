@@ -34,13 +34,14 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  overflow: hidden; /* the app is a fixed-viewport surface, not a scrolling page — see .app-shell */
+  overscroll-behavior: none; /* stop iOS/Android rubber-band scroll from revealing empty space below the shell */
 }
 
 body {
   background: var(--bg);
   color: var(--text);
   font-family: "Courier New", ui-monospace, "Cascadia Code", monospace;
-  overflow: hidden;
 }
 
 button,
@@ -51,8 +52,24 @@ input {
 .app-shell {
   display: flex;
   flex-direction: column;
+  /* 100vh is the LAYOUT viewport — on mobile Safari/Chrome it's measured
+     with the address bar hidden, so it's taller than what's actually
+     visible while the bar is showing, and the bottom of the shell (the
+     mic button) ends up needing a scroll to reach. 100dvh tracks the
+     actually-visible area and updates live as the browser chrome
+     shows/hides; the 100vh line stays first as a fallback for the (now
+     rare) browsers without dvh support. */
   height: 100vh;
+  height: 100dvh;
   min-height: 0;
+  /* Safe-area padding for notches/home-indicators (viewport-fit=cover in
+     index.html opts into this) — the header and controls below already
+     have their own padding; this just keeps the shell itself flush with
+     the safe area rather than the physical screen edge. */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 /* ── header ─────────────────────────────────────────────────────────── */
@@ -322,6 +339,7 @@ input {
   font-weight: 700;
   letter-spacing: 0.5px;
   padding: 9px 10px;
+  min-height: 44px; /* touch-target size (mic/interrupt/send are the primary controls) */
   border-radius: 4px;
   border: 1px solid var(--border-a);
   background: transparent;
