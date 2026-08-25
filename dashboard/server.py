@@ -868,10 +868,17 @@ class DashboardServer:
             if timezone:
                 self._session_timezones[tok] = timezone
 
-            if self._username_callback:
-                self._username_callback(display_name)
+            # Profile before username: _set_user_profile() (fired by
+            # set_profile_callback) is what decides whether this login
+            # needs a full reconnect (a different account than whatever
+            # was active). _set_web_username() (fired by
+            # set_username_callback) needs to know that decision BEFORE
+            # deciding how to fire this login's own greeting — see its
+            # docstring for why the ordering here matters.
             if self._profile_callback:
                 self._profile_callback(profile)
+            if self._username_callback:
+                self._username_callback(display_name)
             if timezone and self._timezone_callback:
                 self._timezone_callback(timezone)
             # Phase 9: logging in IS the start signal for this flow — the

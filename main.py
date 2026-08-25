@@ -1797,27 +1797,42 @@ class JarvisLive:
         below, which only makes sense for an actual login). Only affects
         the ADDRESS clause built in _build_config() — does not touch
         prompts, memory, tools, or the assistant's own identity/name in
-        any way."""
+        any way.
+
+        Every login gets exactly one short greeting (name + current time)
+        — including the SAME account logging out and back in repeatedly
+        (e.g. five times in two minutes): dashboard/server.py fires
+        set_profile_callback() (-> _set_user_profile()) just before this
+        on every login, so by the time this runs, self._reconnect_requested
+        already reflects whether THIS login is a genuine account switch
+        that's about to tear down and re-establish the connection.
+        """
         self._web_user_name = username
         self.ui.write_log(f"SYS: Web session identified as '{username}'.")
 
-        # Item 7 (web greeting): reuse _send_startup_briefing() unchanged —
-        # no new greeting text, no hardcoding. If a Gemini session is already
-        # connected (a later login on a long-lived process, session already
-        # active — e.g. someone logged in as a different account without a
-        # restart, or logged out and back in as someone else), fire the
-        # greeting right now WITH identity_switch=True — see that method's
-        # docstring for why: the earlier connection's system_instruction
-        # can't be rewritten mid-session, so this is what actually corrects
-        # the addressing/assistant-name for the rest of THIS connection.
-        # Otherwise run()'s auto_start gate is still waiting (the very
-        # first login) — set the flag and let run()'s existing post-connect
-        # check send an ordinary (non-switch) greeting once, exactly once,
-        # right after that connection is established (see run()).
-        if self.session and self._loop:
-            self._loop.create_task(self._send_startup_briefing(identity_switch=True))
-        else:
+        if not self.session or not self._loop:
+            # run()'s auto_start gate is still waiting (the very first
+            # login) — let run()'s existing post-connect check send the
+            # greeting once, exactly once, right after that connection is
+            # established (see run()).
             self._pending_web_greeting = True
+        elif self._reconnect_requested is not None and self._reconnect_requested.is_set():
+            # A genuine account switch is already tearing this connection
+            # down (see _set_user_profile(), which just ran and set this).
+            # Sending an ad-hoc greeting on a session that may already be
+            # gone by the time it actually goes out is exactly the race
+            # that used to occasionally lose the greeting entirely —
+            # deferring to the SAME reliable mechanism the first-ever
+            # login uses means the fresh, reconnected session fires it
+            # instead, once that connection is actually up.
+            self._pending_web_greeting = True
+        else:
+            # Same account logging in again (or no reconnect needed for
+            # any other reason) — this session isn't going anywhere, so
+            # fire immediately. identity_switch=True is harmless here even
+            # when nothing actually changed — it just reasserts facts that
+            # were already true.
+            self._loop.create_task(self._send_startup_briefing(identity_switch=True))
 
     def _set_user_profile(self, profile: dict) -> None:
         """The canonical profile setter — the ONE place _user_profile is

@@ -130,8 +130,11 @@ def test_watch_for_reconnect_request_waits_when_not_set() -> None:
 # ── end-to-end: a real reconnect actually happens, with the new voice ────
 
 class _FakeLiveSession:
+    def __init__(self, sent_messages):
+        self._sent_messages = sent_messages   # shared across every connection this test makes
+
     async def send_client_content(self, turns, turn_complete=True):
-        pass
+        self._sent_messages.append(turns["parts"][0]["text"])
 
     async def send_realtime_input(self, media):
         pass
@@ -143,25 +146,29 @@ class _FakeLiveSession:
 
 
 class _FakeConnectCM:
+    def __init__(self, sent_messages):
+        self._sent_messages = sent_messages
+
     async def __aenter__(self):
-        return _FakeLiveSession()
+        return _FakeLiveSession(self._sent_messages)
 
     async def __aexit__(self, *exc):
         return False
 
 
 class _FakeLive:
-    def __init__(self, recorder):
+    def __init__(self, recorder, sent_messages):
         self._recorder = recorder
+        self._sent_messages = sent_messages
 
     def connect(self, *, model, config):
         self._recorder.append(config)
-        return _FakeConnectCM()
+        return _FakeConnectCM(self._sent_messages)
 
 
 class _FakeGenaiClient:
-    def __init__(self, recorder, *a, **kw):
-        self.aio = type("Aio", (), {"live": _FakeLive(recorder)})()
+    def __init__(self, recorder, sent_messages, *a, **kw):
+        self.aio = type("Aio", (), {"live": _FakeLive(recorder, sent_messages)})()
 
 
 def test_account_switch_triggers_a_real_reconnect_with_the_new_voice() -> None:
@@ -172,9 +179,10 @@ def test_account_switch_triggers_a_real_reconnect_with_the_new_voice() -> None:
     just a corrected greeting text."""
     async def _run():
         recorder = []
+        sent_messages = []
 
         def make_client(*a, **kw):
-            return _FakeGenaiClient(recorder, *a, **kw)
+            return _FakeGenaiClient(recorder, sent_messages, *a, **kw)
 
         # auto_start=True (desktop's default) so the connect loop starts
         # immediately -- simulating "already logged in as Saroj" is just
@@ -194,22 +202,25 @@ def test_account_switch_triggers_a_real_reconnect_with_the_new_voice() -> None:
              patch("main.sd.InputStream", side_effect=OSError("no audio device in test")), \
              patch("main.sd.RawOutputStream", side_effect=OSError("no audio device in test")):
             task = asyncio.create_task(jarvis.run())
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
 
             assert len(recorder) == 1, "first connection must have happened"
             first_voice = recorder[0].speech_config.voice_config.prebuilt_voice_config.voice_name
             assert first_voice == "Kore", "Saroj's voice_preference (Female) -> Kore"
+            assert len(sent_messages) == 1, "the first connection's own greeting must have fired"
 
             # A short (< 3 turn) leftover conversation from Saroj's session
             # — too short to summarize, but must still not leak into Sana's.
             jarvis._session_log = ["User: hi", "Sara: hello"]
 
-            # Sana logs in on this SAME already-connected session.
+            # Sana logs in on this SAME already-connected session — profile
+            # callback first, username callback second, matching dashboard/
+            # server.py's actual (fixed) ordering.
             new_profile = user_db.authenticate("Sana", "2060")
             jarvis._set_user_profile(new_profile)
             jarvis._set_web_username(new_profile["pronunciation"] or new_profile["nickname"])
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.8)
 
             assert len(recorder) == 2, "a genuine account switch must trigger a real reconnect"
             second_voice = recorder[1].speech_config.voice_config.prebuilt_voice_config.voice_name
@@ -223,6 +234,15 @@ def test_account_switch_triggers_a_real_reconnect_with_the_new_voice() -> None:
                 "the outgoing account's short activity log must not carry into the new account's session"
             )
 
+            # The core complaint this fixes: the switch must not go silent
+            # ("still waiting for me to start the conversation") — a second
+            # greeting must actually go out, on the NEW (reconnected)
+            # session, addressed to Sana/Saanaa.
+            assert len(sent_messages) == 2, (
+                "the account switch must still produce its own greeting, not silence"
+            )
+            assert "Saanaa" in sent_messages[1]
+
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
@@ -230,14 +250,17 @@ def test_account_switch_triggers_a_real_reconnect_with_the_new_voice() -> None:
     print("test_account_switch_triggers_a_real_reconnect_with_the_new_voice: PASS")
 
 
-def test_same_account_relogin_does_not_force_an_extra_reconnect() -> None:
-    """Sanity companion to the switch test: re-submitting the SAME account
-    while connected must NOT cause a second connect() call."""
+def test_same_account_relogin_greets_every_time_without_reconnecting() -> None:
+    """The other half of the user's report: logging out and back in as the
+    SAME account repeatedly (e.g. five times in two minutes) must not go
+    silent after the first time — every login gets its own greeting, with
+    no reconnect needed (the session/voice/identity are already correct)."""
     async def _run():
         recorder = []
+        sent_messages = []
 
         def make_client(*a, **kw):
-            return _FakeGenaiClient(recorder, *a, **kw)
+            return _FakeGenaiClient(recorder, sent_messages, *a, **kw)
 
         jarvis = JarvisLive(HeadlessSurface())   # auto_start=True — desktop's default
         jarvis._user_profile = user_db.authenticate("Saroj", "2057")
@@ -253,20 +276,32 @@ def test_same_account_relogin_does_not_force_an_extra_reconnect() -> None:
              patch("main.sd.InputStream", side_effect=OSError("no audio device in test")), \
              patch("main.sd.RawOutputStream", side_effect=OSError("no audio device in test")):
             task = asyncio.create_task(jarvis.run())
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
             assert len(recorder) == 1
+            assert len(sent_messages) == 1, "first login's own greeting"
 
-            same_profile = user_db.authenticate("Saroj", "2057")
-            jarvis._set_user_profile(same_profile)
-            await asyncio.sleep(0.3)
+            # "Logged out and back in" 4 more times, same account each time
+            # — logout itself is frontend-only (see App.jsx's handleLogout);
+            # from the backend's point of view this is just Saroj's
+            # /login/username firing again, same as any other re-login.
+            for i in range(4):
+                same_profile = user_db.authenticate("Saroj", "2057")
+                jarvis._set_user_profile(same_profile)
+                jarvis._set_web_username(same_profile["nickname"])
+                await asyncio.sleep(0.5)
 
-            assert len(recorder) == 1, "the same account logging in again must not force a reconnect"
+            assert len(recorder) == 1, "same account, same voice/identity — never needs a reconnect"
+            assert len(sent_messages) == 5, (
+                f"expected a fresh greeting for every one of the 5 logins, got {len(sent_messages)}"
+            )
+            for msg in sent_messages:
+                assert "Saroj" in msg
 
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(_run())
-    print("test_same_account_relogin_does_not_force_an_extra_reconnect: PASS")
+    print("test_same_account_relogin_greets_every_time_without_reconnecting: PASS")
 
 
 if __name__ == "__main__":
@@ -277,5 +312,5 @@ if __name__ == "__main__":
     test_watch_for_reconnect_request_raises_identity_changed()
     test_watch_for_reconnect_request_waits_when_not_set()
     test_account_switch_triggers_a_real_reconnect_with_the_new_voice()
-    test_same_account_relogin_does_not_force_an_extra_reconnect()
+    test_same_account_relogin_greets_every_time_without_reconnecting()
     print("\nAll voice-reconnect tests passed.")
