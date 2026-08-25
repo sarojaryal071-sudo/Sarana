@@ -554,6 +554,8 @@ class DashboardServer:
         self._connect_callback            = None
         self._username_callback           = None   # Phase 8: fires on a successful /login/username
         self._interrupt_callback          = None   # web interrupt control: fires main.py's interrupt()
+        self._timezone_callback           = None   # fires on a successful /login/username with a timezone
+        self._session_timezones: dict[str, str] = {}   # token → IANA timezone (username logins only)
         # Phase 8: lightweight session bookkeeping — which auth path issued a
         # token, and (for username logins only) which name. Not a user
         # database, no registration, nothing persisted past process
@@ -634,6 +636,14 @@ class DashboardServer:
         (ui.py's on_interrupt), reusing the exact same JarvisLive.interrupt()
         (main.py's run() wires this identically to set_wake_callback)."""
         self._interrupt_callback = fn
+
+    def set_timezone_callback(self, fn) -> None:
+        """fn(tz_name: str) is called on a successful /login/username that
+        includes a "timezone" field — the browser's own IANA timezone name
+        (e.g. Intl.DateTimeFormat().resolvedOptions().timeZone), so
+        JarvisLive can use the device's actual local time instead of the
+        server's (see main.py's _local_now())."""
+        self._timezone_callback = fn
 
     # ── broadcast ────────────────────────────────────────────────────────
 
@@ -762,6 +772,14 @@ class DashboardServer:
             it to name-shaped text is a cheap, worthwhile guard against
             embedding prompt-injection payloads via the "username" field,
             even though this endpoint is not meant to be hardened auth.
+
+            Optional "timezone" field: the browser's own IANA timezone name
+            (Intl.DateTimeFormat().resolvedOptions().timeZone), used so
+            JarvisLive reports the user's actual device-local time instead
+            of this server's (see set_timezone_callback()/main.py's
+            _local_now()). Best-effort — missing or malformed values are
+            silently ignored rather than failing the login; main.py itself
+            re-validates against the real IANA database before ever using it.
             """
             try:
                 body = await req.json()
@@ -779,13 +797,24 @@ class DashboardServer:
                     status_code=400,
                 )
 
+            timezone = str(body.get("timezone", "")).strip()
+            # IANA names are things like "Asia/Kathmandu" or "UTC" — loose
+            # shape check only; main.py does the real validity check via
+            # zoneinfo before ever trusting it.
+            if timezone and not re.fullmatch(r"[A-Za-z0-9_+\-/]{1,50}", timezone):
+                timezone = ""
+
             tok = secrets.token_urlsafe(32)
             self._tokens.add(tok)
             self._session_auth_mode[tok] = "username"
             self._session_usernames[tok] = username
+            if timezone:
+                self._session_timezones[tok] = timezone
 
             if self._username_callback:
                 self._username_callback(username)
+            if timezone and self._timezone_callback:
+                self._timezone_callback(timezone)
             # Phase 9: logging in IS the start signal for this flow — the
             # user should never need a separate WAKE press. Reuses the
             # exact same wake mechanism unchanged (main.py's run() gate);

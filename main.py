@@ -26,6 +26,7 @@ import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # Render/headless fix: sounddevice binds to the native PortAudio library,
 # which Render's containers don't have installed — `import sounddevice`
@@ -605,6 +606,12 @@ class JarvisLive:
         # back to config/api_keys.json's existing user_name exactly as
         # before this phase when unset — see _build_config().
         self._web_user_name: str | None = None
+        # IANA timezone name (e.g. "Asia/Kathmandu") reported by the browser
+        # at web login (see _set_web_timezone()/dashboard/server.py's
+        # /login/username) — None on desktop, where datetime.now() already
+        # reads the local machine's own clock/timezone correctly and needs
+        # no override (see _local_now()).
+        self._web_timezone: str | None = None
         # Web login greeting (see _set_web_username()/run()): "session" for
         # the web surface means "a login", not "a process launch" the way it
         # does for desktop's own _briefing_sent — a long-lived Render process
@@ -784,7 +791,7 @@ class JarvisLive:
         mem_str    = format_memory_for_prompt(memory)
         sys_prompt = _load_system_prompt()
 
-        now      = datetime.now()
+        now      = self._local_now()
         time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
         time_ctx = (
             f"[CURRENT DATE & TIME]\n"
@@ -833,14 +840,22 @@ class JarvisLive:
         # competing with it (see core/prompt.txt).
         _lang = (
             "LANGUAGE: Respond and speak in natural, conversational, modern Nepali "
-            "by default — not overly formal, Sanskritized, or literal. Keep "
-            "technical/computing/AI/product terminology in English where that's "
-            "natural (e.g. system, AI, backend, frontend, API, server, database, "
-            "browser, microphone, speaker, settings, code, file, GitHub, "
-            "deployment, terminal, Windows, Python) — do not awkwardly translate "
-            "these. You understand English, Nepali, and mixed Nepali-English "
-            "input. Only move away from Nepali as the default when the user "
-            "explicitly asks for another language, or clearly continues an "
+            "by default — the way a modern Nepali person actually talks to an AI "
+            "assistant, not formal, ceremonial, literary, archaic, or Sanskritized "
+            "Nepali. Freely code-switch: keep technical/computing/AI/product "
+            "terminology in English where that's natural (e.g. system, AI, "
+            "backend, frontend, API, server, database, browser, microphone, "
+            "speaker, settings, code, file, GitHub, deployment, terminal, "
+            "Windows, Python), and let common English expressions stay English "
+            "when that sounds more natural — don't awkwardly translate them, and "
+            "don't force every response into pure/literal Nepali. Do not use "
+            "stiff formal greeting phrases like \"Subha Prabhat\" — a natural "
+            "greeting sounds like \"Good morning!\", \"Good morning, "
+            "[name].\", \"Namaste, good morning!\", or \"Good morning! आज के "
+            "गरौँ?\" (the exact wording is still yours to generate per-moment, "
+            "not fixed). You understand English, Nepali, and mixed Nepali-"
+            "English input. Only move away from Nepali as the default when the "
+            "user explicitly asks for another language, or clearly continues an "
             "entire message in another language — a single mixed-language word "
             "or phrase is not that."
         )
@@ -1402,7 +1417,7 @@ class JarvisLive:
         lang = _val("language")
         name = self._current_user_name() or _val("name")
 
-        now      = datetime.now()
+        now      = self._local_now()
         category = _time_of_day_category(now.hour)
         time_str = now.strftime("%I:%M %p").lstrip("0") or now.strftime("%I:%M %p")
         weekday  = now.strftime("%A")
@@ -1419,7 +1434,9 @@ class JarvisLive:
         session_clause = ""
         if last:
             try:
-                _delta = (datetime.now() - datetime.strptime(last["date"], "%Y-%m-%d")).days
+                # .date() only — avoids mixing a tz-aware `now` (web, see
+                # _local_now()) with the naive date parsed below.
+                _delta = (now.date() - datetime.strptime(last["date"], "%Y-%m-%d").date()).days
                 _when  = "earlier today" if _delta == 0 else ("yesterday" if _delta == 1 else f"{_delta} days ago")
             except Exception:
                 _when = "last time"
@@ -1435,7 +1452,9 @@ class JarvisLive:
             f"natural, but do not lecture or repeat that every time. If anything about this "
             f"exact moment feels genuinely worth a brief mention (start of a new day, a "
             f"weekend, an unusually early or late hour), you may note it naturally in passing "
-            f"— otherwise just give a normal greeting fitting the time of day."
+            f"— otherwise just give a normal greeting fitting the time of day. Keep the "
+            f"greeting itself natural and conversational (see LANGUAGE above) — not a stiff "
+            f"formal phrase like \"Subha Prabhat\"."
             f"{session_clause} Keep it to 1-2 short sentences. Do not call any tools."
             f"{lang_clause}{name_clause}"
         )
@@ -1624,6 +1643,39 @@ class JarvisLive:
         else:
             self._pending_web_greeting = True
 
+    def _set_web_timezone(self, tz_name: str) -> None:
+        """Fired by dashboard/server.py's /login/username via
+        set_timezone_callback(), given the IANA zone name the browser's own
+        Intl.DateTimeFormat().resolvedOptions().timeZone reports (e.g.
+        "Asia/Kathmandu") — the device's actual local timezone, never a
+        hardcoded one. Validated here (not just server-side) so a bad/
+        unrecognized value can never silently corrupt _local_now(); on
+        failure this just leaves the web session on the prior fallback
+        (server local time) instead of crashing anything."""
+        try:
+            ZoneInfo(tz_name)   # raises if not a real IANA zone name
+        except Exception:
+            self.ui.write_log(f"SYS: Ignored invalid web timezone '{tz_name}'.")
+            return
+        self._web_timezone = tz_name
+        self.ui.write_log(f"SYS: Web session timezone set to '{tz_name}'.")
+
+    def _local_now(self) -> datetime:
+        """The single source of truth for "what time is it right now" for
+        every user-facing/Gemini-facing purpose (current date/time context,
+        time-of-day classification, startup greeting). Desktop: unchanged —
+        datetime.now() already reads the local machine's own clock/
+        timezone. Web: uses the browser-reported IANA timezone (see
+        _set_web_timezone()) via the stdlib zoneinfo database, so DST is
+        handled automatically and correctly — never a hardcoded offset or
+        the Render server's own (usually UTC) clock."""
+        if self._web_timezone:
+            try:
+                return datetime.now(ZoneInfo(self._web_timezone))
+            except Exception:
+                pass   # fall through to server-local time below
+        return datetime.now()
+
     # ── dashboard command relay ─────────────────────────────────────────────
 
     async def _process_dashboard_commands(self) -> None:
@@ -1668,6 +1720,10 @@ class JarvisLive:
             # session's username (from /login/username) reaches JarvisLive
             # here, exactly like set_connect_callback/set_wake_callback.
             self._dashboard.set_username_callback(self._set_web_username)
+            # Device-local time fix: browser-reported IANA timezone reaches
+            # _local_now() the same way username/interrupt already reach
+            # their own JarvisLive methods.
+            self._dashboard.set_timezone_callback(self._set_web_timezone)
             # Item 2 (web interrupt control): reuses the exact same
             # interrupt() the desktop UI's INTERRUPT button/Esc key already
             # call (self.ui.on_interrupt, wired in __init__) — no second

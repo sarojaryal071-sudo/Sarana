@@ -58,12 +58,23 @@ export async function loginWithPin(pin) {
 /** POST /login/username — Phase 8: lightweight username IDENTIFICATION,
  * not authentication (no password, no registration). Returns {ok, token,
  * username}. Distinct from loginWithPin: this never implies control of a
- * particular physical desktop. */
+ * particular physical desktop.
+ *
+ * Also sends the browser's own IANA timezone (its native detection
+ * mechanism — no geolocation, no hardcoded zone) so the backend reports
+ * the user's actual device-local time instead of the server's — see
+ * dashboard/server.py's /login/username and main.py's _local_now(). */
 export async function loginWithUsername(username) {
+  let timezone;
+  try {
+    timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    timezone = undefined; // ancient/unsupported browser — backend just falls back to server time
+  }
   const resp = await fetch(`${BACKEND_URL}/login/username`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username }),
+    body: JSON.stringify({ username, timezone }),
   });
   return asJson(resp);
 }

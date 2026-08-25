@@ -22,3 +22,12 @@ fastapi
 uvicorn[standard]
 cryptography
 python-multipart
+
+# Device-local-time fix: zoneinfo (stdlib) needs an actual IANA tz database
+# to resolve names like "Asia/Kathmandu" and their DST rules. Most desktop
+# OSes and full Linux images ship one system-wide, but Windows never does
+# and some minimal container base images don't either — tzdata is the
+# official, portable, pip-installable copy of that same database (not a
+# hardcoded timezone), so this is required, not optional, wherever the web
+# login's timezone is used.
+tzdata
