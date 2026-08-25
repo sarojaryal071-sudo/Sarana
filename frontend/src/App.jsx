@@ -189,6 +189,22 @@ export default function App() {
     });
   }
 
+  // Sidebar "Logout": clears the stored token (same helper LoginScreen's
+  // session-expiry path already uses) and resets to unauthenticated via
+  // the existing RESET_FOR_LOGOUT action — one dispatch does both, since
+  // its target state already IS "unauthenticated" (see AssistantContext.jsx).
+  // That state flip alone unwinds everything else through mechanisms that
+  // already exist: the /ws + /ws/audio-out effect tears itself down and
+  // stops the mic (see its cleanup above), the activity log/username/
+  // profile-derived labels clear with it, and the login overlay reappears
+  // because `authenticated` below goes false. No previous user's activity
+  // or profile is left visible.
+  function handleLogout() {
+    clearStoredToken();
+    setMenuOpen(false);
+    dispatch({ type: "RESET_FOR_LOGOUT" });
+  }
+
   // Item 2: web equivalent of the desktop INTERRUPT button — stops the
   // backend mid-speech via the existing interrupt() mechanism (POST
   // /api/interrupt) AND clears whatever's already scheduled in the
@@ -283,7 +299,12 @@ export default function App() {
           />
         </div>
       </div>
-      <SidePanel open={menuOpen} onClose={() => setMenuOpen(false)} messages={state.messages} />
+      <SidePanel
+        open={menuOpen}
+        onClose={() => setMenuOpen(false)}
+        messages={state.messages}
+        onLogout={handleLogout}
+      />
       {!authenticated && (
         <LoginScreen
           assistantName={state.assistantName}

@@ -561,6 +561,10 @@ input {
   transform: translateX(-100%);
   transition: transform 0.2s ease;
   box-shadow: 0 0 40px rgba(0, 0, 0, 0.4);
+  /* Notch/home-indicator devices (viewport-fit=cover, see index.html) —
+     same pattern as .app-shell. */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
 }
 .side-panel.open {
   transform: translateX(0);
@@ -570,39 +574,33 @@ input {
   flex-shrink: 0;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  padding: 10px 10px 10px 14px;
+  padding: 14px 10px 14px 16px;
   border-bottom: 1px solid var(--border);
 }
 
-.side-panel-tabs {
-  flex: 1;
-  display: flex;
-  gap: 6px;
-  min-width: 0;
+.side-panel-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--pri);
 }
 
-.side-panel-tab {
+.side-panel-back {
   font-family: inherit;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.5px;
-  text-transform: uppercase;
-  padding: 7px 10px;
-  border-radius: 4px;
-  border: 1px solid transparent;
   background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.side-panel-tab:hover {
+  border: none;
   color: var(--text);
+  cursor: pointer;
+  padding: 4px 2px;
+  text-align: left;
 }
-.side-panel-tab.active {
+.side-panel-back:hover {
   color: var(--pri);
-  border-color: var(--border-a);
-  background: var(--pri-ghost);
 }
 
 .side-panel-close {
@@ -629,11 +627,76 @@ input {
   height: 100%;
 }
 
+/* ── nav list — vertical, not a horizontal tab bar ─────────────────────── */
+.side-panel-nav {
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  gap: 2px;
+}
+
+.side-panel-nav-item {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  padding: 13px 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  min-height: 44px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.side-panel-nav-item:hover {
+  background: var(--pri-ghost);
+  border-color: var(--border-a);
+  color: var(--pri);
+}
+
 .settings-placeholder {
   padding: 16px 14px;
   font-size: 12px;
   color: var(--text-dim);
   line-height: 1.6;
+}
+
+/* ── footer: logout + credit, pinned below the nav list ────────────────── */
+.side-panel-footer {
+  flex-shrink: 0;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.side-panel-logout {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-align: left;
+  padding: 12px;
+  min-height: 44px;
+  border-radius: 6px;
+  border: 1px solid var(--border-a);
+  background: transparent;
+  color: var(--muted-c);
+  cursor: pointer;
+}
+.side-panel-logout:hover {
+  background: #140008;
+  border-color: var(--muted-c);
+}
+
+.side-panel-credit {
+  margin: 0;
+  padding: 0 2px;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 0.3px;
 }
 
 @media (max-width: 480px) {
