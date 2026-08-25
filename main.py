@@ -826,11 +826,30 @@ class JarvisLive:
         else:
             _addr = ("ADDRESS: When speaking Turkish → always say \"efendim\". "
                       "When speaking English → say \"sir\". Never mix languages.")
+
+        # Default response language: Nepali. Computed per-session here (same
+        # pattern as ADDRESS above) so it's authoritative over prompt.txt's
+        # own general LANGUAGE line, which now defers to this one instead of
+        # competing with it (see core/prompt.txt).
+        _lang = (
+            "LANGUAGE: Respond and speak in natural, conversational, modern Nepali "
+            "by default — not overly formal, Sanskritized, or literal. Keep "
+            "technical/computing/AI/product terminology in English where that's "
+            "natural (e.g. system, AI, backend, frontend, API, server, database, "
+            "browser, microphone, speaker, settings, code, file, GitHub, "
+            "deployment, terminal, Windows, Python) — do not awkwardly translate "
+            "these. You understand English, Nepali, and mixed Nepali-English "
+            "input. Only move away from Nepali as the default when the user "
+            "explicitly asks for another language, or clearly continues an "
+            "entire message in another language — a single mixed-language word "
+            "or phrase is not that."
+        )
         identity_ctx = (
             f"[IDENTITY]\n"
             f"Your name is {self._asst_name}. "
             f"Always refer to yourself as {self._asst_name}.\n"
-            f"{_addr}\n\n"
+            f"{_addr}\n"
+            f"{_lang}\n\n"
         )
 
         parts = [time_ctx, identity_ctx]
@@ -1442,7 +1461,7 @@ class JarvisLive:
         memory = load_memory()
         lang_entry = memory.get("identity", {}).get("language", {})
         lang = (lang_entry.get("value", "") if isinstance(lang_entry, dict) else str(lang_entry)).strip()
-        lang = lang or "English"
+        lang = lang or "Nepali"  # Nepali is the default response language
 
         convo = "\n".join(log[-40:])   # cap at last 40 turns to stay within token budget
         prompt = (
@@ -1502,7 +1521,7 @@ class JarvisLive:
                         alerts = await asyncio.to_thread(monitor_check_all)
                         memory = load_memory()
                         lang_e = memory.get("identity", {}).get("language", {})
-                        lang   = (lang_e.get("value", "") if isinstance(lang_e, dict) else str(lang_e)).strip() or "English"
+                        lang   = (lang_e.get("value", "") if isinstance(lang_e, dict) else str(lang_e)).strip() or "Nepali"
                         for alert in alerts:
                             msg = (
                                 f"{alert}\n\n"
