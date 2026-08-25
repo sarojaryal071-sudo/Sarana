@@ -110,6 +110,15 @@ def _load_system_prompt() -> str:
             "Never simulate or guess results — always call the appropriate tool."
         )
 
+class _IdentityChanged(Exception):
+    """Internal marker raised by _watch_for_reconnect_request() to unwind
+    the current Gemini connection's TaskGroup when a login switches the
+    active account mid-session — see that method and
+    _set_user_profile()/run() for the full flow. Never raised for a real
+    error; run()'s except block special-cases this to reconnect
+    immediately, without the network-error backoff/messaging."""
+
+
 _CTRL_RE = re.compile(r"<ctrl\d+>", re.IGNORECASE)
 
 def _clean_transcript(text: str) -> str:
@@ -620,6 +629,17 @@ class JarvisLive:
         # does — nothing here in __init__ depends on it).
         self._auto_start    = auto_start
         self._start_event: asyncio.Event | None = None
+        # Set (fresh, per-connection — see run()) when a login changes the
+        # active identity while a Gemini session is already connected.
+        # Watched by _watch_for_reconnect_request(), one of the tasks in
+        # run()'s TaskGroup — see that method and _IdentityChanged for why
+        # a full reconnect (not just a corrected greeting) is what a real
+        # "start fresh with the new account" needs: voice (speech_config)
+        # is fixed at connect time exactly like system_instruction is, and
+        # has no in-conversation equivalent to _send_startup_briefing()'s
+        # identity_switch correction.
+        self._reconnect_requested: asyncio.Event | None = None
+        self._identity_switch_reconnect: bool = False
         # Phase 8: name of the currently identified web session, if any —
         # set via set_username_callback() (dashboard/server.py's
         # /login/username), consumed by _build_config()'s ADDRESS clause.
@@ -1727,6 +1747,23 @@ class JarvisLive:
             except Exception as e:
                 print(f"[Proactive] ⚠️ {e}")
 
+    async def _watch_for_reconnect_request(self) -> None:
+        """One of run()'s per-connection TaskGroup tasks: waits for
+        _reconnect_requested (set by _set_user_profile() when a login
+        changes the active identity while this session is already
+        connected — see that method) and, when it fires, raises
+        _IdentityChanged to unwind this connection's TaskGroup. run()'s
+        except block recognizes that exception and reconnects immediately
+        with a fresh _build_config() — the only way to actually refresh
+        the assistant's voice (speech_config) and system_instruction
+        (ADDRESS/[USER PROFILE]/assistant name) for the new account,
+        since none of those can be changed on an already-open Gemini Live
+        session. Ends normally (no exception) if the connection ends for
+        any other reason first — never blocks shutdown.
+        """
+        await self._reconnect_requested.wait()
+        raise _IdentityChanged()
+
     # ── Phone audio relay ────────────────────────────────────────────────────────
 
     async def _relay_phone_audio(self) -> None:
@@ -1793,8 +1830,30 @@ class JarvisLive:
         language_preference note, voice_preference) — does not itself touch
         the ADDRESS clause or the greeting; that's still
         set_username_callback()/_set_web_username()'s job, fired separately
-        by the same login/resolution."""
+        by the same login/resolution.
+
+        A genuine account switch (a different profile id than whatever was
+        active before, not a redundant re-submit of the same login) while
+        a Gemini session is already connected also requests a full
+        reconnect (see _watch_for_reconnect_request()/run()): voice
+        (speech_config) and system_instruction are both fixed at connect
+        time and have no in-conversation equivalent — a fresh connection
+        is the only way the new account's voice actually takes effect,
+        and it naturally gives the new login a genuinely clean session
+        (fresh _build_config(), the prior session's summary saved and its
+        turn log reset — see run()'s finally block/_save_session_summary())
+        instead of continuing to build on the previous user's conversation.
+        """
+        previous_id = (self._user_profile or {}).get("id")
         self._user_profile = profile
+        if (
+            profile.get("id") is not None
+            and profile.get("id") != previous_id
+            and self.session
+            and self._reconnect_requested is not None
+        ):
+            self.ui.write_log("SYS: Account switched — starting a fresh session for the new user.")
+            self._reconnect_requested.set()
 
     def _resolve_desktop_profile(self) -> None:
         """Desktop's equivalent of a web username+PIN login: resolves the
@@ -1985,10 +2044,11 @@ class JarvisLive:
                     client.aio.live.connect(model=LIVE_MODEL, config=config) as session,
                     asyncio.TaskGroup() as tg,
                 ):
-                    self.session          = session
-                    self.audio_in_queue   = asyncio.Queue()
-                    self.out_queue        = asyncio.Queue(maxsize=200)
-                    self._turn_done_event = asyncio.Event()
+                    self.session              = session
+                    self.audio_in_queue       = asyncio.Queue()
+                    self.out_queue            = asyncio.Queue(maxsize=200)
+                    self._turn_done_event     = asyncio.Event()
+                    self._reconnect_requested = asyncio.Event()
 
                     # Reset transient state that must not carry over from a previous session
                     self._pending_vision       = None
@@ -2012,6 +2072,7 @@ class JarvisLive:
                     tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
+                    tg.create_task(self._watch_for_reconnect_request())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
@@ -2055,6 +2116,21 @@ class JarvisLive:
                     isinstance(sub, asyncio.CancelledError) for sub in e.exceptions
                 ):
                     raise
+
+                # A login switched the active account mid-session (see
+                # _set_user_profile()/_watch_for_reconnect_request()) — not
+                # a real error, so no error print/traceback, no network-
+                # error backoff. finally: below still runs (session=None,
+                # prior session's summary saved if it had ≥3 turns), then
+                # `continue` reconnects immediately with a fresh
+                # _build_config() — the new account's voice/identity.
+                if isinstance(e, _IdentityChanged) or (
+                    isinstance(e, BaseExceptionGroup)
+                    and any(isinstance(sub, _IdentityChanged) for sub in e.exceptions)
+                ):
+                    self.ui.write_log("SYS: Reconnecting for the new account...")
+                    self._identity_switch_reconnect = True
+                    continue
 
                 err_str = str(e)
                 print(f"[JARVIS] Error ({type(e).__name__}): {e}")
@@ -2102,9 +2178,22 @@ class JarvisLive:
                     self._conn_backoff = 3
             finally:
                 self.session = None
-                # Only save if there was a real conversation (≥3 turns)
+                # Only save if there was a real conversation (≥3 turns) —
+                # _save_session_summary() itself resets self._session_log.
                 if len(self._session_log) >= 3:
                     asyncio.create_task(self._save_session_summary())
+                elif self._identity_switch_reconnect:
+                    # A different account is taking over this session (see
+                    # _set_user_profile()) and the outgoing one's turn log
+                    # was too short to summarize — still start the new
+                    # account with a clean activity log instead of letting
+                    # a handful of someone else's turns carry over into
+                    # the next connection's context. A plain network-error
+                    # reconnect (this flag unset) deliberately leaves the
+                    # log alone, exactly as before — same account, allowed
+                    # to keep accumulating toward a summary across a blip.
+                    self._session_log = []
+                self._identity_switch_reconnect = False
 
             self.set_speaking(False)
             self.ui.set_state("SLEEPING")
