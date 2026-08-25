@@ -46,6 +46,7 @@ from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
 )
+from users import user_db
 
 from actions.file_processor import file_processor
 from actions.flight_finder     import flight_finder
@@ -632,15 +633,21 @@ class JarvisLive:
         # reads the local machine's own clock/timezone correctly and needs
         # no override (see _local_now()).
         self._web_timezone: str | None = None
-        # Authenticated SQLite profile (users/user_db.py), if the current
-        # web session came from a successful username+PIN login — set via
-        # set_profile_callback()/_set_web_profile(). None on desktop and on
-        # any session that hasn't logged in with a known profile. Consumed
-        # by _build_config() for the [USER PROFILE] block, a personalized
-        # assistant_name, language_preference, and voice_preference —
-        # never for authentication itself, which is entirely dashboard/
-        # server.py's job before this is ever set.
-        self._web_profile: dict | None = None
+        # Canonical authenticated SQLite profile (users/user_db.py) for the
+        # CURRENT session, regardless of which interface established it:
+        # a web username+PIN login sets it via set_profile_callback() ->
+        # _set_user_profile(); desktop's own startup resolves it locally
+        # from config/api_keys.json's existing user_name (no PIN — see
+        # _resolve_desktop_profile(), called from run() only when
+        # auto_start=True). None when no profile could be resolved either
+        # way (unrecognized/unset name) — everything downstream that reads
+        # this already degrades to today's non-personalized defaults in
+        # that case. Consumed by _build_config() for the [USER PROFILE]
+        # block, a personalized assistant_name, language_preference, and
+        # voice_preference — never for authentication itself, which is
+        # entirely dashboard/server.py's (web) or _resolve_desktop_profile's
+        # (desktop) job before this is ever set.
+        self._user_profile: dict | None = None
         # Web login greeting (see _set_web_username()/run()): "session" for
         # the web surface means "a login", not "a process launch" the way it
         # does for desktop's own _briefing_sent — a long-lived Render process
@@ -814,13 +821,15 @@ class JarvisLive:
             self._asst_name = (_cfg.get("assistant_name") or "SARANA").strip()
         except Exception:
             self._asst_name = "SARANA"
-        # Personalized assistant identity (users/user_db.py's profile) takes
-        # priority over local config, same "web session overrides local
-        # config" pattern already used for the user's own name below —
-        # profiles without an assistant_name (or no profile at all, e.g.
-        # desktop) leave the existing default untouched.
-        if self._web_profile and self._web_profile.get("assistant_name"):
-            self._asst_name = self._web_profile["assistant_name"].strip() or self._asst_name
+        # Personalized assistant identity (users/user_db.py's canonical
+        # profile — same one regardless of desktop vs web, see
+        # _user_profile's docstring in __init__) takes priority over local
+        # config, same "session profile overrides local config" pattern
+        # already used for the user's own name below — a session with no
+        # resolved profile (unrecognized/unset name on either interface)
+        # leaves the existing default untouched.
+        if self._user_profile and self._user_profile.get("assistant_name"):
+            self._asst_name = self._user_profile["assistant_name"].strip() or self._asst_name
         _user_name = self._current_user_name()
 
         memory     = load_memory()
@@ -900,8 +909,8 @@ class JarvisLive:
         # for the current seed users (both "Nepali", already the default
         # above), but a real per-profile override for any future profile
         # whose stored preference differs.
-        if self._web_profile and self._web_profile.get("language_preference"):
-            _pref = self._web_profile["language_preference"].strip()
+        if self._user_profile and self._user_profile.get("language_preference"):
+            _pref = self._user_profile["language_preference"].strip()
             if _pref and _pref.lower() != "nepali":
                 _lang += (
                     f" This user's stored language preference is {_pref} — use "
@@ -909,14 +918,15 @@ class JarvisLive:
                     f"unless they explicitly ask otherwise."
                 )
 
-        # [USER PROFILE]: structured context from the authenticated
-        # users/user_db.py profile, when a web session logged in with one
-        # (see _set_web_profile()) — never hand-duplicated into the prompt
-        # separately from the database. Omitted entirely (no empty section)
-        # on desktop or an unauthenticated web session.
+        # [USER PROFILE]: structured context from the canonical authenticated
+        # users/user_db.py profile — the SAME profile/mechanism regardless of
+        # whether it was resolved via a web login or desktop startup (see
+        # _set_user_profile()/_resolve_desktop_profile()) — never hand-
+        # duplicated into the prompt separately from the database. Omitted
+        # entirely (no empty section) when no profile was resolved.
         _profile_ctx = ""
-        if self._web_profile:
-            p = self._web_profile
+        if self._user_profile:
+            p = self._user_profile
             _lines = ["[USER PROFILE]"]
             if p.get("nickname"):
                 _lines.append(f"Nickname: {p['nickname']}")
@@ -964,7 +974,7 @@ class JarvisLive:
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
                         voice_name=_voice_name_for_preference(
-                            self._web_profile.get("voice_preference") if self._web_profile else None
+                            self._user_profile.get("voice_preference") if self._user_profile else None
                         )
                     )
                 )
@@ -1703,9 +1713,13 @@ class JarvisLive:
 
     def _set_web_username(self, username: str) -> None:
         """Phase 8: fired by dashboard/server.py's /login/username via
-        set_username_callback(). Only affects the ADDRESS clause built in
-        _build_config() — does not touch prompts, memory, tools, or the
-        assistant's own identity/name in any way."""
+        set_username_callback() — a real login event, web-only (desktop
+        sets self._web_user_name directly in _resolve_desktop_profile()
+        instead, deliberately bypassing this method's greeting re-arm
+        below, which only makes sense for an actual login). Only affects
+        the ADDRESS clause built in _build_config() — does not touch
+        prompts, memory, tools, or the assistant's own identity/name in
+        any way."""
         self._web_user_name = username
         self.ui.write_log(f"SYS: Web session identified as '{username}'.")
 
@@ -1721,16 +1735,67 @@ class JarvisLive:
         else:
             self._pending_web_greeting = True
 
-    def _set_web_profile(self, profile: dict) -> None:
-        """Fired by dashboard/server.py's /login/username via
-        set_profile_callback(), with the authenticated users/user_db.py
-        profile (never includes pin_hash — see that module). Purely
-        additive context for _build_config() ([USER PROFILE] block,
-        personalized assistant_name, language_preference note, voice_
-        preference) — does not itself touch the ADDRESS clause or the
-        greeting; that's still set_username_callback()/_set_web_username()'s
-        job, fired separately by the same login (see dashboard/server.py)."""
-        self._web_profile = profile
+    def _set_user_profile(self, profile: dict) -> None:
+        """The canonical profile setter — the ONE place _user_profile is
+        ever assigned, called identically by both interfaces: web (fired
+        by dashboard/server.py's /login/username via set_profile_callback())
+        and desktop (fired by _resolve_desktop_profile() at startup). Same
+        users/user_db.py profile shape either way (never includes
+        pin_hash — see that module). Purely additive context for
+        _build_config() ([USER PROFILE] block, personalized assistant_name,
+        language_preference note, voice_preference) — does not itself touch
+        the ADDRESS clause or the greeting; that's still
+        set_username_callback()/_set_web_username()'s job, fired separately
+        by the same login/resolution."""
+        self._user_profile = profile
+
+    def _resolve_desktop_profile(self) -> None:
+        """Desktop's equivalent of a web username+PIN login: resolves the
+        SAME canonical SQLite profile (users/user_db.py) using
+        config/api_keys.json's existing user_name field as the lookup key
+        — the exact field _current_user_name() already falls back to, so
+        this reuses desktop's original identity mechanism instead of
+        creating a second one. Deliberately NO PIN check (see
+        user_db.get_profile_by_alias()'s own docstring for why that's the
+        correct choice here, not a weaker one): desktop is already its own
+        trust boundary, and adding a PIN prompt to the desktop UI for this
+        would be exactly the "redesign the desktop UI unnecessarily" this
+        feature is required not to do.
+
+        Silently does nothing (today's exact existing behavior) when
+        user_name is unset or doesn't match a seeded alias — this is
+        purely additive personalization, never a requirement to use the
+        SQLite system from desktop.
+        """
+        try:
+            with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            return
+        name = str(cfg.get("user_name", "")).strip()
+        if not name:
+            return
+        try:
+            profile = user_db.get_profile_by_alias(name)
+        except Exception:
+            return   # never let a local DB hiccup block desktop startup
+        if not profile:
+            return
+
+        self._set_user_profile(profile)
+        # Sets the same field _set_web_username() does, so the ADDRESS
+        # clause/greeting text is personalized identically either way —
+        # but deliberately NOT by calling _set_web_username() itself here,
+        # since that method's OTHER job (re-arming _pending_web_greeting
+        # for the web login-driven greeting flow) belongs only to an
+        # actual login event. Desktop's greeting trigger is already
+        # correct and unrelated to this (_briefing_sent, once per process
+        # launch, unconditional on any profile) — this only needs to fix
+        # WHAT NAME that existing greeting uses, not WHEN it fires.
+        display = profile.get("pronunciation") or profile.get("nickname") or profile.get("username")
+        if display:
+            self._web_user_name = display
+            self.ui.write_log(f"SYS: Desktop session identified as '{display}' (SQLite profile).")
 
     def _set_web_timezone(self, tz_name: str) -> None:
         """Fired by dashboard/server.py's /login/username via
@@ -1811,7 +1876,7 @@ class JarvisLive:
             self._dashboard.set_username_callback(self._set_web_username)
             # SQLite user/profile system: the authenticated profile reaches
             # JarvisLive the same wiring way as everything else above.
-            self._dashboard.set_profile_callback(self._set_web_profile)
+            self._dashboard.set_profile_callback(self._set_user_profile)
             # Device-local time fix: browser-reported IANA timezone reaches
             # _local_now() the same way username/interrupt already reach
             # their own JarvisLive methods.
@@ -1833,6 +1898,19 @@ class JarvisLive:
         except Exception as e:
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None
+
+        # Desktop's equivalent of a web login: resolves the SAME canonical
+        # SQLite profile locally (no PIN, no dashboard dependency — works
+        # even if the dashboard above failed to start). auto_start=True is
+        # exactly desktop's own signal (server_main.py always passes
+        # auto_start=False), so this never runs for web/headless, and never
+        # competes with an actual web login's own profile on the same
+        # process (Remote Access/dashboard-hosted-on-desktop case) — a
+        # later web login through the same dashboard still overrides this,
+        # same "whoever's actually driving the session wins" precedent
+        # already established for _web_user_name.
+        if self._auto_start:
+            self._resolve_desktop_profile()
 
         # Phase 7: web/headless lifecycle gate. Desktop's main() never passes
         # auto_start=False, so this block never executes there — the while

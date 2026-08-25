@@ -123,7 +123,7 @@ def test_saanaa_profile_reaches_build_config_as_structured_context() -> None:
             profile = user_db.authenticate("Bandana", "2060")
 
         jarvis = JarvisLive(HeadlessSurface())
-        jarvis._set_web_profile(profile)
+        jarvis._set_user_profile(profile)
         jarvis._set_web_username(profile["pronunciation"] or profile["nickname"])
         config = jarvis._build_config()
         instr = config.system_instruction
@@ -150,7 +150,7 @@ def test_saroj_profile_reaches_build_config_as_structured_context() -> None:
             profile = user_db.authenticate("Saroj", "2057")
 
         jarvis = JarvisLive(HeadlessSurface())
-        jarvis._set_web_profile(profile)
+        jarvis._set_user_profile(profile)
         jarvis._set_web_username(profile["nickname"])
         config = jarvis._build_config()
         instr = config.system_instruction
@@ -172,7 +172,7 @@ def test_no_profile_desktop_session_has_no_user_profile_block() -> None:
     no assistant-name override, default voice — exactly as before this
     feature existed."""
     jarvis = JarvisLive(HeadlessSurface())
-    assert jarvis._web_profile is None
+    assert jarvis._user_profile is None
     config = jarvis._build_config()
     assert "[USER PROFILE]" not in config.system_instruction
     assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Charon"
@@ -181,7 +181,7 @@ def test_no_profile_desktop_session_has_no_user_profile_block() -> None:
 
 def test_login_wires_profile_into_full_run_lifecycle() -> None:
     """End-to-end through dashboard/server.py's actual callback wiring
-    (set_profile_callback), not by calling _set_web_profile() directly."""
+    (set_profile_callback), not by calling _set_user_profile() directly."""
     import asyncio
 
     async def _run():
@@ -193,14 +193,14 @@ def test_login_wires_profile_into_full_run_lifecycle() -> None:
             client = TestClient(server.app)
 
             jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
-            server.set_profile_callback(jarvis._set_web_profile)
+            server.set_profile_callback(jarvis._set_user_profile)
             server.set_username_callback(jarvis._set_web_username)
 
             resp = client.post("/login/username", json={"username": "Radhe", "pin": "2060"})
             assert resp.status_code == 200
 
-            assert jarvis._web_profile is not None
-            assert jarvis._web_profile["assistant_name"] == "Kanha"
+            assert jarvis._user_profile is not None
+            assert jarvis._user_profile["assistant_name"] == "Kanha"
             assert jarvis._web_user_name == "Saanaa"
         finally:
             tmp.cleanup()

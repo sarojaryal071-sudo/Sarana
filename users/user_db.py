@@ -212,20 +212,11 @@ def init_db() -> None:
             conn.close()
 
 
-def authenticate(username: str, pin: str) -> dict | None:
-    """Case-insensitive alias lookup + constant-time PIN verification.
-    Returns the profile dict (no pin_hash) on success, None on ANY failure
-    (unknown alias or wrong PIN -- deliberately indistinguishable to the
-    caller, so a generic "invalid username or PIN" is the only thing that
-    can ever be shown to a client)."""
-    if not username or not pin:
-        return None
-    alias = username.strip().lower()
-
+def _lookup_row_by_alias(alias: str) -> sqlite3.Row | None:
     with _lock:
         conn = _connect()
         try:
-            row = conn.execute(
+            return conn.execute(
                 """
                 SELECT users.* FROM users
                 JOIN user_aliases ON user_aliases.user_id = users.id
@@ -236,8 +227,41 @@ def authenticate(username: str, pin: str) -> dict | None:
         finally:
             conn.close()
 
+
+def authenticate(username: str, pin: str) -> dict | None:
+    """Case-insensitive alias lookup + constant-time PIN verification.
+    Returns the profile dict (no pin_hash) on success, None on ANY failure
+    (unknown alias or wrong PIN -- deliberately indistinguishable to the
+    caller, so a generic "invalid username or PIN" is the only thing that
+    can ever be shown to a client). Use this for any network-facing login
+    path (see dashboard/server.py's /login/username) -- for a purely local,
+    already-trusted caller (desktop's own startup), see
+    get_profile_by_alias() instead."""
+    if not username or not pin:
+        return None
+    row = _lookup_row_by_alias(username.strip().lower())
     if row is None:
         return None
     if not _verify_pin(pin, row["pin_hash"]):
+        return None
+    return _row_to_profile(row)
+
+
+def get_profile_by_alias(alias: str) -> dict | None:
+    """PIN-less profile lookup, deliberately for a LOCAL, already-trusted
+    caller only -- e.g. desktop startup resolving config/api_keys.json's
+    existing user_name against these same seeded profiles (see main.py's
+    _resolve_desktop_profile()). Never call this from a network-facing
+    path; authenticate() (which requires and verifies a PIN) is what
+    dashboard/server.py's /login/username correctly uses instead. This
+    exists because desktop is already its own trust boundary -- whoever
+    is signed into the OS running the app can already read/edit
+    config/api_keys.json and data/sarana.db directly -- not because the
+    PIN requirement is being weakened anywhere it actually matters.
+    Returns the profile dict (no pin_hash) on a known alias, else None."""
+    if not alias:
+        return None
+    row = _lookup_row_by_alias(alias.strip().lower())
+    if row is None:
         return None
     return _row_to_profile(row)
