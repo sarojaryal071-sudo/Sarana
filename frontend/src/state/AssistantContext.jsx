@@ -95,7 +95,17 @@ function reducer(state, action) {
     case "DISMISS_CONTENT":
       return { ...state, content: null };
     case "RESET_FOR_LOGOUT":
-      return { ...initialState, assistantName: state.assistantName, tools: state.tools };
+      // Item 8: also doubles as "start a fresh session" on a new login, not
+      // just logout — clears messages (activity log) and per-connection
+      // state while keeping what GET /api/session already told us (no
+      // refetch triggered by a login) so the header doesn't flash stale
+      // placeholders.
+      return {
+        ...initialState,
+        assistantName: state.assistantName,
+        tools: state.tools,
+        desktopConnected: state.desktopConnected,
+      };
     default:
       return state;
   }

@@ -553,6 +553,7 @@ class DashboardServer:
         self._wake_callback               = None
         self._connect_callback            = None
         self._username_callback           = None   # Phase 8: fires on a successful /login/username
+        self._interrupt_callback          = None   # web interrupt control: fires main.py's interrupt()
         # Phase 8: lightweight session bookkeeping — which auth path issued a
         # token, and (for username logins only) which name. Not a user
         # database, no registration, nothing persisted past process
@@ -626,6 +627,13 @@ class DashboardServer:
         JarvisLive (see main.py's run(), mirrors set_wake_callback/
         set_connect_callback's exact wiring pattern)."""
         self._username_callback = fn
+
+    def set_interrupt_callback(self, fn) -> None:
+        """fn() is called on a successful POST /api/interrupt — the web
+        equivalent of the desktop UI's INTERRUPT button/Esc key
+        (ui.py's on_interrupt), reusing the exact same JarvisLive.interrupt()
+        (main.py's run() wires this identically to set_wake_callback)."""
+        self._interrupt_callback = fn
 
     # ── broadcast ────────────────────────────────────────────────────────
 
@@ -905,6 +913,18 @@ class DashboardServer:
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             if self._wake_callback:
                 self._wake_callback()
+            return JSONResponse({"ok": True})
+
+        @app.post("/api/interrupt")
+        async def interrupt_ep(req: Request):
+            """Web equivalent of the desktop INTERRUPT button — stops SARANA
+            mid-speech via the exact same JarvisLive.interrupt() the desktop
+            UI already calls (see set_interrupt_callback()). No new
+            interruption logic lives here."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            if self._interrupt_callback:
+                self._interrupt_callback()
             return JSONResponse({"ok": True})
 
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────

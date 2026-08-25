@@ -605,6 +605,14 @@ class JarvisLive:
         # back to config/api_keys.json's existing user_name exactly as
         # before this phase when unset — see _build_config().
         self._web_user_name: str | None = None
+        # Web login greeting (see _set_web_username()/run()): "session" for
+        # the web surface means "a login", not "a process launch" the way it
+        # does for desktop's own _briefing_sent — a long-lived Render process
+        # serves many logins over its life, and each one should still get a
+        # greeting. True while a login has happened but the greeting for it
+        # hasn't been sent yet (either the Gemini connection isn't up yet, or
+        # it's already up and a task has just been scheduled).
+        self._pending_web_greeting: bool = False
         self.session              = None
         self.audio_in_queue       = None
         self.out_queue            = None
@@ -711,7 +719,13 @@ class JarvisLive:
                 except Exception:
                     break
             if drained:
-                print(f"[JARVIS] ✋ Interrupted — {drained} audio chunks discarded")
+                # No emoji here — this now also runs synchronously inside the
+                # /api/interrupt request handler (item 2's web interrupt
+                # control), and a cp1252 console (Windows Git-Bash) raising
+                # UnicodeEncodeError on an emoji print would otherwise turn a
+                # successful interrupt into a 500 response. Same fix pattern
+                # already applied to _listen_audio/_play_audio/_receive_audio.
+                print(f"[JARVIS] Interrupted — {drained} audio chunks discarded")
         self.set_speaking(False)
         if self._turn_done_event:
             self._turn_done_event.clear()
@@ -1579,6 +1593,18 @@ class JarvisLive:
         self._web_user_name = username
         self.ui.write_log(f"SYS: Web session identified as '{username}'.")
 
+        # Item 7 (web greeting): reuse _send_startup_briefing() unchanged —
+        # no new greeting text, no hardcoding. If a Gemini session is already
+        # connected (a later login on a long-lived process, session already
+        # active), fire the greeting right now. Otherwise run()'s auto_start
+        # gate is still waiting (the very first login) — set the flag and let
+        # run()'s existing post-connect check send it once, exactly once,
+        # right after that connection is established (see run()).
+        if self.session and self._loop:
+            self._loop.create_task(self._send_startup_briefing())
+        else:
+            self._pending_web_greeting = True
+
     # ── dashboard command relay ─────────────────────────────────────────────
 
     async def _process_dashboard_commands(self) -> None:
@@ -1623,6 +1649,11 @@ class JarvisLive:
             # session's username (from /login/username) reaches JarvisLive
             # here, exactly like set_connect_callback/set_wake_callback.
             self._dashboard.set_username_callback(self._set_web_username)
+            # Item 2 (web interrupt control): reuses the exact same
+            # interrupt() the desktop UI's INTERRUPT button/Esc key already
+            # call (self.ui.on_interrupt, wired in __init__) — no second
+            # interruption mechanism, just a new way to reach the same one.
+            self._dashboard.set_interrupt_callback(self.interrupt)
             # Phase 7: reuses the dashboard's existing (previously unwired)
             # wake mechanism — /api/wake, /api/command, and /ws "command"
             # already all call _wake_callback() today. No new route, no new
@@ -1692,9 +1723,17 @@ class JarvisLive:
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
-                    # Morning briefing — fires once per process launch (if enabled)
-                    if not self._briefing_sent and get_brief_enabled():
+                    # Morning briefing — fires once per process launch on
+                    # desktop (auto_start=True), if enabled. Web/headless
+                    # (auto_start=False) never takes this branch — its
+                    # greeting is login-driven via _pending_web_greeting
+                    # instead (see _set_web_username()), because one
+                    # long-lived process there serves many logins, not one.
+                    if self._auto_start and not self._briefing_sent and get_brief_enabled():
                         self._briefing_sent = True
+                        tg.create_task(self._send_startup_briefing())
+                    elif self._pending_web_greeting:
+                        self._pending_web_greeting = False
                         tg.create_task(self._send_startup_briefing())
 
             except KeyboardInterrupt:

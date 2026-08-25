@@ -60,10 +60,37 @@ input {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 10px 18px;
+  flex-wrap: wrap;
+  gap: clamp(6px, 2vw, 16px);
+  padding: 10px clamp(10px, 3vw, 18px);
   border-bottom: 1px solid var(--border);
   background: var(--panel);
+}
+
+@media (max-width: 560px) {
+  /* Narrow phones: let the header wrap to a second line instead of
+     overflowing horizontally — flex-wrap above already allows it; this
+     just drops the least essential bit (the date) to keep it to two lines
+     instead of three. */
+  .app-header .clock .date {
+    display: none;
+  }
+}
+
+.hamburger-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-a);
+  border-radius: 4px;
+  color: var(--pri);
+  font-size: 16px;
+  line-height: 1;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.hamburger-btn:hover {
+  background: var(--pri-ghost);
+  border-color: var(--pri);
 }
 
 .app-header .brand {
@@ -156,7 +183,7 @@ input {
 }
 
 .panel-left {
-  flex: 0 0 68px;
+  flex: 0 0 clamp(52px, 8vw, 68px);
   border-right: 1px solid var(--border);
   background: var(--panel);
   display: flex;
@@ -166,18 +193,13 @@ input {
   gap: 10px;
 }
 
+/* Item 3/6: the log used to live in a fixed-width right column and grew
+   the page vertically; it now lives in the SidePanel drawer instead, so
+   panel-center (orb + content + controls) owns the full remaining width
+   and fits the viewport on its own — no column to overflow. */
 .panel-center {
   flex: 1;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.panel-right {
-  flex: 0 0 340px;
-  max-width: 40vw;
-  border-left: 1px solid var(--border);
-  background: var(--panel);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -186,22 +208,6 @@ input {
 @media (max-width: 900px) {
   .panel-left {
     display: none;
-  }
-  .panel-right {
-    flex-basis: 280px;
-  }
-}
-
-@media (max-width: 680px) {
-  .app-body {
-    flex-direction: column;
-    overflow-y: auto;
-  }
-  .panel-right {
-    max-width: none;
-    flex-basis: auto;
-    border-left: none;
-    border-top: 1px solid var(--border);
   }
 }
 
@@ -299,6 +305,15 @@ input {
 .controls .row {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Item 2: only rendered while SARANA is speaking (see Controls.jsx) —
+   deliberately loud/red so it reads as an emergency control, not another
+   idle toggle. */
+.interrupt-btn {
+  flex-shrink: 0;
+  background: rgba(255, 51, 85, 0.12);
 }
 
 .btn {
@@ -344,12 +359,22 @@ input {
 
 .text-input-row input {
   flex: 1;
+  min-width: 0;
   background: #000d12;
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--text);
   padding: 8px 10px;
-  font-size: 12px;
+  font-size: 13px;
+}
+
+@media (max-width: 680px) {
+  /* >= 16px so iOS Safari doesn't auto-zoom the page on focus (same root
+     cause/fix as .login-name-input) — only needed at phone widths; desktop
+     keeps the more compact 13px command bar. */
+  .text-input-row input {
+    font-size: 16px;
+  }
 }
 .text-input-row input:focus {
   outline: none;
@@ -435,12 +460,15 @@ input {
   border-color: var(--pri);
 }
 
-/* The name field reads like a name, not a PIN — no letter-spacing/caps. */
+/* The name field reads like a name, not a PIN — no letter-spacing/caps.
+   font-size stays >= 16px (item 5): iOS Safari auto-zooms the page on focus
+   for any input rendered smaller than that — this is the actual fix, not a
+   viewport hack, so pinch-zoom stays available everywhere else. */
 .login-name-input {
   letter-spacing: normal !important;
   text-align: left !important;
   text-transform: none !important;
-  font-size: 14px !important;
+  font-size: 16px !important;
 }
 
 .login-card .error {
@@ -478,6 +506,122 @@ input {
 .conn-banner.error {
   background: #1a0006;
   color: var(--muted-c);
+}
+
+/* ── side panel (hamburger menu — item 4) ──────────────────────────────
+   Overlay drawer, not a layout column: opening it never resizes/pushes the
+   main dashboard, and it scrolls internally (its own flex column with
+   min-height: 0 around .log-feed), so the main page never becomes a long
+   scrolling conversation view. */
+.side-panel-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 6, 10, 0.6);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.side-panel-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.side-panel {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 61;
+  width: clamp(260px, 82vw, 360px);
+  max-width: 100vw;
+  background: var(--panel);
+  border-right: 1px solid var(--border-b);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  transform: translateX(-100%);
+  transition: transform 0.2s ease;
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.4);
+}
+.side-panel.open {
+  transform: translateX(0);
+}
+
+.side-panel-hdr {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 10px 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.side-panel-tabs {
+  flex: 1;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.side-panel-tab {
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 7px 10px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.side-panel-tab:hover {
+  color: var(--text);
+}
+.side-panel-tab.active {
+  color: var(--pri);
+  border-color: var(--border-a);
+  background: var(--pri-ghost);
+}
+
+.side-panel-close {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+.side-panel-close:hover {
+  color: var(--pri);
+}
+
+.side-panel-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.side-panel-body .log-feed {
+  height: 100%;
+}
+
+.settings-placeholder {
+  padding: 16px 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
+@media (max-width: 480px) {
+  .side-panel {
+    width: 100vw;
+  }
 }
 
 /* ── scrollbars ─────────────────────────────────────────────────────── */

@@ -100,4 +100,14 @@ export async function sendWake(token) {
   return asJson(resp);
 }
 
+/** POST /api/interrupt — stop SARANA mid-speech via the same interrupt()
+ * the desktop UI's INTERRUPT button/Esc key already call. */
+export async function sendInterrupt(token) {
+  const resp = await fetch(`${BACKEND_URL}/api/interrupt`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return asJson(resp);
+}
+
 export { ApiError };

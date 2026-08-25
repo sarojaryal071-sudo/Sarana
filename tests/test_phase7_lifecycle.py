@@ -47,6 +47,7 @@ class _FakeDashboard:
         self._wake_fn = None
         self._connect_fn = None
         self._username_callback = None  # Phase 8
+        self._interrupt_fn = None
         self._command_queue = asyncio.Queue()
         self._phone_audio_queue = asyncio.Queue()  # touched by _relay_phone_audio
 
@@ -58,6 +59,9 @@ class _FakeDashboard:
 
     def set_username_callback(self, fn):
         self._username_callback = fn
+
+    def set_interrupt_callback(self, fn):
+        self._interrupt_fn = fn
 
     async def serve(self):
         await asyncio.Event().wait()  # never returns — mimics a live server

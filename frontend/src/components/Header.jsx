@@ -9,7 +9,14 @@ function useClock() {
   return now;
 }
 
-export default function Header({ assistantName, connectionState, desktopConnected, username, authMode }) {
+export default function Header({
+  assistantName,
+  connectionState,
+  desktopConnected,
+  username,
+  authMode,
+  onMenuClick,
+}) {
   const now = useClock();
   const time = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const date = now.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
@@ -28,6 +35,14 @@ export default function Header({ assistantName, connectionState, desktopConnecte
 
   return (
     <header className="app-header">
+      <button
+        type="button"
+        className="hamburger-btn"
+        onClick={onMenuClick}
+        aria-label="Open menu"
+      >
+        ☰
+      </button>
       <div className="brand">
         <span className="name">{assistantName}</span>
         <span className="sub">{subLabel}</span>

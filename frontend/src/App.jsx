@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAssistantDispatch, useAssistantState } from "./state/AssistantContext";
-import { fetchSession, sendCommand, ApiError } from "./lib/api";
+import { fetchSession, sendCommand, sendInterrupt, ApiError } from "./lib/api";
 import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
 import { MicStreamer } from "./lib/mic";
 import LoginScreen, { readStoredSession, clearStoredToken } from "./components/LoginScreen";
 import Header from "./components/Header";
 import Orb from "./components/Orb";
-import LogPanel from "./components/LogPanel";
+import SidePanel from "./components/SidePanel";
 import ContentPanel from "./components/ContentPanel";
 import Controls from "./components/Controls";
 import ConnectionBanner from "./components/ConnectionBanner";
@@ -21,10 +21,12 @@ export default function App() {
 
   const [sessionError, setSessionError] = useState(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const socketRef = useRef(null);
   const audioRef = useRef(null);
   const micRef = useRef(null);
   const audioIdleTimer = useRef(null);
+  const micAutoStartedRef = useRef(false); // item 1: auto-start mic once per login, not per utterance
 
   // ── GET /api/session — unauthenticated, works before any login ─────────
   const loadSession = useCallback(async () => {
@@ -142,10 +144,42 @@ export default function App() {
       clearTimeout(audioIdleTimer.current);
       socketRef.current = null;
       audioRef.current = null;
+      // Session is ending (logout / token change / auth failure) — the mic
+      // shouldn't keep streaming against a dead token, and the next login
+      // gets its own fresh auto-start (see the effect below).
+      micRef.current?.stop();
+      micRef.current = null;
+      micAutoStartedRef.current = false;
     };
   }, [state.authenticationState, state.token, dispatch]);
 
+  // Item 1: once the WS is actually open, start the mic automatically —
+  // reuses handleToggleMic()/MicStreamer unchanged, just calls it for the
+  // user instead of waiting for a click. This still runs inside the async
+  // continuation of the login button's own click (well within every
+  // browser's transient-activation window for getUserMedia), so the one
+  // permission prompt this can trigger is the same "first browser
+  // permission request" the spec accepts. If the browser denies/blocks it
+  // anyway, MicStreamer already reports "denied"/"unsupported" and
+  // Controls.jsx surfaces that honestly — no fake workaround. Runs once per
+  // login (guarded by the ref, reset on logout above); a manual mic stop
+  // afterward is respected — this never force-restarts it.
+  useEffect(() => {
+    if (state.authenticationState !== "authenticated") return;
+    if (state.connectionState !== "connected") return;
+    if (micAutoStartedRef.current) return;
+    micAutoStartedRef.current = true;
+    handleToggleMic();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.authenticationState, state.connectionState]);
+
   function handleAuthenticated(session) {
+    // Item 8: activity log = current session's UI history, not persistent
+    // memory (that's the backend's memory system, untouched here) — a new
+    // login starts a fresh log instead of appending to whatever a previous
+    // login in this tab already accumulated. RESET_FOR_LOGOUT already
+    // existed in the reducer; this just wires it in.
+    dispatch({ type: "RESET_FOR_LOGOUT" });
     dispatch({
       type: "AUTH_STATE",
       value: "authenticated",
@@ -153,6 +187,28 @@ export default function App() {
       authMode: session.authMode,
       username: session.username,
     });
+  }
+
+  // Item 2: web equivalent of the desktop INTERRUPT button — stops the
+  // backend mid-speech via the existing interrupt() mechanism (POST
+  // /api/interrupt) AND clears whatever's already scheduled in the
+  // browser's own audio queue, so it's a real interrupt, not just a paused
+  // animation. Returns to LISTENING via the same STATUS_MESSAGE the backend
+  // already sends after interrupt() runs (main.py's ui.write_log path) —
+  // no separate control system.
+  function handleInterrupt() {
+    audioRef.current?.stopPlayback();
+    clearTimeout(audioIdleTimer.current);
+    // Reuses the exact SPEAKING→LISTENING transition AUDIO_IDLE_TIMEOUT
+    // already performs (see AssistantContext.jsx) instead of a new action —
+    // fired immediately here since playback was just force-stopped, not
+    // left to the normal 900ms idle wait.
+    dispatch({ type: "AUDIO_IDLE_TIMEOUT" });
+    if (state.token) {
+      sendInterrupt(state.token).catch(() => {
+        dispatch({ type: "SYS_MESSAGE", text: "Interrupt failed to send.", ts: null });
+      });
+    }
   }
 
   function handleSend(text) {
@@ -208,6 +264,7 @@ export default function App() {
         desktopConnected={state.desktopConnected}
         username={state.username}
         authMode={state.authMode}
+        onMenuClick={() => setMenuOpen(true)}
       />
       {authenticated && <ConnectionBanner connectionState={state.connectionState} />}
       <div className="app-body">
@@ -217,17 +274,17 @@ export default function App() {
         <div className="panel-center">
           <Orb status={authenticated ? state.assistantStatus : "SLEEPING"} assistantName={state.assistantName} />
           <ContentPanel content={state.content} onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })} />
-        </div>
-        <div className="panel-right">
-          <LogPanel messages={state.messages} />
           <Controls
             onSend={handleSend}
             micState={state.microphoneState}
             onToggleMic={handleToggleMic}
             disabled={disabled}
+            assistantStatus={authenticated ? state.assistantStatus : "SLEEPING"}
+            onInterrupt={handleInterrupt}
           />
         </div>
       </div>
+      <SidePanel open={menuOpen} onClose={() => setMenuOpen(false)} messages={state.messages} />
       {!authenticated && (
         <LoginScreen
           assistantName={state.assistantName}

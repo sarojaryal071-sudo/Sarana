@@ -29,6 +29,7 @@ export class AudioOutPlayer {
 
     this._ctx = null;
     this._nextStartTime = 0;
+    this._activeSources = []; // scheduled/playing AudioBufferSourceNodes — see stopPlayback()
   }
 
   connect() {
@@ -93,12 +94,35 @@ export class AudioOutPlayer {
     const src = ctx.createBufferSource();
     src.buffer = audioBuffer;
     src.connect(ctx.destination);
+    src.onended = () => {
+      const i = this._activeSources.indexOf(src);
+      if (i !== -1) this._activeSources.splice(i, 1);
+    };
+    this._activeSources.push(src);
 
     // Schedule chunks back-to-back so gaps between WS messages don't turn
     // into audible gaps in speech, but never schedule into the past.
     const startAt = Math.max(this._nextStartTime, ctx.currentTime);
     src.start(startAt);
     this._nextStartTime = startAt + audioBuffer.duration;
+  }
+
+  /** Item 2 (interrupt control): stop everything already scheduled/playing
+   * in the browser and drop the schedule cursor back to "now" — the
+   * server-side interrupt (see api.js's sendInterrupt) stops new audio at
+   * the source, but any chunks already sent to the browser before that
+   * lands would otherwise keep playing out. Does not close the socket —
+   * playback of the *next* response still works normally afterward. */
+  stopPlayback() {
+    for (const src of this._activeSources) {
+      try {
+        src.stop();
+      } catch {
+        /* already stopped/ended */
+      }
+    }
+    this._activeSources = [];
+    if (this._ctx) this._nextStartTime = this._ctx.currentTime;
   }
 
   _scheduleReconnect() {
