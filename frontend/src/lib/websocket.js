@@ -6,12 +6,16 @@
 //                      {"type": "device_action_result", ...}  (not sent by
 //                        this frontend — that's a Phase 6 desktop-agent
 //                        message, reserved but not implemented anywhere yet)
+//                      {"type": "ping", "t": <ms>}  (item 3 audit — RTT probe,
+//                        see _startPinging()/_onPong() below)
 //   server -> client: {"type": "log", "speaker", "text", "ts"}
 //                      {"type": "status", "state"}
 //                      {"type": "sys", "text"}
 //                      {"type": "file_received", ...}
 //                      {"type": "content", "title", "text"}
 //                      {"type": "device_action", ...}  (reserved, unsent today)
+//                      {"type": "pong", "t": <the ping's own timestamp>}
+//                        (handled internally, never forwarded to onMessage)
 //
 // This class only connects/reconnects/dispatches. It never crashes the app
 // on an unrecognized message type — same tolerance the backend itself has
@@ -19,9 +23,20 @@
 // receive loop).
 
 import { wsBaseUrl } from "./api";
+import { LatencyStats } from "./latencyStats";
 
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 15000;
+
+// Item 3 audit (transport latency): a lightweight browser<->Render RTT
+// probe over the EXISTING /ws JSON channel — deliberately NOT touching
+// /ws/phone-audio or /ws/audio-out's binary audio protocol at all, so
+// there is zero risk to audio reliability from adding this. This is the
+// one number backend-only instrumentation can't produce on its own: the
+// actual physical network cost between this browser and Render.
+const PING_INTERVAL_MS = 20000;
+// Console only, and only every Nth pong — never spams on every RTT sample.
+const PING_LOG_EVERY_N = 5;
 
 export class JarvisSocket {
   /**
@@ -38,6 +53,9 @@ export class JarvisSocket {
     this._attempt = 0;
     this._reconnectTimer = null;
     this._everOpened = false;
+    this._pingTimer = null;
+    this._rtt = new LatencyStats();
+    this._pongCount = 0;
   }
 
   connect() {
@@ -62,6 +80,7 @@ export class JarvisSocket {
       this._attempt = 0;
       this._everOpened = true;
       this._setState("open");
+      this._startPinging();
     };
 
     ws.onmessage = (event) => {
@@ -70,6 +89,10 @@ export class JarvisSocket {
         msg = JSON.parse(event.data);
       } catch {
         return; // malformed message — ignore, never crash the UI
+      }
+      if (msg.type === "pong") {
+        this._onPong(msg.t);
+        return;   // measurement-only — never forwarded to onMessage/reducer
       }
       try {
         this._handlers.onMessage?.(msg);
@@ -84,6 +107,7 @@ export class JarvisSocket {
 
     ws.onclose = () => {
       this._setState("closed");
+      this._stopPinging();
       if (this._closedByUser) return;
       // The backend closes with 4001 immediately (never reaching onopen)
       // when the token is missing/invalid — an auth problem, not a
@@ -94,6 +118,35 @@ export class JarvisSocket {
       }
       this._scheduleReconnect();
     };
+  }
+
+  // ── RTT probe (item 3 audit) ─────────────────────────────────────────
+  _startPinging() {
+    this._stopPinging();
+    this._pingTimer = setInterval(() => {
+      if (this._ws?.readyState === WebSocket.OPEN) {
+        this._ws.send(JSON.stringify({ type: "ping", t: Date.now() }));
+      }
+    }, PING_INTERVAL_MS);
+  }
+
+  _stopPinging() {
+    clearInterval(this._pingTimer);
+    this._pingTimer = null;
+  }
+
+  _onPong(sentAt) {
+    if (typeof sentAt !== "number") return;
+    const rtt = Date.now() - sentAt;
+    this._rtt.record(rtt);
+    this._pongCount += 1;
+    if (this._pongCount % PING_LOG_EVERY_N === 0) {
+      const s = this._rtt.summary();
+      console.info(
+        `[Sarana] browser<->server RTT: avg=${s.avg.toFixed(0)}ms ` +
+        `p50=${s.p50}ms p95=${s.p95}ms max=${s.max}ms (n=${s.count})`
+      );
+    }
   }
 
   _scheduleReconnect() {
@@ -121,6 +174,7 @@ export class JarvisSocket {
   close() {
     this._closedByUser = true;
     clearTimeout(this._reconnectTimer);
+    this._stopPinging();
     this._ws?.close();
   }
 }

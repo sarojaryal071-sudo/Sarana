@@ -141,6 +141,7 @@ import time
 from pathlib import Path
 
 from users import user_db
+from core.latency_stats import LatencyStats
 
 _DEPS_OK = False
 try:
@@ -622,6 +623,8 @@ class DashboardServer:
         self._device_sessions: dict[str, dict] = {}  # device_token → {session_key}
         self._phone_audio_queue: asyncio.Queue    = asyncio.Queue(maxsize=200)
         self._phone_audio_dropped: int            = 0   # instrumentation — see phone_audio_ws's QueueFull handler
+        self._phone_audio_queue_depth              = LatencyStats()   # instrumentation — item 3 audit
+        self._phone_audio_frames: int             = 0   # sample counter for the periodic depth log above
         self._uploads_dir                 = UPLOADS_DIR
         self._login_html                  = _read("login.html")
         self._app_html                    = _read("app.html")
@@ -742,6 +745,21 @@ class DashboardServer:
         ]
         for tok in stale:
             self._forget_token(tok)
+
+    def _reset_activity_history(self) -> None:
+        """Clears self._history — the Activity Log's data (see broadcast()
+        below and ws_ep()'s initial-history replay). Called on every
+        successful /login/username AND on /api/logout, so a fresh /ws
+        connection's replay-the-last-50-entries behavior can never hand a
+        new login a previous user's conversation: the leak wasn't in the
+        frontend's own state (RESET_FOR_LOGOUT already cleared that
+        correctly) — it was that a brand new /ws connection, opened right
+        after login, immediately received this GLOBAL, never-cleared
+        history and fed it straight back into the "already cleared"
+        frontend state. This is the Activity Log only — completely
+        separate from and never touches the persistent memory system
+        (memory/memory_manager.py)."""
+        self._history = []
 
     # ── broadcast ────────────────────────────────────────────────────────
 
@@ -942,6 +960,13 @@ class DashboardServer:
             if timezone:
                 self._session_timezones[tok] = timezone
 
+            # Privacy fix: every username login starts the Activity Log
+            # fresh — see _reset_activity_history()'s own docstring for
+            # why this belongs here (a global, un-scoped _history was
+            # being replayed to whichever browser opened /ws next,
+            # regardless of who it actually belonged to).
+            self._reset_activity_history()
+
             # Profile before username: _set_user_profile() (fired by
             # set_profile_callback) is what decides whether this login
             # needs a full reconnect (a different account than whatever
@@ -1118,9 +1143,22 @@ class DashboardServer:
             torn down client-side (see App.jsx's socket-teardown effect,
             which already runs on every auth-state change); this only
             prevents the token being used to open new ones.
+
+            Privacy fix: a username-login token logging out also clears
+            the Activity Log now (see _reset_activity_history()) — defense
+            in depth alongside the same clear on the NEXT login, so a
+            logged-out user's activity doesn't linger in the shared
+            buffer even briefly. Scoped to "username" tokens only — a
+            Remote Access (PIN) token logging out does NOT clear it,
+            since that path is reattaching to an ongoing desktop session,
+            not ending a distinct identity's session (mirrors the same
+            distinction /login/username's own history-reset already
+            makes by only firing there, not from /login).
             """
             tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
             if tok:
+                if self._session_auth_mode.get(tok) == "username":
+                    self._reset_activity_history()
                 self._forget_token(tok)
             return JSONResponse({"ok": True})
 
@@ -1143,6 +1181,24 @@ class DashboardServer:
                         self._phone_audio_queue.put_nowait(
                             {"data": data, "mime_type": "audio/pcm"}
                         )
+                        # Instrumentation (item 3 audit — transport
+                        # latency): queue DEPTH, not per-chunk latency —
+                        # deliberately not timestamping/mutating the audio
+                        # payload itself (media dict handed to Gemini's
+                        # SDK downstream) to avoid any risk of the SDK
+                        # rejecting an unexpected key on a live audio
+                        # path. Depth is still a direct, safe proxy for
+                        # "is this hop backing up" (item 3's own required
+                        # metric), and pairs with the drop counter above
+                        # for a complete picture without touching the hot
+                        # path's data shape at all.
+                        self._phone_audio_queue_depth.record(self._phone_audio_queue.qsize())
+                        self._phone_audio_frames += 1
+                        if self._phone_audio_frames % 200 == 1:
+                            print(
+                                f"[Dashboard] phone-audio queue depth: "
+                                f"{self._phone_audio_queue_depth.summary()}"
+                            )
                     except asyncio.QueueFull:
                         # Instrumentation (item 4 audit): this used to be a
                         # completely silent drop — no way to tell whether
@@ -1311,6 +1367,21 @@ class DashboardServer:
                         # type doesn't disrupt the connection or the loop.
                         print(f"[Dashboard] device_action_result received "
                               f"(Phase 6 will act on this): {data.get('action')}")
+
+                    elif msg_type == "ping":
+                        # Instrumentation (item 3 audit — transport
+                        # latency): a lightweight, existing-channel RTT
+                        # probe. This does NOT touch the audio protocol at
+                        # all (/ws/phone-audio, /ws/audio-out are
+                        # untouched) — it's the safe way to get a REAL
+                        # measured browser<->Render round-trip number
+                        # (which the audit could only reason about, not
+                        # measure) without embedding timestamps into the
+                        # binary audio payload the SDK consumes. Echoes
+                        # the client's own timestamp back unchanged; the
+                        # client computes its own RTT — this server holds
+                        # no ping history/state.
+                        await websocket.send_json({"type": "pong", "t": data.get("t")})
 
                     # Any other type: ignored — exactly the existing
                     # behavior, now made explicit rather than incidental.

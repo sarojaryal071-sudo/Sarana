@@ -28,6 +28,29 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+# ── Console encoding robustness (root cause of the "missing greeting" bug) ──
+# Windows consoles often default to a legacy codepage (cp1252) that cannot
+# represent most Unicode text. Earlier fixes in this file removed emoji from
+# specific hardcoded print() strings, but that approach doesn't work for
+# DYNAMIC content — and now that Nepali is the default response/transcript
+# language (see _build_config()'s LANGUAGE clause), print()ing a live user
+# or Gemini transcript routinely contains Devanagari script. When that print
+# (e.g. core/headless_surface.py's write_log(), called from _receive_audio())
+# raises UnicodeEncodeError, it cancels the entire run() TaskGroup — every
+# sibling task, including whatever greeting/response was still being
+# streamed — forcing a reconnect mid-greeting. Live-reproduced: a Nepali
+# transcript crashed exactly this way and visibly cut off the startup
+# greeting. Reconfiguring stdout/stderr once, here, at process start (before
+# ui.py or server_main.py import anything) makes every print() in the whole
+# process — desktop or web — safe for arbitrary Unicode instead of requiring
+# each call site to stay hand-verified ASCII-only. errors="replace" degrades
+# an unprintable character to "?" rather than crashing; it never raises.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Render/headless fix: sounddevice binds to the native PortAudio library,
 # which Render's containers don't have installed — `import sounddevice`
 # itself raises OSError there (not just stream construction), before any
@@ -47,6 +70,7 @@ from memory.memory_manager import (
     save_session_summary, pop_last_session,
 )
 from users import user_db
+from core.latency_stats import LatencyStats
 
 from actions.file_processor import file_processor
 from actions.flight_finder     import flight_finder
@@ -693,6 +717,19 @@ class JarvisLive:
         self._speaking_lock       = threading.Lock()
         self._phone_active        = False   # True while phone mic is streaming; pauses PC mic
         self._phone_relay_dropped = 0       # instrumentation — see _relay_phone_audio()'s QueueFull handler
+        # Item 3 audit (transport latency) — safe, non-invasive metrics:
+        # queue DEPTHS (out_queue/audio_in_queue) and PROCESSING TIME
+        # measured entirely within a single function's own scope
+        # (_relay_phone_audio()'s dequeue-to-forward, _play_audio()'s
+        # dequeue-to-broadcast) — never by timestamping/mutating the audio
+        # payload dicts themselves, which are handed to the Gemini SDK
+        # downstream and must stay exactly the shape the SDK expects.
+        self._out_queue_depth       = LatencyStats()
+        self._audio_in_queue_depth  = LatencyStats()
+        self._relay_forward_time    = LatencyStats()   # phone-queue -> out_queue, seconds
+        self._play_batch_time       = LatencyStats()   # dequeue -> broadcast_audio(), seconds
+        self._relay_sample_count    = 0
+        self._play_sample_count     = 0
         self._pending_vision       = None    # (img_bytes, mime_type, question, angle) to inject after tool response
         self._vision_cam_active    = False   # True if camera was opened for vision → auto-close after response
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
@@ -1509,6 +1546,13 @@ class JarvisLive:
                     continue
 
                 self.set_speaking(True)
+                # Item 3 audit — this batch's own processing time (from
+                # the moment its first chunk left audio_in_queue to the
+                # moment it's handed to broadcast_audio() below), plus
+                # audio_in_queue's depth right when this batch started
+                # draining it. Aggregated/periodic only.
+                _t0 = time.monotonic()
+                self._audio_in_queue_depth.record(self.audio_in_queue.qsize())
 
                 # Batch all immediately-available chunks into one write to reduce
                 # thread-pool round-trips (was one asyncio.to_thread per 50ms slice).
@@ -1544,6 +1588,14 @@ class JarvisLive:
                         asyncio.create_task(self._dashboard.broadcast_audio(payload))
                     except Exception:
                         pass
+
+                self._play_batch_time.record(time.monotonic() - _t0)
+                self._play_sample_count += 1
+                if self._play_sample_count % 200 == 1:
+                    print(
+                        f"[JARVIS] play/broadcast batch: {self._play_batch_time.summary_ms()} "
+                        f"| audio_in_queue depth: {self._audio_in_queue_depth.summary()}"
+                    )
         except Exception as e:
             # ASCII-only — same reasoning as the Recv error print above.
             print(f"[JARVIS] Play error: {e}")
@@ -1849,6 +1901,7 @@ class JarvisLive:
             with self._speaking_lock:
                 speaking = self._is_speaking
             if not speaking and not self.ui.muted:
+                _t0 = time.monotonic()
                 try:
                     self.out_queue.put_nowait(chunk)
                 except asyncio.QueueFull:
@@ -1862,6 +1915,20 @@ class JarvisLive:
                             f"[JARVIS] out_queue full — "
                             f"{self._phone_relay_dropped} phone-audio frame(s) dropped so far "
                             f"(qsize={self.out_queue.qsize()})"
+                        )
+                else:
+                    # Item 3 audit — this relay hop's own processing time
+                    # (dequeue phone chunk -> enqueue out_queue), plus
+                    # out_queue's resulting depth. Aggregated/periodic
+                    # only, per the audit's own "do not log every frame"
+                    # instruction.
+                    self._relay_forward_time.record(time.monotonic() - _t0)
+                    self._out_queue_depth.record(self.out_queue.qsize())
+                    self._relay_sample_count += 1
+                    if self._relay_sample_count % 200 == 1:
+                        print(
+                            f"[JARVIS] phone-audio relay: {self._relay_forward_time.summary_ms()} "
+                            f"| out_queue depth: {self._out_queue_depth.summary()}"
                         )
 
     def _on_phone_connected(self) -> None:
@@ -2156,9 +2223,6 @@ class JarvisLive:
                     self.ui.set_state("LISTENING")
                     self.ui.write_log("SYS: SARANA online.")
 
-                    if self._dashboard:
-                        await self._dashboard.broadcast({"type": "status", "state": "active"})
-
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())
@@ -2170,6 +2234,17 @@ class JarvisLive:
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
+                    # Priority 1 fix: the dashboard's "active" status
+                    # broadcast (-> the browser shows LISTENING) now fires
+                    # AFTER the greeting decision/task below, not before —
+                    # so a fresh login's greeting is always scheduled
+                    # first. This doesn't block on the greeting actually
+                    # finishing (that would delay the mic/UI becoming
+                    # usable by several real seconds of Gemini round-trip
+                    # time, which is worse UX, not better) — it just
+                    # stops the frontend being told "ready" before the
+                    # greeting has even been asked for.
+                    #
                     # Morning briefing — fires once per process launch on
                     # desktop (auto_start=True), if enabled. Web/headless
                     # (auto_start=False) never takes this branch — its
@@ -2182,6 +2257,9 @@ class JarvisLive:
                     elif self._pending_web_greeting:
                         self._pending_web_greeting = False
                         tg.create_task(self._send_startup_briefing())
+
+                    if self._dashboard:
+                        await self._dashboard.broadcast({"type": "status", "state": "active"})
 
             except KeyboardInterrupt:
                 raise
