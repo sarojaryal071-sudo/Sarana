@@ -1479,7 +1479,7 @@ class JarvisLive:
 
     # ── Morning briefing ────────────────────────────────────────────────────────
 
-    async def _send_startup_briefing(self) -> None:
+    async def _send_startup_briefing(self, *, identity_switch: bool = False) -> None:
         """
         Phase 9: single, time-aware greeting — no news fetch. Gemini gets
         the current time, a computed time-of-day category (see
@@ -1494,6 +1494,28 @@ class JarvisLive:
         explicitly forbidden whenever a name is known — see the name_clause
         below and _build_config()'s ADDRESS clause for the general-session
         version of the same rule.
+
+        identity_switch=True (see _set_web_username()): this greeting is
+        firing on a session that was ALREADY connected under a DIFFERENT
+        login. _build_config()'s system_instruction — the ADDRESS clause,
+        [USER PROFILE] block, and the assistant's own name — is only
+        computed once, at connect time; a later login updates JarvisLive's
+        own state (self._user_profile/_web_user_name) correctly, but
+        can't retroactively rewrite that already-sent system_instruction
+        (this is a Gemini Live API constraint, not a design choice — the
+        system_instruction is fixed for the life of a connection). Without
+        this, the assistant kept the FIRST session's identity (e.g. always
+        addressing everyone as whoever logged in first) no matter who
+        logged in afterward. identity_switch=True adds an explicit,
+        forceful in-conversation correction so the CURRENT connection's
+        remaining lifetime reflects the new login's name/assistant-name —
+        the closest correct fix available without forcing a full
+        reconnect (a bigger lifecycle change, deliberately out of scope
+        here). Voice (fixed in speech_config at connect time, same
+        constraint) does not have an equivalent in-conversation fix; a
+        genuinely fresh connection is required for the voice to change —
+        already-known, already-documented scope from when voice_preference
+        was first wired in.
         """
         memory   = load_memory()
         identity = memory.get("identity", {})
@@ -1516,6 +1538,25 @@ class JarvisLive:
 
         lang_clause = f" Respond in {lang}." if lang else ""
         name_clause = f" Address them as {name} — never as 'sir' or 'efendim'." if name else ""
+
+        identity_switch_clause = ""
+        if identity_switch:
+            # Same profile-overrides-config priority _build_config() uses
+            # for assistant_name — recomputed here (not read from
+            # self._asst_name) because that field is stale until the next
+            # real _build_config() call/reconnect.
+            _fresh_asst_name = (
+                (self._user_profile or {}).get("assistant_name", "").strip()
+                or self._asst_name
+            )
+            identity_switch_clause = (
+                f" IMPORTANT: a different user has just started this session. "
+                f"From this message onward your name is {_fresh_asst_name} "
+                f"(not any name used earlier in this conversation), and you "
+                f"must address the user as {name or 'them'} — fully replace "
+                f"whatever name/identity this conversation used before; do "
+                f"not mix the two or refer back to the previous one."
+            )
 
         # Inject last session context if available — pop removes it so it's never repeated
         last = await asyncio.to_thread(pop_last_session)
@@ -1544,7 +1585,7 @@ class JarvisLive:
             f"greeting itself natural and conversational (see LANGUAGE above) — not a stiff "
             f"formal phrase like \"Subha Prabhat\"."
             f"{session_clause} Keep it to 1-2 short sentences. Do not call any tools."
-            f"{lang_clause}{name_clause}"
+            f"{lang_clause}{name_clause}{identity_switch_clause}"
         )
 
         if self._turn_done_event:
@@ -1726,12 +1767,18 @@ class JarvisLive:
         # Item 7 (web greeting): reuse _send_startup_briefing() unchanged —
         # no new greeting text, no hardcoding. If a Gemini session is already
         # connected (a later login on a long-lived process, session already
-        # active), fire the greeting right now. Otherwise run()'s auto_start
-        # gate is still waiting (the very first login) — set the flag and let
-        # run()'s existing post-connect check send it once, exactly once,
+        # active — e.g. someone logged in as a different account without a
+        # restart, or logged out and back in as someone else), fire the
+        # greeting right now WITH identity_switch=True — see that method's
+        # docstring for why: the earlier connection's system_instruction
+        # can't be rewritten mid-session, so this is what actually corrects
+        # the addressing/assistant-name for the rest of THIS connection.
+        # Otherwise run()'s auto_start gate is still waiting (the very
+        # first login) — set the flag and let run()'s existing post-connect
+        # check send an ordinary (non-switch) greeting once, exactly once,
         # right after that connection is established (see run()).
         if self.session and self._loop:
-            self._loop.create_task(self._send_startup_briefing())
+            self._loop.create_task(self._send_startup_briefing(identity_switch=True))
         else:
             self._pending_web_greeting = True
 
