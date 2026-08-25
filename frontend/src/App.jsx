@@ -279,7 +279,6 @@ export default function App() {
             micState={state.microphoneState}
             onToggleMic={handleToggleMic}
             disabled={disabled}
-            assistantStatus={authenticated ? state.assistantStatus : "SLEEPING"}
             onInterrupt={handleInterrupt}
           />
         </div>

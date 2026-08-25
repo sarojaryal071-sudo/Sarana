@@ -25,7 +25,6 @@ export default function Controls({
   micState,
   onToggleMic,
   disabled,
-  assistantStatus,
   onInterrupt,
 }) {
   const [text, setText] = useState("");
@@ -37,12 +36,6 @@ export default function Controls({
     onSend(t);
     setText("");
   }
-
-  // Item 2: only shown while SARANA is actually speaking — hidden/inactive
-  // otherwise, per spec. Driven by the same assistantStatus the Orb itself
-  // renders from (AssistantContext's AUDIO_ACTIVITY/AUDIO_IDLE_TIMEOUT),
-  // not a separate control system.
-  const speaking = assistantStatus === "SPEAKING";
 
   return (
     <div className="controls">
@@ -72,16 +65,14 @@ export default function Controls({
         >
           {MIC_LABELS[micState] || MIC_LABELS.idle}
         </button>
-        {speaking && (
-          <button
-            className="btn danger interrupt-btn"
-            onClick={onInterrupt}
-            disabled={disabled}
-            title="Stop SARANA and return to listening"
-          >
-            ✋ INTERRUPT
-          </button>
-        )}
+        <button
+          className="btn danger interrupt-btn"
+          onClick={onInterrupt}
+          disabled={disabled}
+          title="Stop SARANA and return to listening"
+        >
+          ✋ INTERRUPT
+        </button>
       </div>
     </div>
   );
