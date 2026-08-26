@@ -14,6 +14,7 @@ const COLORS = {
   acc2: "#ffcc00",
   bg: "#00060a",
   ghost: "#001f2e",
+  dim: "#0a2433",
 };
 
 function hexA(hex, a) {
@@ -67,6 +68,7 @@ export default function Orb({ status, assistantName }) {
       const muted = status === "MUTED";
       const speaking = status === "SPEAKING";
       const sleeping = status === "SLEEPING";
+      const thinking = status === "THINKING";
 
       s.tick += 1;
       const tgtHalo = speaking
@@ -252,7 +254,9 @@ export default function Orb({ status, assistantName }) {
       }
       ctx.globalAlpha = 1;
 
-      // status text
+      // status text — mirrors ui.py's HudCanvas.paintEvent() label logic
+      // exactly (same precedence: muted > speaking > thinking > sleeping >
+      // listening), just recreated on canvas — see this file's header.
       s.blink = Math.floor(s.tick / 38) % 2 === 0;
       let label, labelColor;
       if (muted) {
@@ -261,6 +265,9 @@ export default function Orb({ status, assistantName }) {
       } else if (speaking) {
         label = "●  SPEAKING";
         labelColor = COLORS.acc;
+      } else if (thinking) {
+        label = (s.blink ? "◈" : "◇") + "  THINKING";
+        labelColor = COLORS.acc2;
       } else if (sleeping) {
         label = (s.blink ? "○" : "●") + "  SLEEPING";
         labelColor = COLORS.pri;
@@ -270,7 +277,38 @@ export default function Orb({ status, assistantName }) {
       }
       ctx.fillStyle = labelColor;
       ctx.font = "bold 11px 'Courier New', monospace";
-      ctx.fillText(label, cx, cy + fw * 0.4 + 12);
+      const labelY = cy + fw * 0.4 + 12;
+      ctx.fillText(label, cx, labelY);
+
+      // voice waveform — same bar-graph concept as ui.py's HudCanvas
+      // waveform (its own "# waveform" section): a row of vertical bars,
+      // random/lively heights ONLY while status is genuinely SPEAKING
+      // (real audio actually playing — see App.jsx/AssistantContext.jsx,
+      // never inferred from packet arrival), a flat red line while muted,
+      // and a slow, subtle idle sine wave otherwise — so the animation is
+      // never mistaken for "still speaking" once playback has genuinely
+      // stopped.
+      const barCount = 36;
+      const barW = Math.max(4, Math.min(8, fw / 60));
+      const wx0 = cx - (barCount * barW) / 2;
+      const wy = labelY + 22;
+      for (let i = 0; i < barCount; i++) {
+        let hgt, color;
+        if (muted) {
+          hgt = 2;
+          color = COLORS.muted;
+        } else if (speaking) {
+          // Fresh randomness per bar per frame — a lively, responsive
+          // talking effect (matches HudCanvas: random.randint(3, 20)).
+          hgt = 3 + Math.random() * 17;
+          color = hgt > 12 ? COLORS.pri : hexA(COLORS.pri, 0.55);
+        } else {
+          hgt = 3 + 2 * Math.sin(s.tick * 0.09 + i * 0.6);
+          color = COLORS.dim;
+        }
+        ctx.fillStyle = color;
+        ctx.fillRect(wx0 + i * barW, wy + 10 - hgt / 2, barW - 1, hgt);
+      }
 
       ctx.restore();
       raf = requestAnimationFrame(frame);

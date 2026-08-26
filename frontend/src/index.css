@@ -408,10 +408,22 @@ input {
   inset: 0;
   z-index: 50;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 16px;
   background: rgba(0, 6, 10, 0.82);
   backdrop-filter: blur(2px);
+}
+
+/* Login-screen-only footer (see LoginScreen.jsx) — a sibling of
+   .login-card, not a nav item, never rendered once authenticated. */
+.login-footer {
+  margin: 0;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  text-align: center;
 }
 
 .login-card {
@@ -481,10 +493,14 @@ input {
 /* The name field reads like a name, not a PIN — no letter-spacing/caps.
    font-size stays >= 16px (item 5): iOS Safari auto-zooms the page on focus
    for any input rendered smaller than that — this is the actual fix, not a
-   viewport hack, so pinch-zoom stays available everywhere else. */
+   viewport hack, so pinch-zoom stays available everywhere else. Centered
+   to match the PIN input's centered appearance (the base .login-card
+   input rule already centers — this override just stops re-overriding
+   that for text-align specifically, while keeping every other name-field
+   difference above). */
 .login-name-input {
   letter-spacing: normal !important;
-  text-align: left !important;
+  text-align: center !important;
   text-transform: none !important;
   font-size: 16px !important;
 }

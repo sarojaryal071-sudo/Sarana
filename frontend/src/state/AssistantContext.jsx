@@ -34,10 +34,14 @@ const initialState = {
   tools: [],
   desktopConnected: false,
 
-  // Derived from "status" (session active/sleeping) + live audio-out
-  // activity — the backend does not broadcast granular THINKING/LISTENING/
-  // SPEAKING transitions today (see Phase 6 report, "problems discovered").
-  assistantStatus: "SLEEPING", // SLEEPING | LISTENING | SPEAKING
+  // Web UI state fix: set DIRECTLY from the backend's own authoritative
+  // "status" broadcasts (main.py's _push_state() — the exact same call
+  // sites ui.py's desktop HUD reacts to), never inferred from side
+  // effects like audio-out packets arriving. "MUTED" is NOT a value this
+  // ever holds — muting is a purely client-side fact (the browser mic
+  // stream on/off) the backend has no way to know for a web session; see
+  // App.jsx's displayStatus, which overlays that on top of this.
+  assistantStatus: "SLEEPING", // SLEEPING | LISTENING | THINKING | SPEAKING
 
   messages: [], // {speaker: "user"|"jarvis"|"sys", text, ts}
   content: null, // {title, text} | null
@@ -73,26 +77,14 @@ function reducer(state, action) {
     case "MIC_STATE":
       return { ...state, microphoneState: action.value };
     case "STATUS_MESSAGE": {
-      const sleeping = action.state !== "active";
-      return {
-        ...state,
-        assistantStatus: sleeping
-          ? "SLEEPING"
-          : state.assistantStatus === "SPEAKING"
-            ? "SPEAKING"
-            : "LISTENING",
-      };
+      // Web UI state fix: msg.state is now main.py's real, granular state
+      // string (LISTENING | THINKING | SPEAKING | SLEEPING) — see
+      // _push_state(). Anything unrecognized is ignored rather than
+      // guessed at, so a future/typo'd state string can never corrupt the
+      // UI into a nonsense label.
+      const KNOWN = new Set(["SLEEPING", "LISTENING", "THINKING", "SPEAKING"]);
+      return KNOWN.has(action.state) ? { ...state, assistantStatus: action.state } : state;
     }
-    case "AUDIO_ACTIVITY":
-      // A chunk just arrived on /ws/audio-out — infer SPEAKING while active
-      // (a session that's SLEEPING stays SLEEPING regardless).
-      return state.assistantStatus === "SLEEPING"
-        ? state
-        : { ...state, assistantStatus: "SPEAKING" };
-    case "AUDIO_IDLE_TIMEOUT":
-      return state.assistantStatus === "SPEAKING"
-        ? { ...state, assistantStatus: "LISTENING" }
-        : state;
     case "LOG_MESSAGE":
       return {
         ...state,

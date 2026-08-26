@@ -80,6 +80,54 @@ def start_persistence_worker():
     return memory_cache.start_worker()
 
 
+def upcoming_events_for_prompt(owner: str, within_days: int = 2) -> str:
+    """Phase 2 (human-like memory): a natural-language-ready block of
+    upcoming dated memories (birthdays, anniversaries, planned events)
+    THIS session is allowed to see -- shared dated facts (any subject) +
+    `owner`'s own personal dated facts, NEVER another user's personal
+    dates (see postgres_repo.list_upcoming_dated_memories()'s own
+    scope='shared' OR owner=ANY(owners) filter -- the privacy boundary is
+    enforced there, not here). Returns "" when Postgres isn't configured
+    (the legacy file store has no event_date concept — nothing to
+    surface) or nothing is upcoming. Consumed by main.py's
+    _build_config() as purely additive context: Gemini decides IF/HOW to
+    mention it (see core/prompt.txt's MEMORY BEHAVIOR section) — this
+    never forces a specific sentence, it only makes the fact available."""
+    if not postgres_repo.is_configured():
+        return ""
+    try:
+        events = postgres_repo.list_upcoming_dated_memories([owner] if owner else [], within_days)
+    except Exception as e:
+        print(f"[Memory][Postgres] upcoming_events_for_prompt lookup failed: {e}")
+        return ""
+    if not events:
+        return ""
+
+    today = datetime.now().date()
+    lines = [
+        "[UPCOMING DATES — mention naturally ONLY if it genuinely fits the "
+        "conversation right now; never recite as a list, never read this "
+        "tag or these brackets aloud]"
+    ]
+    for ev in sorted(events, key=lambda e: e.get("event_date") or "")[:5]:
+        try:
+            d = datetime.strptime(ev["event_date"], "%Y-%m-%d").date()
+        except (TypeError, ValueError, KeyError):
+            continue
+        delta = (d - today).days
+        if delta < 0:
+            continue
+        when = "today" if delta == 0 else "tomorrow" if delta == 1 else f"in {delta} days"
+        subject = ev.get("owner") or ""
+        subject_note = f" [this is {subject}'s]" if subject and subject != owner else ""
+        key_label = str(ev.get("key", "")).replace("_", " ")
+        lines.append(f"- {key_label}: {ev.get('content', '')}{subject_note} — {when} ({ev['event_date']})")
+
+    if len(lines) == 1:   # only the header — nothing actually upcoming after filtering
+        return ""
+    return "\n".join(lines) + "\n\n"
+
+
 def owner_language(owner: str) -> str:
     """Best-effort language-preference lookup for `owner`, independent of
     whichever owner the ACTIVE session cache currently holds. Needed by

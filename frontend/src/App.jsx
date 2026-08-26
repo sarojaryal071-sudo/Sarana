@@ -25,7 +25,6 @@ export default function App() {
   const socketRef = useRef(null);
   const audioRef = useRef(null);
   const micRef = useRef(null);
-  const audioIdleTimer = useRef(null);
   const micAutoStartedRef = useRef(false); // item 1: auto-start mic once per login, not per utterance
 
   // ── GET /api/session — unauthenticated, works before any login ─────────
@@ -122,18 +121,17 @@ export default function App() {
     socket.connect();
     socketRef.current = socket;
 
-    // Infer SPEAKING from actual audio-out activity — the backend doesn't
-    // broadcast granular THINKING/LISTENING/SPEAKING transitions today
-    // (see AssistantContext.jsx and the Phase 6 report's "problems
-    // discovered" section), so real playback is the only live signal we have.
+    // Web UI state fix: assistantStatus (SPEAKING/LISTENING/etc.) comes
+    // ONLY from the backend's authoritative "status" broadcasts now (see
+    // AssistantContext.jsx's STATUS_MESSAGE case / main.py's
+    // _push_state()) — audio-out activity is no longer used to infer it.
+    // AudioOutPlayer's onState is still wired for AUDIO_STATE, which
+    // tracks the /ws/audio-out socket's OWN connection health
+    // (idle|connecting|open|error) — a genuinely different, legitimate
+    // concern from "is SARANA speaking".
     const audio = new AudioOutPlayer(
       state.token,
       (s) => dispatch({ type: "AUDIO_STATE", value: s }),
-      () => {
-        dispatch({ type: "AUDIO_ACTIVITY" });
-        clearTimeout(audioIdleTimer.current);
-        audioIdleTimer.current = setTimeout(() => dispatch({ type: "AUDIO_IDLE_TIMEOUT" }), 900);
-      }
     );
     audio.connect();
     audioRef.current = audio;
@@ -141,7 +139,6 @@ export default function App() {
     return () => {
       socket.close();
       audio.close();
-      clearTimeout(audioIdleTimer.current);
       socketRef.current = null;
       audioRef.current = null;
       // Session is ending (logout / token change / auth failure) — the mic
@@ -223,17 +220,13 @@ export default function App() {
   // backend mid-speech via the existing interrupt() mechanism (POST
   // /api/interrupt) AND clears whatever's already scheduled in the
   // browser's own audio queue, so it's a real interrupt, not just a paused
-  // animation. Returns to LISTENING via the same STATUS_MESSAGE the backend
-  // already sends after interrupt() runs (main.py's ui.write_log path) —
-  // no separate control system.
+  // animation. main.py's interrupt() calls set_speaking(False), which
+  // _push_state()s the real LISTENING transition over the SAME /ws
+  // connection the POST response arrives alongside — no separate,
+  // optimistic client-side guess needed (see AssistantContext.jsx's
+  // STATUS_MESSAGE case).
   function handleInterrupt() {
     audioRef.current?.stopPlayback();
-    clearTimeout(audioIdleTimer.current);
-    // Reuses the exact SPEAKING→LISTENING transition AUDIO_IDLE_TIMEOUT
-    // already performs (see AssistantContext.jsx) instead of a new action —
-    // fired immediately here since playback was just force-stopped, not
-    // left to the normal 900ms idle wait.
-    dispatch({ type: "AUDIO_IDLE_TIMEOUT" });
     if (state.token) {
       sendInterrupt(state.token).catch(() => {
         dispatch({ type: "SYS_MESSAGE", text: "Interrupt failed to send.", ts: null });
@@ -286,6 +279,21 @@ export default function App() {
   const authenticated = state.authenticationState === "authenticated";
   const disabled = !authenticated || state.connectionState !== "connected";
 
+  // Web UI state fix: MUTED is the one displayed state the backend can't
+  // know for a web session — see AssistantContext.jsx's assistantStatus
+  // comment. It's a genuinely authoritative CLIENT-side fact (the mic
+  // stream really is off), not a guess, computed here the same way
+  // ui.py's own desktop mute button is entirely local to the UI layer and
+  // never round-trips through JarvisLive either. Only overlays LISTENING
+  // — SARANA already being SPEAKING/THINKING/SLEEPING is never
+  // reinterpreted as MUTED just because the mic happens to be off.
+  const micActive = state.microphoneState === "streaming";
+  const displayStatus = !authenticated
+    ? "SLEEPING"
+    : state.assistantStatus === "LISTENING" && !micActive
+      ? "MUTED"
+      : state.assistantStatus;
+
   return (
     <div className="app-shell">
       <Header
@@ -302,7 +310,7 @@ export default function App() {
           <ToolsRail tools={state.tools} />
         </div>
         <div className="panel-center">
-          <Orb status={authenticated ? state.assistantStatus : "SLEEPING"} assistantName={state.assistantName} />
+          <Orb status={displayStatus} assistantName={state.assistantName} />
           <ContentPanel content={state.content} onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })} />
           <Controls
             onSend={handleSend}

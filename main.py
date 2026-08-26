@@ -69,7 +69,7 @@ from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
     set_active_owner, clear_active_session, start_persistence_worker,
-    owner_language,
+    owner_language, upcoming_events_for_prompt,
 )
 from memory.migrate_long_term import migrate_if_needed
 from users import user_db
@@ -686,6 +686,46 @@ TOOL_DECLARATIONS = [
     },
 ]
 
+# ── Phase 3: capability awareness ────────────────────────────────────────
+# Tool names that require LOCAL desktop/OS/hardware access — controlling
+# apps, the browser, files, settings, mouse/keyboard, camera/screen, or
+# scheduling OS-level reminders on WHATEVER machine main.py is actually
+# running on. On desktop that machine IS the user's own computer (correct,
+# useful). On a web/headless deployment (Render) that machine is the
+# SERVER — it has no relationship to the browser user's own laptop, so
+# these tools would either crash, silently do nothing useful, or — worse —
+# appear to "succeed" while accomplishing nothing the user asked for (e.g.
+# open_app opening an app ON THE SERVER). Verified per-tool against each
+# actions/*.py module's actual implementation (subprocess/webbrowser.open/
+# pyautogui/mss screen capture/local OS calls — not guessed from the
+# filename): open_app, browser_control, file_controller, send_message,
+# reminder, youtube_video and flight_finder all shell out to open local
+# apps/browsers/files; screen_process/close_camera need a real local
+# screen/camera; computer_settings/desktop_control/computer_control
+# operate the local OS/input devices directly; code_helper/dev_agent run
+# against local project files; game_updater manages a local game install;
+# system_status would report the SERVER's CPU/RAM/GPU, not the user's own
+# machine, which would be actively misleading if presented as "your
+# computer"; shutdown_jarvis would stop the shared backend process for
+# EVERY web user, not just the one asking. file_processor is included
+# conservatively: it can only act on a file already resolvable to a local
+# path (desktop's drop-zone widget — see _execute_tool()) and that path
+# resolution isn't wired for a web-uploaded file yet, so claiming it works
+# on web would be exactly the "fake success" this phase exists to prevent.
+#
+# Universal (genuinely work identically either way, not listed here):
+# save_memory (pure memory operation), web_search (a network API call,
+# runs on the server either way — that's *correct* for both surfaces),
+# manage_monitor (background_monitor.py's own server-side state).
+DESKTOP_ONLY_TOOLS = frozenset({
+    "open_app", "browser_control", "file_controller", "send_message",
+    "reminder", "youtube_video", "screen_process", "close_camera",
+    "computer_settings", "desktop_control", "code_helper", "dev_agent",
+    "file_processor", "computer_control", "game_updater", "flight_finder",
+    "system_status", "shutdown_jarvis",
+})
+
+
 class JarvisLive:
 
     def __init__(self, ui: AssistantSurface, *, auto_start: bool = True):
@@ -856,13 +896,49 @@ class JarvisLive:
             self._loop
         )
 
+    def _push_state(self, state: str) -> None:
+        """The ONE place JarvisLive changes its externally-visible state.
+        Sets the authoritative state on whichever UI is attached (desktop's
+        real ui.py behavior, byte-for-byte unchanged) AND broadcasts that
+        SAME state to the web dashboard over the existing /ws "status"
+        message (dashboard/server.py's broadcast()/ws_ep()) — this is the
+        "Desktop authoritative state -> Core state -> WebSocket -> React
+        UI" pipeline: the web frontend is never left to infer LISTENING/
+        THINKING/SPEAKING/SLEEPING from side effects like audio packets
+        arriving (see frontend/src/state/AssistantContext.jsx's
+        STATUS_MESSAGE case) — it's told directly, from the exact same
+        call sites desktop's own HUD already reacts to.
+
+        Thread-safe via run_coroutine_threadsafe (same pattern speak()/
+        plugin_say() already use in this file): set_state() is called both
+        from the main event-loop thread (run(), _execute_tool()) and from
+        other threads calling into JarvisLive directly (desktop's Qt mute-
+        button thread invoking interrupt() -> set_speaking(), a plugin's
+        executor thread) — a plain self._loop.create_task(...) would raise
+        if called from any thread other than the loop's own.
+        """
+        self.ui.set_state(state)
+        if self._dashboard and self._loop:
+            async def _broadcast():
+                try:
+                    # NOT broadcast() — see DashboardServer.broadcast_state()'s
+                    # docstring for why this must never touch the Activity
+                    # Log's history buffer.
+                    await self._dashboard.broadcast_state(state)
+                except Exception as e:
+                    print(f"[JARVIS] State broadcast failed: {e}")
+            try:
+                asyncio.run_coroutine_threadsafe(_broadcast(), self._loop)
+            except RuntimeError:
+                pass   # loop already closed/closing (shutdown race) — never fatal
+
     def set_speaking(self, value: bool):
         with self._speaking_lock:
             self._is_speaking = value
         if value:
-            self.ui.set_state("SPEAKING")
+            self._push_state("SPEAKING")
         elif not self.ui.muted:
-            self.ui.set_state("LISTENING")
+            self._push_state("LISTENING")
 
     def interrupt(self) -> None:
         """Stop JARVIS mid-speech: drain queued audio and open mic immediately."""
@@ -957,9 +1033,17 @@ class JarvisLive:
         # connection's session-summary gets attributed to.
         self._session_owner = (self._user_profile or {}).get("username", "") or ""
 
-        memory     = load_memory()
-        mem_str    = format_memory_for_prompt(memory)
-        sys_prompt = _load_system_prompt()
+        memory       = load_memory()
+        mem_str      = format_memory_for_prompt(memory)
+        # Phase 2 (human-like memory): upcoming birthdays/anniversaries/
+        # events THIS user is allowed to see — see
+        # upcoming_events_for_prompt()'s own docstring for the privacy
+        # scoping. Purely additive, Gemini decides whether/how to mention
+        # it (see core/prompt.txt's MEMORY BEHAVIOR section) — "" (the
+        # common case: nothing upcoming, or Postgres not configured)
+        # changes nothing about the prompt at all.
+        upcoming_ctx = upcoming_events_for_prompt(self._session_owner)
+        sys_prompt   = _load_system_prompt()
 
         now      = self._local_now()
         time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
@@ -1076,11 +1160,47 @@ class JarvisLive:
             f"{_lang}\n\n"
         )
 
-        parts = [time_ctx, identity_ctx]
+        # Phase 3 (capability awareness): tells Gemini up front which
+        # surface it's running on, so it never even ATTEMPTS a desktop-only
+        # tool from a web session (see DESKTOP_ONLY_TOOLS/_execute_tool()'s
+        # own runtime gate — this is the front-loaded half of that same
+        # honesty guarantee, not a separate mechanism). auto_start=True
+        # (desktop, main()'s own default) keeps this section a one-liner —
+        # every tool really is available there, exactly as always.
+        if self._auto_start:
+            _capabilities_ctx = (
+                "[CAPABILITIES]\nYou are running as the local desktop application "
+                "— every tool you have is genuinely available on this computer.\n\n"
+            )
+        else:
+            _unavailable_examples = (
+                "opening or controlling apps on the user's own computer, "
+                "controlling their local browser, changing their computer's "
+                "settings, moving mouse/keyboard on their machine, reading "
+                "files on their device, camera/screen vision, running local "
+                "dev/code tools, flight search, opening YouTube locally, "
+                "setting OS-level reminders, or restarting/shutting SARANA down"
+            )
+            _capabilities_ctx = (
+                "[CAPABILITIES]\nYou are running as a WEB session (browser, not "
+                "the local desktop app) — you do NOT have access to the user's "
+                f"own computer. Unavailable from here: {_unavailable_examples}. "
+                "If a tool call for one of these is attempted anyway, its "
+                "result will say [CAPABILITY_UNAVAILABLE] — explain the "
+                "limitation honestly and briefly, in your own natural words, "
+                "never claim the action happened. You DO genuinely have: "
+                "normal conversation, remembering things (save_memory), "
+                "general web search, and background topic monitoring — don't "
+                "undersell those either.\n\n"
+            )
+
+        parts = [time_ctx, identity_ctx, _capabilities_ctx]
         if _profile_ctx:
             parts.append(_profile_ctx)
         if mem_str:
             parts.append(mem_str)
+        if upcoming_ctx:
+            parts.append(upcoming_ctx)
         parts.append(sys_prompt)
 
         cfg = dict(
@@ -1118,7 +1238,7 @@ class JarvisLive:
         args = dict(fc.args or {})
 
         print(f"[JARVIS] 🔧 {name}  {args}")
-        self.ui.set_state("THINKING")
+        self._push_state("THINKING")
 
         if name == "save_memory":
             category   = args.get("category", "notes")
@@ -1138,10 +1258,40 @@ class JarvisLive:
                 )
                 print(f"[Memory] 💾 save_memory: {category}/{key} = {value} (shared={shared})")
             if not self.ui.muted:
-                self.ui.set_state("LISTENING")
+                self._push_state("LISTENING")
             return types.FunctionResponse(
                 id=fc.id, name=name,
                 response={"result": "ok", "silent": True}
+            )
+
+        # Phase 3: capability awareness — never attempt (and never let
+        # Gemini believe it accomplished) a tool that needs local desktop
+        # access when this is a web/headless session (self._auto_start is
+        # False only for server_main.py's web deployment — see run()).
+        # Returning an honest [CAPABILITY_UNAVAILABLE] result string
+        # reuses the EXACT pattern screen_process's own [VISION_ACTIVE]
+        # signal already establishes in this file: a bracketed directive
+        # in the tool's FunctionResponse that Gemini reads and turns into
+        # natural speech, never a hardcoded sentence spoken verbatim.
+        if not self._auto_start and name in DESKTOP_ONLY_TOOLS:
+            print(f"[JARVIS] Capability unavailable in web runtime: {name}")
+            if not self.ui.muted:
+                self._push_state("LISTENING")
+            return types.FunctionResponse(
+                id=fc.id, name=name,
+                response={"result": (
+                    f"[CAPABILITY_UNAVAILABLE] '{name}' needs the local desktop "
+                    f"app — access to the user's own computer, browser, files, "
+                    f"camera, or screen that this web session does not have. "
+                    f"Tell the user honestly and briefly, in your own natural "
+                    f"words, that this specific thing isn't available from the "
+                    f"web version right now (mention running the desktop app "
+                    f"only if it's genuinely helpful, not as a scripted line). "
+                    f"Do NOT claim you did it or are doing it. You DO still "
+                    f"have normal conversation, remembering things, web "
+                    f"search, and background topic monitoring available — "
+                    f"don't overstate the limitation either."
+                )},
             )
 
         loop   = asyncio.get_event_loop()
@@ -1307,7 +1457,7 @@ class JarvisLive:
             self.speak_error(name, e)
 
         if not self.ui.muted:
-            self.ui.set_state("LISTENING")
+            self._push_state("LISTENING")
 
         print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
         return types.FunctionResponse(
@@ -2316,7 +2466,7 @@ class JarvisLive:
         while True:
             try:
                 print("[JARVIS] Connecting...")
-                self.ui.set_state("THINKING")
+                self._push_state("THINKING")
                 config = self._build_config()
 
                 # Fresh client on every reconnect — avoids stale HTTP session state
@@ -2346,7 +2496,7 @@ class JarvisLive:
                     self._interrupted          = False
 
                     print("[JARVIS] Connected.")
-                    self.ui.set_state("LISTENING")
+                    self._push_state("LISTENING")
                     self.ui.write_log("SYS: SARANA online.")
 
                     tg.create_task(self._send_realtime())
@@ -2384,8 +2534,13 @@ class JarvisLive:
                         self._pending_web_greeting = False
                         tg.create_task(self._send_startup_briefing())
 
-                    if self._dashboard:
-                        await self._dashboard.broadcast({"type": "status", "state": "active"})
+                    # Web UI state fix: the dashboard already learned this
+                    # connection is up from _push_state("LISTENING") a few
+                    # lines above (right after "Connected.") — no separate
+                    # "active" broadcast needed anymore; that message used
+                    # to be the web frontend's ONLY signal that a session
+                    # existed at all, now superseded by the real granular
+                    # state.
 
             except KeyboardInterrupt:
                 raise
@@ -2452,7 +2607,7 @@ class JarvisLive:
                 # Invalid API key — stop hammering the API, prompt re-configuration
                 if "API key not valid" in err_str or "1007" in err_str:
                     self.ui.write_log("ERR: API key invalid — please re-enter your key.")
-                    self.ui.set_state("SLEEPING")
+                    self._push_state("SLEEPING")
                     self.ui.prompt_reconfig()
                     while not self.ui._win._ready:
                         await asyncio.sleep(1)
@@ -2506,10 +2661,7 @@ class JarvisLive:
                 self._identity_switch_reconnect = False
 
             self.set_speaking(False)
-            self.ui.set_state("SLEEPING")
-
-            if self._dashboard:
-                await self._dashboard.broadcast({"type": "status", "state": "sleeping"})
+            self._push_state("SLEEPING")   # already broadcasts — see _push_state()
 
             delay = getattr(self, "_conn_backoff", 3)
             print(f"[JARVIS] Reconnecting in {delay}s...")

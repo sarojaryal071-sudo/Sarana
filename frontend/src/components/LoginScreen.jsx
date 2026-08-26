@@ -88,7 +88,7 @@ function UsernameForm({ assistantName, onAuthenticated, error }) {
       <input
         value={username}
         onChange={(e) => setUsername(e.target.value)}
-        placeholder={`e.g. Saroj`}
+        placeholder={`e.g. Sarana`}
         maxLength={40}
         autoFocus
         disabled={busy}
@@ -185,6 +185,12 @@ export default function LoginScreen({ assistantName, onAuthenticated, error }) {
           </>
         )}
       </div>
+      {/* Outside .login-card, still inside .login-overlay (see App.jsx —
+          this whole component only renders while unauthenticated), so
+          this line can never appear in the authenticated app/sidebar. A
+          plain, non-interactive line of text, deliberately not a link or
+          nav item. */}
+      <p className="login-footer">Developed by Saroj</p>
     </div>
   );
 }

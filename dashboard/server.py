@@ -776,6 +776,9 @@ class DashboardServer:
         self._history.append(msg)
         if len(self._history) > 300:
             self._history = self._history[-300:]
+        await self._send_to_clients(msg)
+
+    async def _send_to_clients(self, msg: dict) -> None:
         dead: set[WebSocket] = set()
         for ws in list(self._clients):
             try:
@@ -783,6 +786,22 @@ class DashboardServer:
             except Exception:
                 dead.add(ws)
         self._clients -= dead
+
+    async def broadcast_state(self, state: str) -> None:
+        """Server -> client "status" message carrying SARANA's real,
+        granular operational state (LISTENING/THINKING/SPEAKING/SLEEPING)
+        -- see main.py's _push_state(), the one place this is called from.
+        Deliberately NOT routed through broadcast()/self._history: this is
+        live, ephemeral state, not conversation content -- replaying a
+        stale "THINKING" from minutes ago to a freshly (re)connected /ws
+        client would be meaningless, and a state change fires far more
+        often than real Activity Log entries (every tool call, every
+        speaking start/stop), so folding it into the same 300-slot window
+        broadcast() caps would push out actual conversation history much
+        faster for no benefit. Same {"type": "status", "state": ...}
+        message shape the frontend already understands (see
+        AssistantContext.jsx's STATUS_MESSAGE case)."""
+        await self._send_to_clients({"type": "status", "state": state})
 
     async def broadcast_content(self, title: str, text: str) -> None:
         """Server→client "content" message — mirrors JarvisUI.show_content's
