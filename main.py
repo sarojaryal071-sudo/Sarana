@@ -68,7 +68,10 @@ from core.assistant_surface import AssistantSurface
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
+    set_active_owner, clear_active_session, start_persistence_worker,
+    owner_language,
 )
+from memory.migrate_long_term import migrate_if_needed
 from users import user_db
 from core.latency_stats import LatencyStats
 
@@ -644,6 +647,25 @@ TOOL_DECLARATIONS = [
                 },
                 "key":   {"type": "STRING", "description": "Short snake_case key (e.g. name, favorite_food, sister_name)"},
                 "value": {"type": "STRING", "description": "Concise value in English (e.g. Fatih, pizza, older sister)"},
+                "shared": {
+                    "type": "BOOLEAN",
+                    "description": (
+                        "Optional, default false. Set true ONLY for a fact that is naturally "
+                        "common to everyone using this assistant, not private to the current "
+                        "speaker — e.g. a shared household fact, or a relationship between two "
+                        "known users ('Saroj and Bimal are friends'). Leave false (the default) "
+                        "for anything personal to the current speaker — their own name, "
+                        "preferences, plans, or private facts about their own life."
+                    ),
+                },
+                "event_date": {
+                    "type": "STRING",
+                    "description": (
+                        "Optional. Only set when this fact is tied to a specific calendar date "
+                        "(a birthday, anniversary, or planned event) and that date is known. "
+                        "Format: YYYY-MM-DD."
+                    ),
+                },
             },
             "required": ["category", "key", "value"]
         }
@@ -709,6 +731,18 @@ class JarvisLive:
         # hasn't been sent yet (either the Gemini connection isn't up yet, or
         # it's already up and a task has just been scheduled).
         self._pending_web_greeting: bool = False
+        # PostgreSQL memory migration: the canonical username the ACTIVE
+        # Gemini connection's memory reads/writes belong to, frozen at
+        # _build_config() time (see that method) for the lifetime of the
+        # connection. Deliberately NOT re-derived from self._user_profile
+        # later (e.g. inside run()'s finally block) — an identity switch
+        # already overwrites self._user_profile with the NEXT user's
+        # profile before the outgoing connection's teardown code runs, and
+        # _save_session_summary()/pop_last_session() must still attribute
+        # the OUTGOING session to the user who actually had it. "" is the
+        # "no profile resolved" bucket — today's original un-scoped memory
+        # behavior (see memory/memory_cache.py).
+        self._session_owner: str = ""
         self.session              = None
         self.audio_in_queue       = None
         self.out_queue            = None
@@ -899,6 +933,16 @@ class JarvisLive:
             self._asst_name = self._user_profile["assistant_name"].strip() or self._asst_name
         _user_name = self._current_user_name()
 
+        # PostgreSQL memory migration: freeze which user's memory this
+        # connection belongs to (see self._session_owner's docstring in
+        # __init__). By the time _build_config() runs, _set_user_profile()
+        # (or _resolve_desktop_profile()) has already called
+        # set_active_owner() for this login — the RAM cache load()'d here
+        # is already the right one; this just records it so a LATER
+        # identity switch can't retroactively change which user this
+        # connection's session-summary gets attributed to.
+        self._session_owner = (self._user_profile or {}).get("username", "") or ""
+
         memory     = load_memory()
         mem_str    = format_memory_for_prompt(memory)
         sys_prompt = _load_system_prompt()
@@ -1063,12 +1107,22 @@ class JarvisLive:
         self.ui.set_state("THINKING")
 
         if name == "save_memory":
-            category = args.get("category", "notes")
-            key      = args.get("key", "")
-            value    = args.get("value", "")
+            category   = args.get("category", "notes")
+            key        = args.get("key", "")
+            value      = args.get("value", "")
+            # PostgreSQL memory migration: both optional, both default to
+            # today's original behavior (personal to the current session's
+            # owner, no specific date) when Gemini doesn't supply them —
+            # see the save_memory tool declaration below (TOOL_DECLARATIONS)
+            # for what each means.
+            shared     = bool(args.get("shared", False))
+            event_date = (args.get("event_date") or "").strip() or None
             if key and value:
-                update_memory({category: {key: {"value": value}}})
-                print(f"[Memory] 💾 save_memory: {category}/{key} = {value}")
+                update_memory(
+                    {category: {key: {"value": value}}},
+                    shared=shared, event_date=event_date, source="conversation",
+                )
+                print(f"[Memory] 💾 save_memory: {category}/{key} = {value} (shared={shared})")
             if not self.ui.muted:
                 self.ui.set_state("LISTENING")
             return types.FunctionResponse(
@@ -1687,8 +1741,12 @@ class JarvisLive:
                 f"not mix the two or refer back to the previous one."
             )
 
-        # Inject last session context if available — pop removes it so it's never repeated
-        last = await asyncio.to_thread(pop_last_session)
+        # Inject last session context if available — pop removes it so it's never repeated.
+        # Explicit owner: self._session_owner was just frozen by this same
+        # connection's _build_config() call (see that method), so this is
+        # always the CURRENT connection's user, not whoever might log in
+        # next.
+        last = await asyncio.to_thread(pop_last_session, self._session_owner)
         session_clause = ""
         if last:
             try:
@@ -1728,17 +1786,21 @@ class JarvisLive:
 
     # ── Session memory ──────────────────────────────────────────────────────────
 
-    async def _save_session_summary(self) -> None:
-        """Summarise the current session in 1-2 sentences and save to long_term.json."""
+    async def _save_session_summary(self, owner: str | None = None) -> None:
+        """Summarise the current session in 1-2 sentences and persist it.
+        `owner`: the canonical username this session belonged to — pass it
+        explicitly (see run()'s finally block) rather than relying on the
+        default (self._session_owner read at call time), which may already
+        reflect a DIFFERENT user by the time this coroutine actually runs
+        on an identity-switch reconnect."""
+        if owner is None:
+            owner = self._session_owner
         log = self._session_log
         if len(log) < 3:          # need at least one exchange to be worth saving
             return
         self._session_log = []    # reset immediately so the next session starts clean
 
-        memory = load_memory()
-        lang_entry = memory.get("identity", {}).get("language", {})
-        lang = (lang_entry.get("value", "") if isinstance(lang_entry, dict) else str(lang_entry)).strip()
-        lang = lang or "Nepali"  # Nepali is the default response language
+        lang = owner_language(owner) or "Nepali"  # Nepali is the default response language
 
         convo = "\n".join(log[-40:])   # cap at last 40 turns to stay within token budget
         prompt = (
@@ -1756,7 +1818,7 @@ class JarvisLive:
             )
             summary = (resp.text or "").strip()
             if summary:
-                save_session_summary(summary, lang)
+                await asyncio.to_thread(save_session_summary, summary, lang, owner)
         except Exception as e:
             print(f"[Memory] ⚠️ Session summary failed: {e}")
 
@@ -1980,6 +2042,21 @@ class JarvisLive:
             # were already true.
             self._loop.create_task(self._send_startup_briefing(identity_switch=True))
 
+    def _clear_memory_session(self) -> None:
+        """PostgreSQL memory migration: fired by dashboard/server.py's
+        set_logout_callback() on logout of a username session (the same
+        "username login vs Remote Access PIN" scoping Activity Log
+        isolation already uses — see dashboard/server.py's
+        _reset_activity_history()/logout_ep, and never on a PIN
+        login/logout, which reattaches to an ongoing session rather than
+        ending an identity). Discards the in-RAM memory cache immediately,
+        so no window exists where a stale cache could be read after
+        logout. The NEXT login's _set_user_profile() reloads fresh from
+        Postgres regardless, so this is defense in depth, not the only
+        thing preventing a leak — same precedent as
+        _reset_activity_history()."""
+        clear_active_session()
+
     def _set_user_profile(self, profile: dict) -> None:
         """The canonical profile setter — the ONE place _user_profile is
         ever assigned, called identically by both interfaces: web (fired
@@ -2007,6 +2084,14 @@ class JarvisLive:
         """
         previous_id = (self._user_profile or {}).get("id")
         self._user_profile = profile
+        # PostgreSQL memory migration: load THIS user's personal memories +
+        # the shared set into RAM right now, at login — not lazily on the
+        # first load_memory() call — so _build_config() (which runs right
+        # after, once the resulting connection/reconnect completes) always
+        # sees the correct owner's data already in place. Safe/cheap to
+        # call redundantly (the same account logging back in reloads the
+        # same data) — see memory/memory_manager.py's set_active_owner().
+        set_active_owner(profile.get("username", "") or "")
         if (
             profile.get("id") is not None
             and profile.get("id") != previous_id
@@ -2132,6 +2217,28 @@ class JarvisLive:
         self._loop = asyncio.get_event_loop()
         self._start_event = asyncio.Event()
 
+        # PostgreSQL memory migration: one background write worker for the
+        # WHOLE process lifetime (not per-connection — memory writes can
+        # happen any time a session is up, and reconnects must not tear
+        # down/lose queued writes). See memory/memory_cache.py.
+        start_persistence_worker()
+        # One-time (idempotent, marker-guarded) import of the existing
+        # local memory/long_term.json into PostgreSQL — see
+        # memory/migrate_long_term.py. A no-op after the first successful
+        # run, and a no-op entirely when PostgreSQL isn't configured.
+        # Never allowed to block/crash startup — see that module.
+        try:
+            migrate_if_needed()
+        except Exception as e:
+            print(f"[Memory][Migration] Unexpected error, continuing startup: {e}")
+        # Loads the "no profile resolved" bucket so load_memory() always
+        # has something sane even before any login/desktop-profile
+        # resolution happens — exactly today's original un-scoped
+        # behavior for a session that never identifies a user. A real
+        # login (_set_user_profile(), below) reloads with the right owner
+        # before _build_config() ever runs.
+        set_active_owner("")
+
         # Start dashboard (optional — needs: pip install fastapi "uvicorn[standard]" cryptography)
         try:
             from dashboard.server import DashboardServer
@@ -2153,6 +2260,11 @@ class JarvisLive:
             # call (self.ui.on_interrupt, wired in __init__) — no second
             # interruption mechanism, just a new way to reach the same one.
             self._dashboard.set_interrupt_callback(self.interrupt)
+            # PostgreSQL memory migration: same username-vs-PIN logout
+            # scoping _reset_activity_history() already uses (see
+            # dashboard/server.py's logout_ep) — discards the in-RAM
+            # memory cache when a username session logs out.
+            self._dashboard.set_logout_callback(self._clear_memory_session)
             # Phase 7: reuses the dashboard's existing (previously unwired)
             # wake mechanism — /api/wake, /api/command, and /ws "command"
             # already all call _wake_callback() today. No new route, no new
@@ -2352,8 +2464,20 @@ class JarvisLive:
                 self.session = None
                 # Only save if there was a real conversation (≥3 turns) —
                 # _save_session_summary() itself resets self._session_log.
+                #
+                # PostgreSQL memory migration: self._session_owner is
+                # captured into a local NOW, synchronously, before
+                # `continue` below can run the NEXT connection's
+                # _build_config() — which reassigns self._session_owner to
+                # the incoming user. asyncio.create_task() only SCHEDULES
+                # _save_session_summary(); the loop reaches `continue` and
+                # `_build_config()` (a plain sync call, no await points)
+                # before that task's body ever runs, so reading
+                # self._session_owner lazily inside it would already see
+                # the WRONG (new) user on an identity-switch reconnect.
+                _outgoing_owner = self._session_owner
                 if len(self._session_log) >= 3:
-                    asyncio.create_task(self._save_session_summary())
+                    asyncio.create_task(self._save_session_summary(_outgoing_owner))
                 elif self._identity_switch_reconnect:
                     # A different account is taking over this session (see
                     # _set_user_profile()) and the outgoing one's turn log

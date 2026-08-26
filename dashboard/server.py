@@ -602,6 +602,7 @@ class DashboardServer:
         self._interrupt_callback          = None   # web interrupt control: fires main.py's interrupt()
         self._timezone_callback           = None   # fires on a successful /login/username with a timezone
         self._profile_callback            = None   # fires with the full users/user_db.py profile dict
+        self._logout_callback             = None   # fires on /api/logout of a username session (memory cache reset)
         self._session_timezones: dict[str, str] = {}   # token → IANA timezone (username logins only)
         # Phase 8: lightweight session bookkeeping — which auth path issued a
         # token, and (for username logins only) which name. Not a user
@@ -714,6 +715,14 @@ class DashboardServer:
         display-name string for the existing ADDRESS-clause/greeting
         wiring (see main.py's _set_web_username)."""
         self._profile_callback = fn
+
+    def set_logout_callback(self, fn) -> None:
+        """fn() is called on a successful POST /api/logout of a username
+        session ONLY (never Remote Access/PIN — same scoping
+        _reset_activity_history() already uses) — main.py wires this to
+        _clear_memory_session() so the in-RAM PostgreSQL memory cache
+        never lingers past logout."""
+        self._logout_callback = fn
 
     # ── token/session cleanup ────────────────────────────────────────────
 
@@ -1159,6 +1168,12 @@ class DashboardServer:
             if tok:
                 if self._session_auth_mode.get(tok) == "username":
                     self._reset_activity_history()
+                    # PostgreSQL memory migration: same username-vs-PIN
+                    # scoping as the Activity Log reset above — discards
+                    # the in-RAM memory cache too (see main.py's
+                    # _clear_memory_session()/set_logout_callback()).
+                    if self._logout_callback:
+                        self._logout_callback()
                 self._forget_token(tok)
             return JSONResponse({"ok": True})
 

@@ -68,6 +68,21 @@ safe to run.
 | `GEMINI_API_KEY` | **Required** | The Gemini API key `main.py`'s `_get_api_key()` uses (checked before the desktop's `config/api_keys.json` fallback) | *(enter your real key directly in Render's dashboard)* | **Yes — secret** | No |
 | `PORT` | Not needed | Which port `dashboard/server.py` binds to | — | No | **Yes** — Render sets this automatically; don't configure it manually |
 | `SARANA_ALLOWED_ORIGINS` | Required once Vercel is deployed | Additional CORS origin(s) `_cors_allowed_origins()` accepts, on top of the built-in localhost dev origins | `https://your-vercel-domain.vercel.app` | No — public URL | No |
+| `DATABASE_URL` | Optional (recommended) | PostgreSQL connection string for SARANA's persistent memory (personal + shared facts, session summaries) — see `memory/postgres_repo.py`. Unset = falls back to the local JSON file (`memory/long_term.json`), same as before this feature existed — no crash, just no durable per-user memory across a Render redeploy. | `postgresql://user:pass@host:5432/dbname` | **Yes — secret** | With Render's own managed Postgres add-on, yes (Render injects it automatically when the database and web service are linked) |
+
+### PostgreSQL persistent memory on Render
+
+`memory/postgres_repo.py`/`memory/memory_cache.py` add durable, per-user
+personal + shared memory on top of a free/low-cost Render **PostgreSQL**
+add-on — no vector DB, no Redis, no extra microservice. Add a Postgres
+instance from Render's dashboard, link it to this Web Service (Render sets
+`DATABASE_URL` automatically when linked, or copy its **External/Internal
+Connection String** into the env var manually), then deploy/restart.
+Schema creation and the one-time import of any existing
+`memory/long_term.json` both happen automatically and idempotently on
+startup (`memory/migrate_long_term.py`) — no manual migration step.
+Without `DATABASE_URL` set at all, everything keeps working exactly as it
+always has (the local JSON file), so this is purely additive.
 
 ### SQLite persistence on Render
 

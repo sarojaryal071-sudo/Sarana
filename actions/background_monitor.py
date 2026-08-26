@@ -38,12 +38,24 @@ def _title_hash(title: str) -> str:
 # ── Memory I/O ─────────────────────────────────────────────────────────────────
 
 def _load() -> dict:
-    from memory.memory_manager import load_memory
+    # PostgreSQL memory migration: reads directly against
+    # memory.legacy_file_store (the local JSON file itself), NOT
+    # memory.memory_manager.load_memory() — "monitors" is a completely
+    # separate concern from the personal/shared Postgres-backed memory
+    # system that module now fronts, and only ever lived in this file by
+    # historical convenience (see memory/legacy_file_store.py's module
+    # docstring). Importing MEMORY_PATH/the file reader from
+    # memory_manager instead of legacy_file_store directly would risk a
+    # stale-reference bug: memory_manager.MEMORY_PATH is a value snapshot
+    # taken at import time, not a live alias, so anything that
+    # redirects legacy_file_store.MEMORY_PATH (e.g. a test) after that
+    # point would silently diverge from it.
+    from memory.legacy_file_store import load_memory
     data = load_memory().get("monitors", {})
     return data if isinstance(data, dict) else {}
 
 def _save(monitors: dict) -> None:
-    from memory.memory_manager import load_memory, MEMORY_PATH, _lock
+    from memory.legacy_file_store import load_memory, MEMORY_PATH, _lock
     memory = load_memory()
     memory["monitors"] = monitors
     with _lock:

@@ -23,6 +23,13 @@ uvicorn[standard]
 cryptography
 python-multipart
 
+# PostgreSQL persistent memory: memory/postgres_repo.py's only external
+# dependency, optional at import time (guarded — see that module) so this
+# still runs with no DATABASE_URL set at all, falling back to the local
+# JSON file. [binary] ships a prebuilt libpq, no system Postgres client
+# headers needed on Render's build image.
+psycopg[binary]>=3.1,<4
+
 # Device-local-time fix: zoneinfo (stdlib) needs an actual IANA tz database
 # to resolve names like "Asia/Kathmandu" and their DST rules. Most desktop
 # OSes and full Linux images ship one system-wide, but Windows never does
