@@ -47,10 +47,20 @@ class FakePostgresRepo:
     # ── memories ─────────────────────────────────────────────────────────
 
     def fetch_memories(self, scope: str, owner: str = "") -> dict:
+        # Mirrors memory/postgres_repo.py's real fetch_memories(): for
+        # scope='shared', owner means "subject" (who the fact is about),
+        # not a visibility filter — every shared row is returned
+        # regardless of owner, with "subject" attached when known.
         out = {cat: {} for cat in _MANAGED_CATEGORIES}
         for (s, o, cat, key), row in self.rows.items():
-            if s == scope and o == owner:
-                out.setdefault(cat, {})[key] = {"value": row["content"], "updated": row["updated_at"]}
+            if s != scope:
+                continue
+            if scope != "shared" and o != owner:
+                continue
+            entry = {"value": row["content"], "updated": row["updated_at"]}
+            if scope == "shared" and o:
+                entry["subject"] = o
+            out.setdefault(cat, {})[key] = entry
         return out
 
     def upsert_memory(self, scope, owner, category, key, content, *,

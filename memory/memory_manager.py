@@ -17,7 +17,12 @@ What's UNCHANGED
   read/written directly against MEMORY_PATH/_lock (re-exported below,
   unchanged) and passed through untouched by load_memory() (see
   _read_legacy_extras()).
-- format_memory_for_prompt()'s exact behavior/output shape.
+- format_memory_for_prompt()'s overall structure/limits/header for facts
+  with no "subject" entry (personal facts, and shared facts with no known
+  subject e.g. legacy migrated data) — output for those is byte-for-byte
+  identical to before. A shared fact WITH a known subject now additionally
+  names who it's about (see that function) — the attribution-loss fix
+  below.
 - Local/desktop with no DATABASE_URL configured: the whole personal/shared
   system transparently falls back to memory/legacy_file_store.py, i.e.
   exactly this module's original behavior — zero setup required, no
@@ -144,6 +149,29 @@ def update_memory(
     return load_memory()
 
 
+def _entry_value_and_subject(entry) -> tuple[str | None, str | None]:
+    """Pulls (value, subject) out of an entry that's either a plain string
+    (legacy shape) or {"value": ..., "updated": ..., "subject": ...}
+    (see postgres_repo.fetch_memories()'s docstring — "subject" is only
+    ever present on a SHARED fact whose original teller is known)."""
+    if isinstance(entry, dict):
+        return entry.get("value"), entry.get("subject")
+    return entry, None
+
+
+def _subject_note(subject: str | None) -> str:
+    """Attribution-loss fix: a shared fact's subject (who told SARANA it /
+    who it's about) must survive into the prompt text itself — otherwise a
+    fact like "Bimal is my friend" (told by Saroj) reads, once merged for
+    ANY reader, as an anonymous "Bimal is a friend", which the ADDRESS
+    clause then makes Gemini default to reading as being about whoever
+    it's currently speaking to. Appending the subject by name lets Gemini
+    do what it already does well — phrase it naturally as "your X" when
+    the subject IS who it's addressing, or "SUBJECT's X" when it's someone
+    else — without this module needing to know who's currently listening."""
+    return f" [fact about {subject}]" if subject else ""
+
+
 def format_memory_for_prompt(memory: dict | None) -> str:
     if not memory:
         return ""
@@ -155,65 +183,75 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     for field in id_fields:
         entry = identity.get(field)
         if entry:
-            val = entry.get("value") if isinstance(entry, dict) else entry
+            val, subject = _entry_value_and_subject(entry)
             if val:
-                lines.append(f"{field.title()}: {val}")
+                lines.append(f"{field.title()}: {val}{_subject_note(subject)}")
     for key, entry in identity.items():
         if key in id_fields:
             continue
-        val = entry.get("value") if isinstance(entry, dict) else entry
+        val, subject = _entry_value_and_subject(entry)
         if val:
-            lines.append(f"{key.replace('_', ' ').title()}: {val}")
+            lines.append(f"{key.replace('_', ' ').title()}: {val}{_subject_note(subject)}")
 
     prefs = memory.get("preferences", {})
     if prefs:
         lines.append("")
         lines.append("Preferences:")
         for key, entry in list(prefs.items())[:15]:
-            val = entry.get("value") if isinstance(entry, dict) else entry
+            val, subject = _entry_value_and_subject(entry)
             if val:
-                lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
+                lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_subject_note(subject)}")
 
     projects = memory.get("projects", {})
     if projects:
         lines.append("")
         lines.append("Active Projects / Goals:")
         for key, entry in list(projects.items())[:8]:
-            val = entry.get("value") if isinstance(entry, dict) else entry
+            val, subject = _entry_value_and_subject(entry)
             if val:
-                lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
+                lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_subject_note(subject)}")
 
     rels = memory.get("relationships", {})
     if rels:
         lines.append("")
         lines.append("People in their life:")
         for key, entry in list(rels.items())[:10]:
-            val = entry.get("value") if isinstance(entry, dict) else entry
+            val, subject = _entry_value_and_subject(entry)
             if val:
-                lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
+                lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_subject_note(subject)}")
 
     wishes = memory.get("wishes", {})
     if wishes:
         lines.append("")
         lines.append("Wishes / Plans / Wants:")
         for key, entry in list(wishes.items())[:8]:
-            val = entry.get("value") if isinstance(entry, dict) else entry
+            val, subject = _entry_value_and_subject(entry)
             if val:
-                lines.append(f"  - {key.replace('_', ' ').title()}: {val}")
+                lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_subject_note(subject)}")
 
     notes = memory.get("notes", {})
     if notes:
         lines.append("")
         lines.append("Other notes:")
         for key, entry in list(notes.items())[:8]:
-            val = entry.get("value") if isinstance(entry, dict) else entry
+            val, subject = _entry_value_and_subject(entry)
             if val:
-                lines.append(f"  - {key}: {val}")
+                lines.append(f"  - {key}: {val}{_subject_note(subject)}")
 
     if not lines:
         return ""
 
-    header = "[WHAT YOU KNOW ABOUT THIS PERSON — use naturally, never recite like a list]\n"
+    # "ABOUT THIS PERSON" (unchanged wording) still governs personal facts
+    # and unattributed shared facts — the added sentence exists ONLY to
+    # stop a "[fact about X]" tag from being misread/ignored: a fact
+    # tagged that way is about the NAMED person, not necessarily whoever
+    # you're currently speaking with.
+    header = (
+        "[WHAT YOU KNOW ABOUT THIS PERSON — use naturally, never recite like a list. "
+        "A line tagged \"[fact about X]\" belongs to X, not necessarily whoever you're "
+        "addressing right now — attribute it to X by name unless X is exactly who "
+        "you're speaking with.]\n"
+    )
     result = header + "\n".join(lines)
     if len(result) > 2000:
         result = result[:1997] + "…"

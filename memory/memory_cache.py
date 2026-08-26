@@ -35,7 +35,13 @@ Ownership model
   that user is the active session.
 - scope='shared': visible to every user — loaded on every login regardless
   of who's logging in, merged UNDER personal facts (a user's own fact wins
-  over a shared assumption on the same category/key).
+  over a shared assumption on the same category/key). "Shared" is a
+  VISIBILITY setting, not an ownership one: a shared fact still has a
+  SUBJECT (whoever told SARANA it), carried as that entry's "subject" key
+  so "Bimal is my friend" (told by Saroj) is never flattened into an
+  anonymous fact that a different reader (e.g. Sana) could misread as
+  being about them. See postgres_repo.fetch_memories()'s docstring for
+  exactly how this is stored/returned.
 - owner="" (no profile resolved — an unrecognized/unset name on either
   interface) is its own personal bucket, exactly matching the ORIGINAL
   pre-migration behavior of a single, un-scoped memory store — no
@@ -94,7 +100,11 @@ class SessionMemoryCache:
             try:
                 postgres_repo.init_schema()
                 personal = postgres_repo.fetch_memories("personal", owner) if owner else _empty()
-                shared = postgres_repo.fetch_memories("shared", "")
+                # No owner filter — see fetch_memories()'s docstring: for
+                # scope='shared', `owner` means the fact's SUBJECT (who it's
+                # about), not "who may see it" — every shared row is loaded
+                # for every login regardless of whose subject it is.
+                shared = postgres_repo.fetch_memories("shared")
                 with self._lock:
                     self.owner, self.personal, self.shared, self.backend = owner, personal, shared, "postgres"
                 n_personal = sum(len(v) for v in personal.values())
@@ -172,6 +182,15 @@ class SessionMemoryCache:
             self.load("")   # see merged()'s identical safety net
 
         use_shared = shared and self.backend == "postgres"
+        # The SUBJECT of this fact — who told SARANA it / who it's about —
+        # is always the current session's owner, regardless of scope. For
+        # scope='personal' this was already true (the owner IS the subject
+        # by definition). For scope='shared' this is the fix for the
+        # attribution-loss bug: a shared fact used to be written with no
+        # owner at all, so "Bimal is my friend" became an anonymous
+        # "Bimal is [someone's] friend" the moment anyone else read it back
+        # — see fetch_memories()'s docstring and format_memory_for_prompt().
+        subject = self.owner
         changed: list[tuple[str, str, str]] = []
         with self._lock:
             target = self.shared if use_shared else self.personal
@@ -187,9 +206,22 @@ class SessionMemoryCache:
                         new_val = new_val[: legacy_file_store.MAX_VALUE_LENGTH].rstrip() + "…"
                     bucket = target.setdefault(category, {})
                     existing = bucket.get(key)
-                    if isinstance(existing, dict) and existing.get("value") == new_val:
+                    # A shared write must still land even if the VALUE
+                    # string happens to be unchanged, when the SUBJECT is
+                    # different (e.g. Sana later says the same words about
+                    # a different "Bimal" fact) — otherwise the old
+                    # subject would silently stick to the new speaker.
+                    existing_subject = existing.get("subject") if isinstance(existing, dict) else None
+                    if (
+                        isinstance(existing, dict)
+                        and existing.get("value") == new_val
+                        and (not use_shared or existing_subject == subject)
+                    ):
                         continue
-                    bucket[key] = {"value": new_val, "updated": _today()}
+                    entry = {"value": new_val, "updated": _today()}
+                    if use_shared and subject:
+                        entry["subject"] = subject
+                    bucket[key] = entry
                     changed.append((category, key, new_val))
             personal_snapshot = self.personal
 
@@ -199,10 +231,9 @@ class SessionMemoryCache:
         print(f"[Memory] Saved: {[f'{c}/{k}' for c, k, _ in changed]}")
         if self.backend == "postgres":
             scope = "shared" if use_shared else "personal"
-            owner_for_write = "" if use_shared else self.owner
             for category, key, val in changed:
                 _persistence_queue.enqueue({
-                    "kind": "upsert", "scope": scope, "owner": owner_for_write,
+                    "kind": "upsert", "scope": scope, "owner": subject,
                     "category": category, "key": key, "content": val,
                     "importance": importance, "entities": entities,
                     "event_date": event_date, "source": source,

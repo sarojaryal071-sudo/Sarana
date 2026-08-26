@@ -646,7 +646,17 @@ TOOL_DECLARATIONS = [
                     )
                 },
                 "key":   {"type": "STRING", "description": "Short snake_case key (e.g. name, favorite_food, sister_name)"},
-                "value": {"type": "STRING", "description": "Concise value in English (e.g. Fatih, pizza, older sister)"},
+                "value": {
+                    "type": "STRING",
+                    "description": (
+                        "Concise value in English (e.g. Fatih, pizza, older sister). "
+                        "If shared=true, phrase it in THIRD PERSON naming the current speaker "
+                        "explicitly instead of first person — e.g. write 'Saroj visited "
+                        "Pashupatinath with his family and was happy', not 'I visited "
+                        "Pashupatinath...' — because a shared fact may later be read back to a "
+                        "DIFFERENT user, who must not hear it as if it happened to them."
+                    ),
+                },
                 "shared": {
                     "type": "BOOLEAN",
                     "description": (
@@ -655,7 +665,11 @@ TOOL_DECLARATIONS = [
                         "speaker — e.g. a shared household fact, or a relationship between two "
                         "known users ('Saroj and Bimal are friends'). Leave false (the default) "
                         "for anything personal to the current speaker — their own name, "
-                        "preferences, plans, or private facts about their own life."
+                        "preferences, plans, or private facts about their own life. The system "
+                        "already tracks WHO told SARANA a shared fact separately, so a different "
+                        "user reading it back is still correctly told whose fact it is — but "
+                        "`value` itself should still name the current speaker in third person "
+                        "(see that field) rather than saying 'I'/'my'."
                     ),
                 },
                 "event_date": {

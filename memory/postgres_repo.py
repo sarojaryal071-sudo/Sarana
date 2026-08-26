@@ -25,8 +25,17 @@ sarana_memories
     id           BIGSERIAL PRIMARY KEY
     scope        TEXT   -- 'personal' | 'shared'
     owner        TEXT   -- canonical users/user_db.py username (e.g.
-                            "saroj", "sana") when scope='personal'; ''
-                            when scope='shared' (shared rows have no owner)
+                            "saroj", "sana"). For scope='personal' this is
+                            the exclusive owner (who it's visible to AND
+                            who it's about -- the same person). For
+                            scope='shared' this is the SUBJECT (who told
+                            SARANA the fact / who it's about) -- visibility
+                            is controlled entirely by scope='shared'
+                            (loaded for everyone), NOT by this column; ''
+                            means the subject is unknown (e.g. legacy data
+                            migrated before attribution existed). See
+                            fetch_memories()'s docstring for how this is
+                            surfaced back out as each entry's "subject" key.
     category     TEXT   -- identity | preferences | projects |
                             relationships | wishes | notes | ... — free-form,
                             NOT a rigid enum, so a new category never needs
@@ -158,21 +167,46 @@ def init_schema() -> None:
 
 def fetch_memories(scope: str, owner: str = "") -> dict:
     """Returns {category: {key: {"value": content, "updated": "YYYY-MM-DD"}}}
-    -- exactly the shape memory/memory_manager.py's original file-backed
+    -- the same shape memory/memory_manager.py's original file-backed
     load_memory() produced, so format_memory_for_prompt() and every other
-    reader downstream needs no changes at all."""
+    reader downstream needed no signature changes -- plus an additional
+    "subject" key on each entry when it's known and meaningful (see below).
+
+    scope='personal': filtered to exactly `owner`'s own rows, as before --
+    every fact returned is unambiguously about that one person, so no
+    "subject" key is added (there's nothing to disambiguate).
+
+    scope='shared': returns EVERY shared row regardless of the `owner`
+    column's value -- `owner` here means "who the fact is originally
+    ABOUT / who told SARANA it" (the subject), not "who may see it"
+    (that's what scope already controls). Each entry's "subject" key
+    carries that value when non-empty, so a caller can tell "Bimal is a
+    friend" (unattributed, e.g. migrated legacy data) apart from "Bimal is
+    SAROJ's friend" (attributed) instead of collapsing every shared fact
+    into an anonymous, ownerless blob the way scope='shared' used to
+    (every shared row's owner column was always '' before this fix)."""
     out: dict = {cat: {} for cat in _MANAGED_CATEGORIES}
     with _connect() as conn:
-        rows = conn.execute(
-            "SELECT category, key, content, updated_at FROM sarana_memories "
-            "WHERE scope = %s AND owner = %s",
-            (scope, owner),
-        ).fetchall()
-    for category, key, content, updated_at in rows:
-        out.setdefault(category, {})[key] = {
+        if scope == "shared":
+            rows = conn.execute(
+                "SELECT category, key, content, owner, updated_at FROM sarana_memories "
+                "WHERE scope = %s",
+                (scope,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT category, key, content, owner, updated_at FROM sarana_memories "
+                "WHERE scope = %s AND owner = %s",
+                (scope, owner),
+            ).fetchall()
+    for category, key, content, row_owner, updated_at in rows:
+        entry = {
             "value": content,
             "updated": updated_at.strftime("%Y-%m-%d") if updated_at else "",
         }
+        if scope == "shared" and row_owner:
+            entry["subject"] = row_owner
+        out.setdefault(category, {})[key] = entry
     return out
 
 
