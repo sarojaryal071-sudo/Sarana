@@ -1444,27 +1444,42 @@ class JarvisLive:
 
         # Location foundation: boolean-only context — never raw
         # coordinates (see self._session_location's own privacy
-        # docstring), and never a place name, since reverse geocoding
-        # doesn't exist yet (a later phase) and Gemini must not invent
-        # one meanwhile. Read fresh from self._session_location at BUILD
-        # time only, to decide which of these two fixed sentences to
-        # show — a location arriving/being cleared later in the SAME
-        # connection's lifetime doesn't retroactively change this text
-        # (system_instruction is fixed for the life of a connection, same
-        # constraint the language/capability context blocks already
-        # live with), which is fine here: no location-aware TOOL exists
-        # yet to read live state from, so this block's only job right
-        # now is to stop Gemini from claiming or guessing a location it
-        # was never actually given.
+        # docstring) and never a place name resolved here (that's
+        # get_current_place's job, called fresh at execution time — see
+        # DESKTOP_ONLY_TOOLS's neighboring location-tools comment). Read
+        # fresh from self._session_location at BUILD time only, to decide
+        # which of these two fixed sentences to show — a location
+        # arriving/being cleared later in the SAME connection's lifetime
+        # doesn't retroactively change this text (system_instruction is
+        # fixed for the life of a connection, same constraint the
+        # language/capability context blocks already live with), which is
+        # fine here since the actual location TOOLS below read live state
+        # at call time regardless of what this fixed text says.
+        #
+        # Bug fix: the "available" branch below used to say "say you
+        # don't have that resolved yet... rely on location-aware tools
+        # (when available)" — leftover wording from before
+        # get_current_place/get_weather/find_nearby_places/get_directions
+        # existed, when that hedge was still honest. Once those tools
+        # were added it was never updated, and Gemini followed it
+        # literally instead of calling a tool — live-reproduced as "The
+        # location function is not available in browser version" for
+        # "Where am I?". Fixed by directly naming which tool to call for
+        # which request, instead of telling Gemini to decline.
         if self._session_location:
             _location_ctx = (
-                "[LOCATION]\nThe user's current browser location is available "
-                "for location-aware requests in this session. You do NOT have "
-                "their city, address, or place name from this alone — no "
-                "place has been resolved. Do not guess or state a specific "
-                "place or city; if asked exactly where they are, say you "
-                "don't have that resolved yet, and rely on location-aware "
-                "tools (when available) for anything specific.\n\n"
+                "[LOCATION]\nThe user's current browser location IS available "
+                "this session. Never tell the user that location/browser-"
+                "location functionality is unavailable while this says "
+                "available. The coordinates alone don't give you a place "
+                "name, so don't guess or state one yourself — instead call "
+                "the right tool: get_current_place for \"where am I\"/\"what "
+                "city or area is this\"; get_weather with no place argument "
+                "for current-location weather; find_nearby_places for nearby "
+                "places; get_directions for directions/distance/ETA from "
+                "here. Always call the relevant tool rather than declining — "
+                "never mention tool names or implementation details to the "
+                "user.\n\n"
             )
         else:
             _location_ctx = (
