@@ -17,6 +17,7 @@ if _platform.system() == "Windows":
 # ─────────────────────────────────────────────────────────────────────────────
 
 import asyncio
+import math
 import os
 import re
 import threading
@@ -78,7 +79,12 @@ from core.latency_stats import LatencyStats
 from actions.file_processor import file_processor
 from actions.flight_finder     import flight_finder
 from actions.open_app          import open_app
-from actions.weather_report    import weather_action
+from actions.weather           import get_weather_text
+from actions.geo               import (
+    geocode_place, reverse_geocode, format_place,
+    find_nearby_places, format_nearby_places, haversine_m, format_distance,
+)
+from actions.routing           import get_route
 from actions.send_message      import send_message
 from actions.reminder          import reminder
 from actions.computer_settings import computer_settings
@@ -255,15 +261,85 @@ TOOL_DECLARATIONS = [
         }
     },
     {
-        "name": "weather_report",
-        "description": "Gives the weather report to user",
+        "name": "get_weather",
+        "description": (
+            "Gets REAL current weather conditions and a short forecast (temperature, "
+            "feels-like, conditions, wind, precipitation/rain chance) for the user's "
+            "current location, or a named place. Use for any weather question -- "
+            "'what's it like outside', 'will it rain today', 'how hot is it', 'what's "
+            "the forecast'. If the user doesn't name a place, this automatically uses "
+            "their current device location -- do not ask them where they are first."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "city": {"type": "STRING", "description": "City name"}
+                "place": {
+                    "type": "STRING",
+                    "description": "Optional named city/place. Omit to use the user's current location.",
+                },
             },
-            "required": ["city"]
-        }
+            "required": [],
+        },
+    },
+    {
+        "name": "get_current_place",
+        "description": (
+            "Resolves the user's current city/area/country from their device location. "
+            "Use for 'where am I', 'what city am I in', 'what area is this', 'what "
+            "neighborhood is this'. Cheap and fast (cached) -- call it directly."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []},
+    },
+    {
+        "name": "find_nearby_places",
+        "description": (
+            "Finds REAL nearby places (pharmacy, restaurant, cafe, supermarket, "
+            "hospital, ATM, bar, hotel, etc.) near the user's current device location. "
+            "Use for 'find a X near me', 'is there a X nearby', 'nearest X', "
+            "'X around me'."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {
+                    "type": "STRING",
+                    "description": "What to search for, e.g. 'pharmacy', 'coffee shop', 'restaurant'",
+                },
+                "radius_m": {
+                    "type": "INTEGER",
+                    "description": "Search radius in meters (default 1500, max 5000)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_directions",
+        "description": (
+            "Gets REAL distance and estimated travel time from the user's current "
+            "device location to a named destination, walking or driving. Use for "
+            "'how far is X', 'directions to X', 'how long to get to X', 'walking "
+            "directions to X'."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "destination": {"type": "STRING", "description": "Destination name or address"},
+                "mode": {"type": "STRING", "description": "walking | driving (default: driving)"},
+            },
+            "required": ["destination"],
+        },
+    },
+    {
+        "name": "refresh_location",
+        "description": (
+            "Requests a fresh device location fix right now. Use ONLY when the user "
+            "explicitly says something like 'I moved', 'update my location', "
+            "'refresh my location', or asks 'where am I now' wanting a genuinely fresh "
+            "check -- NOT for ordinary location-based questions, which already use the "
+            "current location automatically without needing this."
+        ),
+        "parameters": {"type": "OBJECT", "properties": {}, "required": []},
     },
     {
         "name": "send_message",
@@ -725,6 +801,42 @@ DESKTOP_ONLY_TOOLS = frozenset({
     "system_status", "shutdown_jarvis",
 })
 
+# ── Location capabilities (weather/geo/routing) ─────────────────────────
+# NOT listed in DESKTOP_ONLY_TOOLS: these tools work on EITHER surface --
+# they just honestly report [LOCATION_UNAVAILABLE] wherever no location
+# happens to be known (always true on desktop today, since desktop has no
+# browser geolocation source yet -- see main.py's _session_location
+# docstring), exactly the same "genuinely unavailable" case a web session
+# with denied permission also hits. This is a real, honest degradation,
+# not a hardcoded surface restriction like DESKTOP_ONLY_TOOLS.
+LOCATION_UNAVAILABLE_RESULT = (
+    "[LOCATION_UNAVAILABLE] The user's current device location is not available "
+    "right now (never granted, denied, lost, or a refresh attempt just failed). "
+    "Tell them honestly and briefly, in your own natural words, that you don't "
+    "currently have their location -- you can ask them to allow location access "
+    "or tell you the place they mean. Never guess or invent a location."
+)
+
+# A location fix older than this is considered stale for an ordinary
+# location-aware request (weather/nearby-places/directions don't need
+# up-to-the-second precision) -- see JarvisLive._get_current_location().
+LOCATION_MAX_AGE_S = 30 * 60
+# A much tighter bound used ONLY for a genuinely fresh check (the user
+# explicitly asking "where am I right now"/refresh_location) -- a fix
+# this recent is already fresh enough that a new browser round trip
+# would just be redundant.
+LOCATION_FRESH_ENOUGH_S = 30
+# How long _get_current_location() waits for a browser refresh to arrive
+# before falling back (see that method) -- long enough for a real
+# getCurrentPosition() round trip, short enough not to stall a
+# conversation turn indefinitely.
+LOCATION_REFRESH_TIMEOUT_S = 5.0
+# find_nearby_places' own short-lived result cache (see
+# JarvisLive._nearby_cache) -- avoids hammering Overpass for the same
+# query asked twice in a row, without pretending to be a general cache.
+NEARBY_CACHE_TTL_S = 5 * 60
+NEARBY_CACHE_MAX_ENTRIES = 20
+
 
 class JarvisLive:
 
@@ -762,6 +874,55 @@ class JarvisLive:
         # reads the local machine's own clock/timezone correctly and needs
         # no override (see _local_now()).
         self._web_timezone: str | None = None
+        # Location foundation: the CURRENT session's browser geolocation
+        # fix, set via _set_session_location() (fired by dashboard/
+        # server.py's POST /api/location -> set_location_callback()).
+        # None on desktop always (no browser there — see
+        # _resolve_desktop_profile(), which never touches this), and on
+        # web until/unless the user actually grants permission. Privacy:
+        # session-only, RAM-only — NEVER written to Postgres, the legacy
+        # memory file, session summaries, the Activity Log, or anywhere
+        # else persistent; cleared on every new login (_set_user_profile())
+        # and on logout (_clear_memory_session()) so no identity can ever
+        # inherit a previous one's coordinates. Shape:
+        #   {"latitude": float, "longitude": float, "accuracy": float,
+        #    "timestamp": float, "fix_timestamp": float | None}
+        #   "timestamp" is time.monotonic(), for staleness comparisons
+        #   only — never a wall-clock value (see _local_now()'s own
+        #   docstring for that distinction). "fix_timestamp" is the
+        #   BROWSER's own fix time (epoch ms, may be None) — used only to
+        #   detect an out-of-order refresh response (see
+        #   _set_session_location()'s own docstring).
+        # No place name/city/address is ever resolved here — reverse
+        # geocoding is explicitly a later phase; this is coordinates only.
+        self._session_location: dict | None = None
+        # Location capabilities: waiters an in-flight tool call can await
+        # while a browser location refresh is requested (see
+        # _get_current_location()) -- set (each independently) the moment
+        # _set_session_location() next stores a genuinely valid fix, then
+        # immediately removed by whichever call was waiting on it. Never
+        # persisted, never survives past the single refresh attempt that
+        # created it.
+        self._location_refresh_waiters: list[asyncio.Event] = []
+        # Reverse-geocoded place ("where am I") for the CURRENT session,
+        # cached so asking "where am I" repeatedly (or any tool that also
+        # needs the resolved place) doesn't hit Nominatim every single
+        # time -- see actions/geo.py's own docstring for why that matters.
+        # Shape: {"city", "area", "country", "label", "for": (rounded_lat,
+        # rounded_lon), "timestamp": time.monotonic()}. "for" is rounded
+        # to ~1.1 km so ordinary GPS jitter doesn't force a re-resolve.
+        # Cleared on logout/every new login, same as self._session_location
+        # itself -- it's derived from one specific user's location and
+        # must never describe a place to a different identity.
+        self._place_cache: dict | None = None
+        # Short-lived nearby-places result cache: {(rounded_lat,
+        # rounded_lon, query, radius_m): (timestamp, formatted_text)} --
+        # avoids hammering Overpass if the user asks similar things in
+        # quick succession. Small and time-bounded (see
+        # NEARBY_CACHE_MAX_ENTRIES/_TTL_S in _execute_tool()) rather than
+        # a general-purpose cache layer; cleared on logout/every new login
+        # for the same reason self._place_cache is.
+        self._nearby_cache: dict[tuple, tuple[float, str]] = {}
         # Canonical authenticated SQLite profile (users/user_db.py) for the
         # CURRENT session, regardless of which interface established it:
         # a web username+PIN login sets it via set_profile_callback() ->
@@ -797,6 +958,41 @@ class JarvisLive:
         # "no profile resolved" bucket — today's original un-scoped memory
         # behavior (see memory/memory_cache.py).
         self._session_owner: str = ""
+        # Reliability audit — language architecture: the EXPLICIT runtime
+        # language an in-progress conversation has been asked to switch to
+        # (e.g. "speak English from now on"), distinct from the persisted
+        # long-term preference (memory's identity.language / the SQLite
+        # profile's language_preference — see _resolve_effective_language()).
+        # "" means "no explicit runtime override active — use the persisted
+        # default". _effective_language_owner records WHICH identity this
+        # override belongs to, so _resolve_effective_language() can tell a
+        # same-user network reconnect (keep it) apart from a genuine
+        # identity switch (reset it — a new user's own language takes
+        # over). Set together in _execute_tool()'s save_memory handling.
+        self._effective_language: str = ""
+        self._effective_language_owner: str | None = None
+        # Reliability audit — async ownership: bumped by _set_user_profile()
+        # on every call. run()'s connect loop captures this value at the
+        # moment it builds a connection's config; if a NEW login raced in
+        # (another _set_user_profile() call) while that connection was
+        # still being established (client.aio.live.connect() is a real
+        # network round trip, not instantaneous), the generation will have
+        # moved on by the time the connection succeeds — signalling that
+        # this connection's voice/system_instruction/[USER PROFILE] were
+        # built from an already-stale profile and must be discarded in
+        # favor of an immediate fresh reconnect with the CURRENT profile,
+        # rather than silently running an entire session under the wrong
+        # identity. See run()'s use of _IdentityChanged for this.
+        self._profile_generation: int = 0
+        # Reliability audit — logout must stop background proactive
+        # check-ins/monitor alerts from continuing to "speak to" a user who
+        # just logged out (the underlying Gemini connection itself doesn't
+        # tear down on logout alone — only a NEW login's own identity
+        # switch reconnects it). Desktop never calls _clear_memory_session()
+        # (no logout concept there), so this stays False for the entire
+        # process lifetime on desktop — zero behavior change there. Cleared
+        # by _set_user_profile() on the next real login.
+        self._logged_out: bool = False
         self.session              = None
         self.audio_in_queue       = None
         self.out_queue            = None
@@ -1003,6 +1199,50 @@ class JarvisLive:
         prefix = f"{name}, " if name else "Sir, "
         self.speak(f"{prefix}{tool_name} encountered an error. {short}")
 
+    def _resolve_effective_language(self) -> str:
+        """Reliability audit — single source of truth for "what language
+        should SARANA be responding in right now". Used by _build_config()
+        (the system-instruction LANGUAGE directive), _send_startup_briefing(),
+        _run_proactive_mode(), and _run_background_monitor() (monitor
+        alerts) — previously each of these read a DIFFERENT, sometimes
+        stale or contradictory, signal (a hardcoded Nepali default, the
+        SQLite profile's language_preference, or a raw memory read), which
+        is exactly what let language flip-flop or silently revert.
+
+        Priority:
+          1. An EXPLICIT runtime request made during the current identity
+             (self._effective_language) — set the moment the user
+             explicitly asks to switch (see _execute_tool()'s save_memory/
+             identity/language handling) — but ONLY if it still belongs to
+             the identity currently active (self._session_owner). A network
+             reconnect for the SAME user keeps it; a genuine identity
+             switch (a different self._session_owner — see _build_config())
+             does not inherit it.
+          2. The persisted long-term preference — memory's identity.language
+             (the most recently saved value, regardless of who saved it
+             last), then the SQLite profile's language_preference (a
+             coarser per-account default).
+          3. "Nepali" — the ultimate hardcoded default.
+        """
+        if self._effective_language and self._effective_language_owner == self._session_owner:
+            return self._effective_language
+
+        try:
+            memory = load_memory()
+            entry = memory.get("identity", {}).get("language")
+            mem_lang = (entry.get("value", "") if isinstance(entry, dict) else str(entry or "")).strip()
+        except Exception:
+            mem_lang = ""
+        if mem_lang:
+            return mem_lang
+
+        if self._user_profile and self._user_profile.get("language_preference"):
+            pref = self._user_profile["language_preference"].strip()
+            if pref:
+                return pref
+
+        return "Nepali"
+
     def _build_config(self) -> types.LiveConnectConfig:
         from datetime import datetime
 
@@ -1088,44 +1328,52 @@ class JarvisLive:
             _addr = ("ADDRESS: When speaking Turkish → always say \"efendim\". "
                       "When speaking English → say \"sir\". Never mix languages.")
 
-        # Default response language: Nepali. Computed per-session here (same
-        # pattern as ADDRESS above) so it's authoritative over prompt.txt's
-        # own general LANGUAGE line, which now defers to this one instead of
-        # competing with it (see core/prompt.txt).
-        _lang = (
-            "LANGUAGE: Respond and speak in natural, conversational, modern Nepali "
-            "by default — the way a modern Nepali person actually talks to an AI "
-            "assistant, not formal, ceremonial, literary, archaic, or Sanskritized "
-            "Nepali. Freely code-switch: keep technical/computing/AI/product "
-            "terminology in English where that's natural (e.g. system, AI, "
-            "backend, frontend, API, server, database, browser, microphone, "
-            "speaker, settings, code, file, GitHub, deployment, terminal, "
-            "Windows, Python), and let common English expressions stay English "
-            "when that sounds more natural — don't awkwardly translate them, and "
-            "don't force every response into pure/literal Nepali. Do not use "
-            "stiff formal greeting phrases like \"Subha Prabhat\" — a natural "
-            "greeting sounds like \"Good morning!\", \"Good morning, "
-            "[name].\", \"Namaste, good morning!\", or \"Good morning! आज के "
-            "गरौँ?\" (the exact wording is still yours to generate per-moment, "
-            "not fixed). You understand English, Nepali, and mixed Nepali-"
-            "English input. Only move away from Nepali as the default when the "
-            "user explicitly asks for another language, or clearly continues an "
-            "entire message in another language — a single mixed-language word "
-            "or phrase is not that."
-        )
-        # Integrates users/user_db.py's language_preference into this SAME
-        # LANGUAGE line rather than a second language mechanism — a no-op
-        # for the current seed users (both "Nepali", already the default
-        # above), but a real per-profile override for any future profile
-        # whose stored preference differs.
-        if self._user_profile and self._user_profile.get("language_preference"):
-            _pref = self._user_profile["language_preference"].strip()
-            if _pref and _pref.lower() != "nepali":
-                _lang += (
-                    f" This user's stored language preference is {_pref} — use "
-                    f"it as the default for this session instead of Nepali, "
-                    f"unless they explicitly ask otherwise."
-                )
+        # Reliability audit: ONE resolved effective language, computed the
+        # same way every other language-facing call site now computes it
+        # (see _resolve_effective_language()) — this replaces the old
+        # hardcoded-Nepali-unless-profile-says-otherwise logic, which never
+        # even looked at memory's identity.language (the exact fact
+        # save_memory writes for an explicit in-conversation language
+        # request — see LANGUAGE DETECTION in core/prompt.txt and
+        # _execute_tool()'s save_memory handling), so an explicit switch
+        # was only ever informational text fighting a contradictory strong
+        # directive, never authoritative.
+        _effective_lang = self._resolve_effective_language()
+
+        if _effective_lang.strip().lower() == "nepali":
+            _lang = (
+                "LANGUAGE: Respond and speak in natural, conversational, modern Nepali "
+                "by default — the way a modern Nepali person actually talks to an AI "
+                "assistant, not formal, ceremonial, literary, archaic, or Sanskritized "
+                "Nepali. Freely code-switch: keep technical/computing/AI/product "
+                "terminology in English where that's natural (e.g. system, AI, "
+                "backend, frontend, API, server, database, browser, microphone, "
+                "speaker, settings, code, file, GitHub, deployment, terminal, "
+                "Windows, Python), and let common English expressions stay English "
+                "when that sounds more natural — don't awkwardly translate them, and "
+                "don't force every response into pure/literal Nepali. Do not use "
+                "stiff formal greeting phrases like \"Subha Prabhat\" — a natural "
+                "greeting sounds like \"Good morning!\", \"Good morning, "
+                "[name].\", \"Namaste, good morning!\", or \"Good morning! आज के "
+                "गरौँ?\" (the exact wording is still yours to generate per-moment, "
+                "not fixed). You understand English, Nepali, and mixed Nepali-"
+                "English input. Only move away from Nepali when the user "
+                "explicitly asks for another language, or clearly continues an "
+                "entire message in another language — a single mixed-language word "
+                "or phrase is not that."
+            )
+        else:
+            _lang = (
+                f"LANGUAGE: Respond and speak in natural, conversational {_effective_lang} "
+                f"by default for this session — this is the user's current effective "
+                f"language (either their stored preference, or something they "
+                f"explicitly asked you to switch to). You still understand English, "
+                f"Nepali, and mixed input regardless. Only move away from "
+                f"{_effective_lang} when the user explicitly asks for another "
+                f"language, or clearly and consistently continues an entire message "
+                f"in another language — a single mixed-language word or phrase is "
+                f"not that."
+            )
 
         # [USER PROFILE]: structured context from the canonical authenticated
         # users/user_db.py profile — the SAME profile/mechanism regardless of
@@ -1194,7 +1442,42 @@ class JarvisLive:
                 "undersell those either.\n\n"
             )
 
-        parts = [time_ctx, identity_ctx, _capabilities_ctx]
+        # Location foundation: boolean-only context — never raw
+        # coordinates (see self._session_location's own privacy
+        # docstring), and never a place name, since reverse geocoding
+        # doesn't exist yet (a later phase) and Gemini must not invent
+        # one meanwhile. Read fresh from self._session_location at BUILD
+        # time only, to decide which of these two fixed sentences to
+        # show — a location arriving/being cleared later in the SAME
+        # connection's lifetime doesn't retroactively change this text
+        # (system_instruction is fixed for the life of a connection, same
+        # constraint the language/capability context blocks already
+        # live with), which is fine here: no location-aware TOOL exists
+        # yet to read live state from, so this block's only job right
+        # now is to stop Gemini from claiming or guessing a location it
+        # was never actually given.
+        if self._session_location:
+            _location_ctx = (
+                "[LOCATION]\nThe user's current browser location is available "
+                "for location-aware requests in this session. You do NOT have "
+                "their city, address, or place name from this alone — no "
+                "place has been resolved. Do not guess or state a specific "
+                "place or city; if asked exactly where they are, say you "
+                "don't have that resolved yet, and rely on location-aware "
+                "tools (when available) for anything specific.\n\n"
+            )
+        else:
+            _location_ctx = (
+                "[LOCATION]\nThe user's current browser location is NOT "
+                "available (never granted, denied, or not yet provided this "
+                "session). Never claim or guess where the user is or what's "
+                "near them. If asked about their location or anything "
+                "nearby, say honestly that you don't currently have their "
+                "location, and you may ask them to tell you their city or "
+                "area instead.\n\n"
+            )
+
+        parts = [time_ctx, identity_ctx, _capabilities_ctx, _location_ctx]
         if _profile_ctx:
             parts.append(_profile_ctx)
         if mem_str:
@@ -1251,6 +1534,9 @@ class JarvisLive:
             # for what each means.
             shared     = bool(args.get("shared", False))
             event_date = (args.get("event_date") or "").strip() or None
+            _language_switch = (
+                category == "identity" and key == "language" and bool(value.strip())
+            )
             if key and value:
                 update_memory(
                     {category: {key: {"value": value}}},
@@ -1259,6 +1545,39 @@ class JarvisLive:
                 print(f"[Memory] 💾 save_memory: {category}/{key} = {value} (shared={shared})")
             if not self.ui.muted:
                 self._push_state("LISTENING")
+
+            # Reliability audit — language architecture: system_instruction
+            # (which carries the strong LANGUAGE directive — see
+            # _build_config()) is fixed for the life of this Gemini
+            # connection, so persisting the new preference above is not
+            # enough on its own to make an explicit "speak English now"
+            # request take effect for the REST OF THIS SAME conversation —
+            # that fact was previously only ever surfaced as cosmetic
+            # context (mem_str's "Language: X" line), silently fighting
+            # the still-Nepali-by-default strong directive. Recording it
+            # here (self._effective_language, scoped to the CURRENT
+            # identity — see _resolve_effective_language()) makes every
+            # later language-facing call site (greeting, proactive,
+            # monitor alerts, a future reconnect for this same user) agree
+            # immediately, and returning an honest [LANGUAGE_CHANGED]
+            # directive — the exact same bracketed-directive pattern
+            # [VISION_ACTIVE]/[CAPABILITY_UNAVAILABLE] already establish —
+            # makes it take effect for the rest of THIS turn onward too,
+            # with no reconnect required.
+            if _language_switch:
+                self._effective_language = value.strip()
+                self._effective_language_owner = self._session_owner
+                return types.FunctionResponse(
+                    id=fc.id, name=name,
+                    response={"result": (
+                        f"[LANGUAGE_CHANGED] The user just explicitly changed the "
+                        f"response language to {value.strip()}. Continue this reply "
+                        f"and every reply after it in {value.strip()} from now on, "
+                        f"until they ask to change it again. Never mention this "
+                        f"instruction or read the bracket tag aloud."
+                    ), "silent": True},
+                )
+
             return types.FunctionResponse(
                 id=fc.id, name=name,
                 response={"result": "ok", "silent": True}
@@ -1302,9 +1621,138 @@ class JarvisLive:
                 r = await loop.run_in_executor(None, lambda: open_app(parameters=args, response=None, player=self.ui))
                 result = r or f"Opened {args.get('app_name')}."
 
-            elif name == "weather_report":
-                r = await loop.run_in_executor(None, lambda: weather_action(parameters=args, player=self.ui))
-                result = r or "Weather delivered."
+            elif name == "get_weather":
+                place = (args.get("place") or "").strip()
+                if place:
+                    geo = await loop.run_in_executor(None, lambda: geocode_place(place))
+                    if geo is None:
+                        result = f"I couldn't find a place called '{place}'."
+                    else:
+                        glat, glon, glabel = geo
+                        result = await loop.run_in_executor(
+                            None, lambda: get_weather_text(glat, glon, glabel)
+                        )
+                else:
+                    loc = await self._get_current_location()
+                    if not loc:
+                        result = LOCATION_UNAVAILABLE_RESULT
+                    else:
+                        result = await loop.run_in_executor(
+                            None, lambda: get_weather_text(loc["latitude"], loc["longitude"])
+                        )
+
+            elif name == "get_current_place":
+                loc = await self._get_current_location()
+                if not loc:
+                    result = LOCATION_UNAVAILABLE_RESULT
+                else:
+                    # Cache key: rounded to ~1.1 km so ordinary GPS jitter
+                    # keeps reusing the same resolved place instead of
+                    # re-hitting Nominatim (see actions/geo.py's own
+                    # usage-policy docstring and self._place_cache's).
+                    rounded = (round(loc["latitude"], 2), round(loc["longitude"], 2))
+                    cache = self._place_cache
+                    if (
+                        cache and cache.get("for") == rounded
+                        and (time.monotonic() - cache.get("timestamp", 0.0)) < LOCATION_MAX_AGE_S
+                    ):
+                        resolved = cache
+                    else:
+                        resolved = await loop.run_in_executor(
+                            None, lambda: reverse_geocode(loc["latitude"], loc["longitude"])
+                        ) or {}
+                        resolved["for"] = rounded
+                        resolved["timestamp"] = time.monotonic()
+                        self._place_cache = resolved
+                    result = format_place(resolved)
+
+            elif name == "find_nearby_places":
+                query = (args.get("query") or "").strip()
+                if not query:
+                    result = "Please specify what to look for nearby."
+                else:
+                    loc = await self._get_current_location()
+                    if not loc:
+                        result = LOCATION_UNAVAILABLE_RESULT
+                    else:
+                        radius_arg = args.get("radius_m")
+                        rounded = (round(loc["latitude"], 3), round(loc["longitude"], 3))
+                        cache_key = (rounded, query.lower(), radius_arg)
+                        cached = self._nearby_cache.get(cache_key)
+                        if cached and (time.monotonic() - cached[0]) < NEARBY_CACHE_TTL_S:
+                            result = cached[1]
+                        else:
+                            places = await loop.run_in_executor(
+                                None,
+                                lambda: find_nearby_places(
+                                    query, loc["latitude"], loc["longitude"], radius_arg
+                                ),
+                            )
+                            result = format_nearby_places(query, places)
+                            if len(self._nearby_cache) >= NEARBY_CACHE_MAX_ENTRIES:
+                                # Small, simple LRU-ish eviction -- no
+                                # library, this is a handful of entries at most.
+                                oldest_key = min(
+                                    self._nearby_cache, key=lambda k: self._nearby_cache[k][0]
+                                )
+                                self._nearby_cache.pop(oldest_key, None)
+                            self._nearby_cache[cache_key] = (time.monotonic(), result)
+
+            elif name == "get_directions":
+                destination = (args.get("destination") or "").strip()
+                mode = args.get("mode", "driving")
+                if not destination:
+                    result = "Please specify a destination."
+                else:
+                    loc = await self._get_current_location()
+                    if not loc:
+                        result = LOCATION_UNAVAILABLE_RESULT
+                    else:
+                        dest_geo = await loop.run_in_executor(None, lambda: geocode_place(destination))
+                        if dest_geo is None:
+                            result = f"I couldn't find a place called '{destination}'."
+                        else:
+                            dlat, dlon, dlabel = dest_geo
+                            try:
+                                route = await loop.run_in_executor(
+                                    None,
+                                    lambda: get_route(loc["latitude"], loc["longitude"], dlat, dlon, mode),
+                                )
+                                result = (
+                                    f"Destination: {dlabel}. Mode: {route['mode']}. "
+                                    f"Distance: {format_distance(route['distance_m'])}. "
+                                    f"Estimated time: {round(route['duration_s'] / 60)} minutes."
+                                )
+                            except Exception as e:
+                                # Honest degradation -- see actions/routing.py's
+                                # docstring: never invent a travel time when
+                                # OSRM couldn't actually compute one.
+                                straight = haversine_m(loc["latitude"], loc["longitude"], dlat, dlon)
+                                result = (
+                                    f"[ROUTING_UNAVAILABLE] Turn-by-turn routing failed ({e}). "
+                                    f"Straight-line distance to {dlabel} is approximately "
+                                    f"{format_distance(straight)}. Tell the user real routing/ETA "
+                                    f"isn't available right now, but you may share this "
+                                    f"approximate straight-line distance if useful. Never state "
+                                    f"a travel time you don't actually have."
+                                )
+
+            elif name == "refresh_location":
+                loc = await self._get_current_location(require_fresh=True)
+                if not loc:
+                    result = (
+                        "[LOCATION_UNAVAILABLE] A fresh location could not be obtained "
+                        "(no response from the device, or permission was never granted "
+                        "or was denied). Tell the user honestly that their location "
+                        "couldn't be refreshed right now."
+                    )
+                else:
+                    result = (
+                        "[LOCATION_REFRESHED] The location has just been refreshed "
+                        "successfully. Do not state any coordinates or technical "
+                        "details -- just briefly and naturally confirm to the user "
+                        "that you've updated their location."
+                    )
 
             elif name == "browser_control":
                 r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
@@ -1871,7 +2319,14 @@ class JarvisLive:
             e = identity.get(k, {})
             return (e.get("value", "") if isinstance(e, dict) else str(e)).strip()
 
-        lang = _val("language")
+        # Reliability audit: the same single resolved-language source
+        # _build_config()'s LANGUAGE directive uses (see
+        # _resolve_effective_language()) — was previously a raw,
+        # independent memory read here, which could silently disagree
+        # with what the system_instruction itself says (e.g. reverting a
+        # just-made explicit runtime switch for a greeting fired later in
+        # the same identity's lifetime, such as a same-user relogin).
+        lang = self._resolve_effective_language()
         name = self._current_user_name() or _val("name")
 
         now      = self._local_now()
@@ -1993,7 +2448,11 @@ class JarvisLive:
         while True:
             await asyncio.sleep(10)
             alert = await asyncio.to_thread(self._sys_monitor.check)
-            if not alert or not self.session:
+            # Reliability audit: same logged-out guard as
+            # _run_background_monitor()/_run_proactive_mode() — a hardware
+            # alert must never get spoken into a session nobody is
+            # actively logged into (web only; see self._logged_out).
+            if not alert or not self.session or self._logged_out:
                 continue
             # Don't interrupt an active conversation
             with self._speaking_lock:
@@ -2014,7 +2473,14 @@ class JarvisLive:
         """Check user-configured topics once per day; speak alerts when new headlines appear."""
         await asyncio.sleep(300)          # wait 5 min after startup before first check
         while True:
-            if self.session:
+            # Reliability audit: a logged-out session (web only — see
+            # self._logged_out's docstring) must not keep "speaking" alerts
+            # at whoever just logged out. The underlying Gemini connection
+            # doesn't tear down on logout alone, only a NEW login's own
+            # identity-switch reconnect does — so this background task
+            # would otherwise keep running against a session nobody is
+            # actively using.
+            if self.session and not self._logged_out:
                 # Don't interrupt if user spoke recently or JARVIS is mid-sentence
                 with self._speaking_lock:
                     speaking = self._is_speaking
@@ -2022,9 +2488,13 @@ class JarvisLive:
                 if not speaking and not recent_speech:
                     try:
                         alerts = await asyncio.to_thread(monitor_check_all)
-                        memory = load_memory()
-                        lang_e = memory.get("identity", {}).get("language", {})
-                        lang   = (lang_e.get("value", "") if isinstance(lang_e, dict) else str(lang_e)).strip() or "Nepali"
+                        # Reliability audit: the same single resolved-
+                        # language source every other language-facing call
+                        # site now uses (see _resolve_effective_language())
+                        # instead of an independent raw memory read that
+                        # could silently disagree with the active
+                        # conversation's own effective language.
+                        lang = self._resolve_effective_language()
                         for alert in alerts:
                             msg = (
                                 f"{alert}\n\n"
@@ -2055,6 +2525,12 @@ class JarvisLive:
             if not self.session:
                 continue
 
+            # Reliability audit: see _run_background_monitor()'s matching
+            # guard — a logged-out web session must not proactively speak
+            # to nobody using a stale identity's context/silence timer.
+            if self._logged_out:
+                continue
+
             with self._speaking_lock:
                 speaking = self._is_speaking
             if speaking:
@@ -2073,6 +2549,17 @@ class JarvisLive:
                     memory       = memory,
                     monitors     = monitors or None,
                     recent_turns = recent_turns or None,
+                    # Reliability audit: pass the SAME device/browser-local
+                    # time _build_config()'s [CURRENT DATE & TIME] block
+                    # uses (see _local_now()) instead of ProactiveEngine
+                    # defaulting to a bare server-clock datetime.now(), and
+                    # the same single resolved effective language every
+                    # other language-facing call site now uses (see
+                    # _resolve_effective_language()) instead of leaving
+                    # Gemini to "check memory" itself with a contradictory
+                    # hardcoded "default English" fallback.
+                    now          = self._local_now(),
+                    language     = self._resolve_effective_language(),
                 )
                 await self.session.send_client_content(
                     turns={"parts": [{"text": prompt}]},
@@ -2218,8 +2705,26 @@ class JarvisLive:
         logout. The NEXT login's _set_user_profile() reloads fresh from
         Postgres regardless, so this is defense in depth, not the only
         thing preventing a leak — same precedent as
-        _reset_activity_history()."""
+        _reset_activity_history().
+
+        Reliability audit: also marks the session as logged-out (see
+        self._logged_out's docstring) so a still-open Gemini connection's
+        background proactive check-ins/monitor alerts stop firing "at" a
+        user who no longer has an active login, until the next real login
+        clears the flag again (_set_user_profile()).
+
+        Location foundation: also clears self._session_location
+        immediately and independently of the memory-cache clear above —
+        location is more privacy-sensitive than a stored preference (see
+        that field's own docstring), so it must not linger even briefly
+        past logout waiting for the next login to overwrite it."""
         clear_active_session()
+        self._logged_out = True
+        self._session_location = None
+        # Location capabilities: both derived from whatever location the
+        # previous session had -- must not linger past logout either.
+        self._place_cache = None
+        self._nearby_cache = {}
 
     def _set_user_profile(self, profile: dict) -> None:
         """The canonical profile setter — the ONE place _user_profile is
@@ -2248,6 +2753,32 @@ class JarvisLive:
         """
         previous_id = (self._user_profile or {}).get("id")
         self._user_profile = profile
+        # Reliability audit: any successful login — first-ever, same-user
+        # relogin, or a genuine account switch — un-gates background
+        # proactive/monitor speech again (see _clear_memory_session()) and
+        # marks this as a new "profile generation" so run()'s connect loop
+        # can detect a login that raced in while a connection was still
+        # being established (see _profile_generation's own docstring).
+        self._logged_out = False
+        self._profile_generation += 1
+        # Location foundation: every new login (even the same account
+        # logging back in) starts with no location until the browser
+        # sends a fresh fix — the frontend re-requests one on every login
+        # anyway (see App.jsx), so there is no benefit to keeping a
+        # previous fix around, only ambiguity risk. Critically, this also
+        # closes the account-switch race the browser can't protect
+        # against on its own: the moment a NEW identity is set here (with
+        # or without an explicit logout in between), any location that
+        # belonged to the previous one is gone before this method
+        # returns — a still-in-flight browser request from the old login
+        # is additionally caught by the owner check in
+        # _set_session_location() itself, in case it resolves after this
+        # point but before that method is called again for the new login.
+        self._session_location = None
+        # Location capabilities: same reasoning -- both are derived from
+        # a specific identity's location and must never carry over.
+        self._place_cache = None
+        self._nearby_cache = {}
         # PostgreSQL memory migration: load THIS user's personal memories +
         # the shared set into RAM right now, at login — not lazily on the
         # first load_memory() call — so _build_config() (which runs right
@@ -2329,6 +2860,165 @@ class JarvisLive:
             return
         self._web_timezone = tz_name
         self.ui.write_log(f"SYS: Web session timezone set to '{tz_name}'.")
+
+    def _set_session_location(
+        self, latitude, longitude, accuracy, requester_owner: str = "",
+        fix_timestamp: float | None = None,
+    ) -> None:
+        """Location foundation: fired by dashboard/server.py's
+        POST /api/location via set_location_callback(), given a one-shot
+        navigator.geolocation fix (see frontend/src/lib/geolocation.js —
+        never a periodic stream, never continuous tracking). Mirrors
+        _set_web_timezone()'s shape: validated again here (the dashboard
+        layer already validates too — never trust a single layer alone),
+        stored purely as in-RAM session state (see self._session_location's
+        own docstring for the full privacy contract — never persisted
+        anywhere), and a bad value just leaves whatever location state
+        already existed untouched rather than corrupting it.
+
+        Async ownership race: a browser's getCurrentPosition() can resolve
+        well after the login that triggered it — long enough for a
+        DIFFERENT identity to have since become active (a genuine account
+        switch, with or without an explicit logout in between; an explicit
+        logout already invalidates the old token entirely, so that case
+        never even reaches this method — see dashboard/server.py's
+        _forget_token()/POST /api/logout). `requester_owner` is the
+        REQUESTING login's own canonical username, resolved server-side
+        from its own auth token (dashboard/server.py's
+        _session_canonical_owner) — never anything the browser's request
+        body itself claims. If it no longer matches the CURRENTLY active
+        identity's own canonical username, the update is dropped rather
+        than silently overwriting the new user's location with the old
+        user's coordinates. An empty requester_owner (a Remote Access/PIN
+        token, which has no associated username at all — see
+        dashboard/server.py's docstring) is always accepted, since there
+        is no separate "identity" for it to leak into.
+
+        Out-of-order refresh race: `fix_timestamp` (the BROWSER's own fix
+        time, epoch ms -- see dashboard/server.py's location_ep()) lets
+        two overlapping refresh attempts (see _get_current_location())
+        that complete out of order not clobber each other -- an incoming
+        update whose OWN fix is OLDER than the fix already stored is
+        dropped, even though it arrived more recently. None (a client
+        that didn't send one) never blocks an update -- it only compares
+        when BOTH sides have a real value.
+        """
+        def _finite(v) -> float | None:
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return None
+            return f if math.isfinite(f) else None
+
+        lat, lon, acc = _finite(latitude), _finite(longitude), _finite(accuracy)
+        fix_ts = _finite(fix_timestamp)
+        if lat is None or not (-90.0 <= lat <= 90.0):
+            self.ui.write_log("SYS: Ignored an invalid browser location update.")
+            return
+        if lon is None or not (-180.0 <= lon <= 180.0):
+            self.ui.write_log("SYS: Ignored an invalid browser location update.")
+            return
+        if acc is None or acc < 0:
+            self.ui.write_log("SYS: Ignored an invalid browser location update.")
+            return
+
+        current_owner = (self._user_profile or {}).get("username", "")
+        if requester_owner and requester_owner != current_owner:
+            self.ui.write_log("SYS: Ignored a stale location update from a previous login.")
+            return
+
+        existing = self._session_location
+        existing_fix_ts = existing.get("fix_timestamp") if existing else None
+        if fix_ts is not None and existing_fix_ts is not None and fix_ts < existing_fix_ts:
+            self.ui.write_log("SYS: Ignored an out-of-order (older) location update.")
+            return
+
+        self._session_location = {
+            "latitude": lat, "longitude": lon, "accuracy": acc,
+            "timestamp": time.monotonic(), "fix_timestamp": fix_ts,
+        }
+        # No raw coordinates in this log line — see the privacy contract
+        # in self._session_location's own docstring.
+        self.ui.write_log("SYS: Browser location received for this session.")
+        # Location capabilities: wake anything awaiting a fresh fix (see
+        # _get_current_location()) -- each waiter is independent and
+        # removes itself once woken, so this never "misses" a waiter that
+        # started watching a moment ago, and never affects a waiter that
+        # hasn't started yet.
+        for _waiter in self._location_refresh_waiters:
+            _waiter.set()
+
+    async def _get_current_location(
+        self, *, require_fresh: bool = False,
+    ) -> dict | None:
+        """Location capabilities: the ONE place any location-aware tool
+        gets the user's current coordinates from -- reads
+        self._session_location fresh at call time (never a value baked
+        into system_instruction at connect time, which would suffer the
+        exact same fixed-at-connect-time problem already fixed for
+        language -- see _resolve_effective_language()'s own docstring for
+        that precedent).
+
+        require_fresh=False (the default, used by weather/nearby-places/
+        directions -- none of which need up-to-the-second precision):
+        an existing fix younger than LOCATION_MAX_AGE_S is returned as-is,
+        no network activity at all. A missing or stale fix triggers a
+        best-effort browser refresh (see below); if that doesn't complete
+        in time, whatever fix already existed (even if stale) is still
+        returned rather than failing the request outright -- being off
+        by "however stale it is" is a far smaller problem for these tools
+        than refusing to answer.
+
+        require_fresh=True (used only by "where am I right now"/explicit
+        refresh_location requests): an existing fix younger than
+        LOCATION_FRESH_ENOUGH_S is already good enough and returned
+        as-is; anything older MUST go through a refresh attempt, and a
+        stale fix is deliberately NOT used as a fallback if that refresh
+        fails -- returns None instead, so the caller reports honestly
+        that current location could not be refreshed, rather than
+        silently answering "where am I now" with an old fix.
+
+        The browser refresh itself: fires a fire-and-forget
+        "location_refresh_request" message over the existing /ws
+        connection (dashboard/server.py's broadcast_location_refresh_
+        request() -- the SAME channel status/log/content messages already
+        use, no new transport), then waits up to
+        LOCATION_REFRESH_TIMEOUT_S for _set_session_location() to store a
+        new valid fix. No dashboard/no browser connected at all just
+        means the refresh can't happen -- handled the same way as a
+        refresh that times out.
+        """
+        loc = self._session_location
+        now = time.monotonic()
+
+        if loc is not None:
+            age = now - loc["timestamp"]
+            if not require_fresh and age < LOCATION_MAX_AGE_S:
+                return loc
+            if require_fresh and age < LOCATION_FRESH_ENOUGH_S:
+                return loc
+
+        if not self._dashboard:
+            return None if require_fresh else loc
+
+        waiter = asyncio.Event()
+        self._location_refresh_waiters.append(waiter)
+        try:
+            try:
+                await self._dashboard.broadcast_location_refresh_request()
+            except Exception as e:
+                print(f"[JARVIS] Location refresh request failed to send: {e}")
+                return None if require_fresh else loc
+            try:
+                await asyncio.wait_for(waiter.wait(), timeout=LOCATION_REFRESH_TIMEOUT_S)
+                return self._session_location
+            except asyncio.TimeoutError:
+                return None if require_fresh else loc
+        finally:
+            try:
+                self._location_refresh_waiters.remove(waiter)
+            except ValueError:
+                pass
 
     def _local_now(self) -> datetime:
         """The single source of truth for "what time is it right now" for
@@ -2429,6 +3119,10 @@ class JarvisLive:
             # dashboard/server.py's logout_ep) — discards the in-RAM
             # memory cache when a username session logs out.
             self._dashboard.set_logout_callback(self._clear_memory_session)
+            # Location foundation: browser navigator.geolocation fix
+            # reaches JarvisLive the same wiring way as timezone/interrupt
+            # already do — see _set_session_location().
+            self._dashboard.set_location_callback(self._set_session_location)
             # Phase 7: reuses the dashboard's existing (previously unwired)
             # wake mechanism — /api/wake, /api/command, and /ws "command"
             # already all call _wake_callback() today. No new route, no new
@@ -2468,6 +3162,11 @@ class JarvisLive:
                 print("[JARVIS] Connecting...")
                 self._push_state("THINKING")
                 config = self._build_config()
+                # Reliability audit — async ownership race: snapshot which
+                # profile this config was actually built from (see
+                # self._profile_generation's docstring). Checked once the
+                # connection actually succeeds, below.
+                _config_generation = self._profile_generation
 
                 # Fresh client on every reconnect — avoids stale HTTP session state
                 # v1alpha carries the enhanced audio features (affective dialog,
@@ -2494,6 +3193,40 @@ class JarvisLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    # Reliability audit: this connection's own baseline —
+                    # a proactive check-in's 15-minute silence gate must be
+                    # measured from THIS conversation actually starting,
+                    # never inherited from however long the PREVIOUS
+                    # identity/connection had already been silent (which
+                    # could let a proactive message fire almost
+                    # immediately after a brand-new login/reconnect, using
+                    # stale timing). Phone-mic activity is also
+                    # connection-local — a previous connection's in-flight
+                    # detection must not carry over.
+                    self._last_user_speech = time.monotonic()
+                    self._phone_active     = False
+
+                    # Reliability audit — async ownership race: a login
+                    # that arrived WHILE this connection was still being
+                    # established (client.aio.live.connect() above is a
+                    # real network round trip, not instantaneous) already
+                    # overwrote self._user_profile/self._session_owner —
+                    # meaning the config/voice/system_instruction this
+                    # connection just made reflect a now-STALE profile
+                    # (built from whoever was active before the race).
+                    # Reusing
+                    # _IdentityChanged (the exact same path a normal
+                    # identity switch takes) discards this connection
+                    # immediately, before any task/greeting starts, and
+                    # reconnects fresh with the CURRENT profile instead of
+                    # silently running an entire session under the wrong
+                    # identity.
+                    if self._profile_generation != _config_generation:
+                        self.ui.write_log(
+                            "SYS: A newer login arrived while connecting — "
+                            "reconnecting with the latest identity."
+                        )
+                        raise _IdentityChanged()
 
                     print("[JARVIS] Connected.")
                     self._push_state("LISTENING")

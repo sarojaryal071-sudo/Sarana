@@ -177,8 +177,14 @@ def test_login_username_works_unchanged_without_timezone_field() -> None:
 # ── natural Nepali-default language + non-Sanskritized greeting ──────────
 
 def test_identity_language_line_sets_natural_nepali_default() -> None:
+    """Nepali is the ultimate fallback only when nothing else (an explicit
+    runtime switch, a persisted memory fact, a profile preference) says
+    otherwise — isolated from whatever memory/long_term.json's own
+    identity.language happens to currently hold (see
+    _resolve_effective_language())."""
     jarvis = JarvisLive(HeadlessSurface())
-    config = jarvis._build_config()
+    with patch("main.load_memory", return_value={}):
+        config = jarvis._build_config()
     instr = config.system_instruction
     assert "LANGUAGE:" in instr
     assert "Nepali" in instr
@@ -189,7 +195,8 @@ def test_identity_language_line_sets_natural_nepali_default() -> None:
 
 def test_identity_language_line_forbids_subha_prabhat() -> None:
     jarvis = JarvisLive(HeadlessSurface())
-    config = jarvis._build_config()
+    with patch("main.load_memory", return_value={}):
+        config = jarvis._build_config()
     assert "Subha Prabhat" in config.system_instruction  # named explicitly as what NOT to do
     print("test_identity_language_line_forbids_subha_prabhat: PASS")
 

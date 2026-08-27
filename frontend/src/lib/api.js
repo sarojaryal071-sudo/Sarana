@@ -123,6 +123,24 @@ export async function sendInterrupt(token) {
   return asJson(resp);
 }
 
+/** POST /api/location — a one-shot browser geolocation fix (see
+ * lib/geolocation.js), sent only after the user has granted permission.
+ * Session-only on the backend, never persisted (see main.py's
+ * _set_session_location()) — this is the ONLY place a coordinate ever
+ * goes; never sent to any third-party API from the browser. Auth required,
+ * same Bearer token as every other authenticated route here. */
+export async function sendLocation(token, { latitude, longitude, accuracy, timestamp }) {
+  const resp = await fetch(`${BACKEND_URL}/api/location`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ latitude, longitude, accuracy, timestamp }),
+  });
+  return asJson(resp);
+}
+
 /** POST /api/logout — removes this token and its session bookkeeping
  * server-side (see dashboard/server.py's _forget_token()). Safe to call
  * with an already-invalid/expired token — always resolves {"ok": true},

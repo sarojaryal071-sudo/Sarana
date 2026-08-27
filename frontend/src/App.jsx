@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAssistantDispatch, useAssistantState } from "./state/AssistantContext";
-import { fetchSession, sendCommand, sendInterrupt, logout, ApiError } from "./lib/api";
+import { fetchSession, sendCommand, sendInterrupt, sendLocation, logout, ApiError } from "./lib/api";
+import { getCurrentLocation } from "./lib/geolocation";
 import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
 import { MicStreamer } from "./lib/mic";
@@ -15,6 +16,23 @@ import ToolsRail from "./components/ToolsRail";
 
 const SESSION_RETRY_MS = 4000;
 
+// Location foundation/refresh: the one place a browser location fix is
+// actually requested-and-sent — used both by the once-per-login effect
+// below and by the backend-initiated "location_refresh_request" /ws
+// message (see main.py's _get_current_location()). A denial/timeout/
+// unsupported-browser/unavailable-position all resolve identically: the
+// backend just never receives an update, and continues honestly
+// reporting location as unavailable — never surfaced as an error here,
+// never retried automatically by this function itself (each call site
+// decides its own retry policy, if any).
+function requestAndSendLocation(token) {
+  return getCurrentLocation()
+    .then((fix) => sendLocation(token, fix))
+    .catch(() => {
+      /* denied / unavailable / timeout / unsupported — nothing to send */
+    });
+}
+
 export default function App() {
   const state = useAssistantState();
   const dispatch = useAssistantDispatch();
@@ -26,6 +44,7 @@ export default function App() {
   const audioRef = useRef(null);
   const micRef = useRef(null);
   const micAutoStartedRef = useRef(false); // item 1: auto-start mic once per login, not per utterance
+  const locationRequestedRef = useRef(false); // location foundation: one browser location attempt per login
 
   // ── GET /api/session — unauthenticated, works before any login ─────────
   const loadSession = useCallback(async () => {
@@ -113,6 +132,16 @@ export default function App() {
             // this yet (see dashboard/server.py). Logged, not acted on.
             console.info("[Sarana] device_action received (not yet actionable):", msg);
             break;
+          case "location_refresh_request":
+            // Backend-initiated refresh (see main.py's
+            // _get_current_location()) — reuses the browser's already-
+            // granted permission silently; a denial/timeout resolves the
+            // same honest way the initial request does (see
+            // requestAndSendLocation()). Not gated by locationRequestedRef
+            // — that ref only limits the automatic once-per-login attempt,
+            // not an explicit backend-requested refresh.
+            requestAndSendLocation(state.token);
+            break;
           default:
             break; // unknown type — never crash, matches backend's own tolerance
         }
@@ -147,6 +176,10 @@ export default function App() {
       micRef.current?.stop();
       micRef.current = null;
       micAutoStartedRef.current = false;
+      // Location foundation: the next login (even the same account
+      // logging back in) gets its own fresh browser location attempt —
+      // mirrors micAutoStartedRef's reset above for the same reason.
+      locationRequestedRef.current = false;
     };
   }, [state.authenticationState, state.token, dispatch]);
 
@@ -169,6 +202,29 @@ export default function App() {
     handleToggleMic();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.authenticationState, state.connectionState]);
+
+  // Location foundation: request the browser's native one-shot location
+  // permission once per authenticated session — never on the login/PIN
+  // screen, never before authentication (gated on authenticationState
+  // itself, which only becomes "authenticated" after a real login or a
+  // restored valid session — see the two effects above). Deliberately
+  // independent of connectionState (unlike the mic effect above): sending
+  // a location fix only needs the auth token, not an open /ws socket, so
+  // there's no reason to make it wait on one.
+  //
+  // A denial/timeout/unsupported-browser/unavailable-position all resolve
+  // the exact same way here: nothing is sent, login continues completely
+  // normally, and — critically — this is never retried automatically
+  // within the same login (guarded by the ref, reset only on the next
+  // fresh login/logout above), so the browser's permission prompt is
+  // never spammed.
+  useEffect(() => {
+    if (state.authenticationState !== "authenticated" || !state.token) return;
+    if (locationRequestedRef.current) return;
+    locationRequestedRef.current = true;
+
+    requestAndSendLocation(state.token);
+  }, [state.authenticationState, state.token]);
 
   function handleAuthenticated(session) {
     // Item 8: activity log = current session's UI history, not persistent

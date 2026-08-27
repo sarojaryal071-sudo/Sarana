@@ -127,11 +127,26 @@ called it (browser closed/crashed). Neither touches _device_sessions (persistent
 outlive a session) or has any effect on an already-open /ws,
 /ws/audio-out, or /ws/phone-audio connection, which are torn down
 client-side as before.
+
+── Location foundation addition ────────────────────────────────────────────
+
+POST /api/location accepts a one-shot browser navigator.geolocation fix
+(latitude/longitude/accuracy only — never a periodic stream, never
+continuous tracking) from an already-authenticated session, validated
+server-side, and forwards it to main.py's _set_session_location() along
+with the REQUESTING token's own canonical username (see
+_session_canonical_owner — populated at /login/username, cleaned up in
+_forget_token() alongside every other per-token dict). This lets
+JarvisLive detect and drop a delayed fix from a login that is no longer
+the active identity, without the browser ever being trusted to say who it
+is. Location itself is never stored here — this file only ever forwards
+it; see main.py for the actual (session-only, never-persisted) storage.
 """
 
 import asyncio
 import base64
 import hashlib
+import math
 import os
 import re
 import secrets
@@ -603,7 +618,18 @@ class DashboardServer:
         self._timezone_callback           = None   # fires on a successful /login/username with a timezone
         self._profile_callback            = None   # fires with the full users/user_db.py profile dict
         self._logout_callback             = None   # fires on /api/logout of a username session (memory cache reset)
+        self._location_callback           = None   # fires on a successful POST /api/location
         self._session_timezones: dict[str, str] = {}   # token → IANA timezone (username logins only)
+        # Location foundation: the token's own canonical username (e.g.
+        # "sana", NOT the display name "Saanaa" already tracked in
+        # _session_usernames below — a different, existing dict used for a
+        # different purpose). Populated at /login/username, passed through
+        # to the location callback so main.py's _set_session_location()
+        # can tell whether a location update still belongs to whichever
+        # identity is CURRENTLY active — see that method's own docstring
+        # for the exact race this guards against. "" for a Remote Access
+        # (PIN) token, which has no associated username at all.
+        self._session_canonical_owner: dict[str, str] = {}
         # Phase 8: lightweight session bookkeeping — which auth path issued a
         # token, and (for username logins only) which name. Not a user
         # database, no registration, nothing persisted past process
@@ -724,6 +750,22 @@ class DashboardServer:
         never lingers past logout."""
         self._logout_callback = fn
 
+    def set_location_callback(self, fn) -> None:
+        """fn(latitude: float, longitude: float, accuracy: float, owner: str,
+        fix_timestamp: float | None) is called on a successful POST
+        /api/location — the browser's one-shot navigator.geolocation fix
+        (see frontend/src/lib/geolocation.js), never a periodic stream.
+        `owner` is the REQUESTING token's own canonical username (see
+        self._session_canonical_owner — "" for a Remote Access/PIN
+        token), resolved here server-side from the token alone, never
+        from anything the request body itself claims — main.py wires
+        this to _set_session_location(), which uses `owner` to detect
+        and drop a delayed update from a login that is no longer the
+        active identity. `fix_timestamp` is the browser's own fix time
+        (epoch ms, None if the client didn't send one) — see
+        location_ep()'s own docstring for why."""
+        self._location_callback = fn
+
     # ── token/session cleanup ────────────────────────────────────────────
 
     def _forget_token(self, tok: str) -> None:
@@ -745,6 +787,7 @@ class DashboardServer:
         self._session_auth_mode.pop(tok, None)
         self._session_usernames.pop(tok, None)
         self._session_timezones.pop(tok, None)
+        self._session_canonical_owner.pop(tok, None)
 
     def _purge_stale_tokens(self) -> None:
         now = time.time()
@@ -802,6 +845,17 @@ class DashboardServer:
         message shape the frontend already understands (see
         AssistantContext.jsx's STATUS_MESSAGE case)."""
         await self._send_to_clients({"type": "status", "state": state})
+
+    async def broadcast_location_refresh_request(self) -> None:
+        """Location capabilities: server -> client signal asking the
+        browser to take a fresh navigator.geolocation fix right now (see
+        main.py's _get_current_location()) -- reuses the EXISTING /ws
+        connection status/log/content messages already travel over, no
+        new transport. Same reasoning as broadcast_state() for staying
+        out of self._history: this is a live, one-off request, not
+        conversation content worth replaying to a client that connects
+        later."""
+        await self._send_to_clients({"type": "location_refresh_request"})
 
     async def broadcast_content(self, title: str, text: str) -> None:
         """Server→client "content" message — mirrors JarvisUI.show_content's
@@ -985,6 +1039,11 @@ class DashboardServer:
             self._token_created_at[tok] = time.time()
             self._session_auth_mode[tok] = "username"
             self._session_usernames[tok] = display_name
+            # Location foundation: the CANONICAL username (profile["username"],
+            # e.g. "sana" — never the display name above), used only to
+            # detect a stale location update from a superseded login — see
+            # set_location_callback()'s docstring.
+            self._session_canonical_owner[tok] = profile["username"]
             if timezone:
                 self._session_timezones[tok] = timezone
 
@@ -1149,6 +1208,69 @@ class DashboardServer:
                 return JSONResponse({"error": "Unauthorized"}, status_code=401)
             if self._interrupt_callback:
                 self._interrupt_callback()
+            return JSONResponse({"ok": True})
+
+        @app.post("/api/location")
+        async def location_ep(req: Request):
+            """Browser-location foundation: a one-shot navigator.geolocation
+            fix (see frontend/src/lib/geolocation.js), sent only after the
+            user has already granted permission — never a periodic stream,
+            never continuous tracking. Protected by the exact same
+            Bearer-token auth as /api/interrupt; no second authentication
+            mechanism.
+
+            Only latitude/longitude/accuracy/timestamp are ever read from
+            the body — any other field (e.g. a claimed "username") is
+            silently ignored. WHO this update belongs to is determined
+            entirely by the authenticated token itself (see
+            self._session_canonical_owner), never by anything the browser
+            claims — this is what lets main.py's _set_session_location()
+            detect and drop a delayed update from a login that is no
+            longer the active identity (a genuine account switch, with or
+            without an explicit logout in between).
+
+            `timestamp` (optional): the BROWSER's own fix time
+            (GeolocationPosition.timestamp, epoch milliseconds — see
+            frontend/src/lib/geolocation.js), not when this request
+            happened to arrive at the server. Forwarded through so
+            _set_session_location() can tell two fixes apart by when they
+            were actually taken, protecting against a slower-arriving-but-
+            older refresh response clobbering a faster-arriving-but-newer
+            one (two overlapping refresh attempts can legitimately
+            complete out of order). Missing/malformed values are passed
+            through as None — main.py treats that as "no ordering
+            information available" and falls back to just accepting the
+            update, never a hard failure."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid request body"}, status_code=400)
+
+            def _finite(v):
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    return None
+                return f if math.isfinite(f) else None
+
+            latitude  = _finite(body.get("latitude"))
+            longitude = _finite(body.get("longitude"))
+            accuracy  = _finite(body.get("accuracy"))
+            fix_timestamp = _finite(body.get("timestamp"))   # optional — None if absent/malformed
+
+            if latitude is None or not (-90.0 <= latitude <= 90.0):
+                return JSONResponse({"error": "Invalid latitude"}, status_code=400)
+            if longitude is None or not (-180.0 <= longitude <= 180.0):
+                return JSONResponse({"error": "Invalid longitude"}, status_code=400)
+            if accuracy is None or accuracy < 0:
+                return JSONResponse({"error": "Invalid accuracy"}, status_code=400)
+
+            tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            owner = self._session_canonical_owner.get(tok, "")
+            if self._location_callback:
+                self._location_callback(latitude, longitude, accuracy, owner, fix_timestamp)
             return JSONResponse({"ok": True})
 
         @app.post("/api/logout")

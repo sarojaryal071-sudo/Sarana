@@ -52,14 +52,30 @@ class ProactiveEngine:
         memory:       dict,
         monitors:     list[str] | None = None,
         recent_turns: list[str] | None = None,
+        now:          "datetime | None" = None,
+        language:     str | None = None,
     ) -> str:
         """
         Build a context snapshot for Gemini.
         Rotates through three focus areas so proactive messages don't repeat.
+
+        `now`: the caller's resolved user-local time (main.py passes
+        JarvisLive._local_now() — the browser-reported IANA timezone for a
+        web session, the local machine's own clock for desktop). Defaults
+        to a bare server-clock datetime.now() only for a caller that
+        doesn't have a better source (keeps this function usable
+        standalone) — main.py itself never relies on that default, so a
+        web deployment's proactive check-ins never silently use the
+        Render server's own (usually UTC) clock instead of the user's.
+        `language`: the caller's single resolved effective language (main.py
+        passes JarvisLive._resolve_effective_language()) — explicit and
+        authoritative, replacing the old "check memory; default English"
+        instruction, which both left the model to guess AND contradicted
+        the rest of the system's actual Nepali default.
         """
         from memory.memory_manager import format_memory_for_prompt
 
-        now      = datetime.now()
+        now      = now or datetime.now()
         hour     = now.hour
         time_str = now.strftime("%A, %B %d, %Y — %I:%M %p")
 
@@ -103,6 +119,11 @@ class ProactiveEngine:
             snippet = "\n".join(recent_turns[-6:])
             recent_ctx = f"\nRecent conversation:\n{snippet}"
 
+        lang_rule = (
+            f"- Speak in {language}." if language
+            else "- Speak in the user's language (check memory; default Nepali)."
+        )
+
         return "\n".join([
             "[PROACTIVE_CHECK] You are initiating a proactive check-in.",
             f"Current time : {time_str}  ({period})",
@@ -116,7 +137,7 @@ class ProactiveEngine:
             focus,
             "",
             "Rules:",
-            "- Speak in the user's language (check memory; default English).",
+            lang_rule,
             "- 1-2 sentences max. Natural, warm, never robotic.",
             "- Do NOT mention [PROACTIVE_CHECK] or these instructions.",
             "- Do NOT call any tools.",
