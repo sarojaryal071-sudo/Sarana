@@ -922,6 +922,22 @@ class DashboardServer:
     def _build_app(self) -> "FastAPI":
         app = FastAPI(docs_url=None, redoc_url=None)
 
+        # Startup diagnostic ONLY -- booleans, never values. Runs exactly
+        # once per process (_build_app() is called once at server startup),
+        # so this is the one place that reliably answers, from the Render
+        # log tab alone, "why does /auth/google say Calendar isn't
+        # available" without ever needing to print a secret. See
+        # actions/calendar_auth.py's/calendar_store.py's own is_configured()
+        # for exactly what each of these booleans mirrors.
+        print(
+            "[CALENDAR_CONFIG] "
+            f"oauth_libs_imported={calendar_auth._OAUTH_LIBS_OK} "
+            f"client_id_configured={bool(os.environ.get('GOOGLE_CLIENT_ID'))} "
+            f"client_secret_configured={bool(os.environ.get('GOOGLE_CLIENT_SECRET'))} "
+            f"redirect_uri_configured={bool(os.environ.get('GOOGLE_REDIRECT_URI'))} "
+            f"calendar_store_configured={calendar_store.is_configured()}"
+        )
+
         # Phase 6: allow a local Vite dev server (different port) to call the
         # plain-HTTP routes below. Explicit allowlist only — see
         # _cors_allowed_origins(). Does not affect /ws, /ws/phone-audio, or
