@@ -29,3 +29,6 @@ pywinauto; sys_platform == "win32"
 pywin32; sys_platform == "win32"
 qrcode[pil]
 psycopg[binary]>=3.1,<4
+google-auth
+google-auth-oauthlib>=1.0,<2
+google-api-python-client

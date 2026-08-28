@@ -157,11 +157,12 @@ from pathlib import Path
 
 from users import user_db
 from core.latency_stats import LatencyStats
+from actions import calendar_store, calendar_auth
 
 _DEPS_OK = False
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
     from fastapi.middleware.cors import CORSMiddleware
     import uvicorn
     _DEPS_OK = True
@@ -591,6 +592,17 @@ def _cors_allowed_origins() -> list[str]:
     return deduped
 
 
+def _default_frontend_origin() -> str:
+    """Fallback redirect target for the Google OAuth callback (see
+    /auth/google/callback) when the browser didn't supply a valid
+    `return_to` — the confirmed production frontend, same constant
+    already relied on elsewhere in this file (see _DEFAULT_DEV_ORIGINS)."""
+    for origin in _cors_allowed_origins():
+        if "localhost" not in origin and "127.0.0.1" not in origin:
+            return origin
+    return _DEFAULT_DEV_ORIGINS[-1]
+
+
 # ── DashboardServer ───────────────────────────────────────────────────────────
 
 class DashboardServer:
@@ -630,6 +642,16 @@ class DashboardServer:
         # for the exact race this guards against. "" for a Remote Access
         # (PIN) token, which has no associated username at all.
         self._session_canonical_owner: dict[str, str] = {}
+        # Google Calendar OAuth: short-lived, single-use CSRF/identity-
+        # binding state tokens for the /auth/google -> Google consent ->
+        # /auth/google/callback round trip (see those routes' own
+        # docstrings). state -> {"owner": canonical username, "return_to":
+        # validated frontend origin, "expires": unix time}. Consumed
+        # (popped) on first use at the callback — a delayed/replayed
+        # callback with an already-used or expired state is rejected
+        # outright, which is what stops a stale callback from ever
+        # attaching credentials to the wrong identity.
+        self._google_oauth_states: dict[str, dict] = {}
         # Phase 8: lightweight session bookkeeping — which auth path issued a
         # token, and (for username logins only) which name. Not a user
         # database, no registration, nothing persisted past process
@@ -797,6 +819,17 @@ class DashboardServer:
         ]
         for tok in stale:
             self._forget_token(tok)
+
+    def _purge_stale_oauth_states(self) -> None:
+        """Same passive-safety-net idea as _purge_stale_tokens(), for
+        Google OAuth states a user started but never completed (closed
+        the consent screen, network died mid-flow, etc.) — called
+        opportunistically whenever a new state is created (see
+        /auth/google) rather than needing its own background task."""
+        now = time.time()
+        stale = [s for s, v in self._google_oauth_states.items() if v["expires"] < now]
+        for s in stale:
+            self._google_oauth_states.pop(s, None)
 
     def _reset_activity_history(self) -> None:
         """Clears self._history — the Activity Log's data (see broadcast()
@@ -1271,6 +1304,165 @@ class DashboardServer:
             owner = self._session_canonical_owner.get(tok, "")
             if self._location_callback:
                 self._location_callback(latitude, longitude, accuracy, owner, fix_timestamp)
+            return JSONResponse({"ok": True})
+
+        # ── Google Calendar OAuth ────────────────────────────────────────
+
+        @app.get("/auth/google")
+        async def google_auth_start(token: str = "", return_to: str = ""):
+            """Step 1 of the Calendar connect flow. A full-page browser
+            navigation (window.location.href = ...), not a fetch — so the
+            SARANA auth token travels as a query param rather than an
+            Authorization header, the same reason /auto-login's key does.
+            Resolves the CURRENT identity from that token via
+            self._session_canonical_owner — the exact mechanism
+            /api/location already uses to bind a request to an identity —
+            never anything else. A PIN/Remote Access token (no canonical
+            username) is rejected: Google Calendar connects to a specific
+            SARANA ACCOUNT, not an anonymous remote session.
+
+            `return_to` (optional): the frontend's own origin, so the
+            final callback redirect lands back on whichever origin the
+            user actually started from (local dev vs. production) —
+            validated against the EXISTING CORS allowlist
+            (_cors_allowed_origins()) rather than trusted outright, so
+            this can never become an open redirect.
+            """
+            tok = token.strip()
+            if not tok or tok not in self._tokens:
+                return HTMLResponse(
+                    "<h2>Not signed in</h2><p>Please sign in to SARANA first, "
+                    "then try connecting Google Calendar again.</p>",
+                    status_code=401,
+                )
+            owner = self._session_canonical_owner.get(tok, "")
+            if not owner:
+                return HTMLResponse(
+                    "<h2>Google Calendar needs a SARANA account login</h2>"
+                    "<p>Remote Access sessions can't connect Google Calendar.</p>",
+                    status_code=400,
+                )
+            if not calendar_auth.is_configured() or not calendar_store.is_configured():
+                return HTMLResponse(
+                    "<h2>Google Calendar isn't available on this server right now.</h2>",
+                    status_code=503,
+                )
+
+            safe_return_to = _normalize_origin(return_to) if return_to else ""
+            if safe_return_to not in _cors_allowed_origins():
+                safe_return_to = ""   # unrecognized origin — ignored, falls back at the callback
+
+            self._purge_stale_oauth_states()
+            state = secrets.token_urlsafe(32)
+            self._google_oauth_states[state] = {
+                "owner": owner,
+                "return_to": safe_return_to,
+                "expires": time.time() + 600,   # 10 minutes — a real consent flow, not a long-lived token
+            }
+
+            auth_url = calendar_auth.build_auth_url(state)
+            return RedirectResponse(auth_url)
+
+        @app.get("/auth/google/callback")
+        async def google_auth_callback(code: str = "", state: str = "", error: str = ""):
+            """Step 2 — Google redirects the browser here after consent.
+            `state` is looked up and immediately POPPED (single-use) from
+            self._google_oauth_states: a missing, unrecognized, expired,
+            or ALREADY-CONSUMED state is rejected outright. This is the
+            concrete mechanism that stops a stale/replayed callback from
+            ever attaching credentials to whichever identity happens to
+            be active by the time it arrives — not a convention, an
+            actual enforced check.
+            """
+            entry = self._google_oauth_states.pop(state, None) if state else None
+            frontend = (entry or {}).get("return_to") or _default_frontend_origin()
+
+            if error:
+                # User declined consent, or Google reported some other
+                # problem — never treated as success.
+                return RedirectResponse(f"{frontend}/?calendar=cancelled")
+
+            if not entry or entry["expires"] < time.time():
+                return HTMLResponse(
+                    "<h2>This Google Calendar connection link has expired or "
+                    "was already used.</h2><p>Please try connecting again from "
+                    "SARANA.</p>",
+                    status_code=400,
+                )
+
+            if not code:
+                return RedirectResponse(f"{frontend}/?calendar=error")
+
+            owner = entry["owner"]
+            loop = asyncio.get_event_loop()
+
+            def _do_exchange_and_store():
+                credentials = calendar_auth.exchange_code(code)
+                email = calendar_auth.fetch_email(credentials)
+                calendar_store.init_schema()
+                calendar_store.save_credentials(owner, credentials.to_json(), email)
+
+            try:
+                await loop.run_in_executor(None, _do_exchange_and_store)
+            except Exception as e:
+                # Never logs the code or any token — see calendar_auth.py's
+                # own docstring for that guarantee.
+                print(f"[Calendar] OAuth exchange failed for '{owner}': {e}")
+                return RedirectResponse(f"{frontend}/?calendar=error")
+
+            return RedirectResponse(f"{frontend}/?calendar=connected")
+
+        @app.get("/api/calendar/status")
+        async def calendar_status_ep(req: Request):
+            """Safe status only — {"connected": bool, "email": str}, never
+            a token. See actions/calendar_store.py's get_status()."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            owner = self._session_canonical_owner.get(tok, "")
+            if not owner or not calendar_store.is_configured():
+                return JSONResponse({"connected": False, "email": ""})
+            try:
+                status = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: calendar_store.get_status(owner)
+                )
+            except Exception as e:
+                print(f"[Calendar] Status lookup failed: {e}")
+                status = {"connected": False, "email": ""}
+            return JSONResponse(status)
+
+        @app.post("/api/calendar/disconnect")
+        async def calendar_disconnect_ep(req: Request):
+            """Removes SARANA's stored credentials for the CURRENT
+            identity only (never trusts a request body/param for which
+            account to disconnect — same "authenticated identity, never
+            an arbitrary parameter" rule as everywhere else in this
+            file). Best-effort revokes Google's own authorization too;
+            that failing must never block the local disconnect from
+            succeeding (mirrors the frontend's own logout handler, which
+            still clears local state even if the backend call fails)."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            owner = self._session_canonical_owner.get(tok, "")
+            if owner and calendar_store.is_configured():
+                loop = asyncio.get_event_loop()
+
+                def _do_disconnect():
+                    row = calendar_store.load_credentials(owner)
+                    if row:
+                        creds_json, _email = row
+                        try:
+                            credentials = calendar_auth.credentials_from_json(creds_json)
+                            calendar_auth.revoke(credentials)
+                        except Exception as e:
+                            print(f"[Calendar] Revoke failed (local disconnect still proceeds): {e}")
+                    calendar_store.delete_credentials(owner)
+
+                try:
+                    await loop.run_in_executor(None, _do_disconnect)
+                except Exception as e:
+                    print(f"[Calendar] Disconnect storage error: {e}")
             return JSONResponse({"ok": True})
 
         @app.post("/api/logout")

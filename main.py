@@ -85,6 +85,8 @@ from actions.geo               import (
     find_nearby_places, format_nearby_places, haversine_m, format_distance,
 )
 from actions.routing           import get_route
+from actions import calendar as calendar_actions
+from actions import calendar_store, calendar_auth
 from actions.send_message      import send_message
 from actions.reminder          import reminder
 from actions.computer_settings import computer_settings
@@ -340,6 +342,135 @@ TOOL_DECLARATIONS = [
             "current location automatically without needing this."
         ),
         "parameters": {"type": "OBJECT", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_calendar_events",
+        "description": (
+            "Reads the user's REAL Google Calendar events for a given time range. Use "
+            "for 'what's on my calendar', 'what do I have today/tomorrow', 'do I have "
+            "anything at X', 'what's my next appointment', 'what does my week look "
+            "like'. Requires the user to have connected Google Calendar first -- if "
+            "not connected, this returns [CALENDAR_NOT_CONNECTED]."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "start": {
+                    "type": "STRING",
+                    "description": (
+                        "Start of the range, local date/time, ISO format e.g. "
+                        "'2026-08-29T00:00:00' -- compute this from [CURRENT DATE & "
+                        "TIME] above, never guess today's date."
+                    ),
+                },
+                "end": {
+                    "type": "STRING",
+                    "description": "End of the range, local ISO datetime, same format as start.",
+                },
+            },
+            "required": ["start", "end"],
+        },
+    },
+    {
+        "name": "find_free_time",
+        "description": (
+            "Finds real free time slots on the user's Google Calendar within a given "
+            "window, for a given duration. Use for 'find me free time', 'when am I "
+            "free tomorrow', 'find an hour free this afternoon'."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "start": {"type": "STRING", "description": "Start of the search window, local ISO datetime."},
+                "end": {"type": "STRING", "description": "End of the search window, local ISO datetime."},
+                "duration_minutes": {
+                    "type": "INTEGER",
+                    "description": "Desired free-slot length in minutes (default 30).",
+                },
+            },
+            "required": ["start", "end"],
+        },
+    },
+    {
+        "name": "create_calendar_event",
+        "description": (
+            "Creates a REAL event on the user's Google Calendar. Use for 'schedule "
+            "X', 'add X to my calendar', 'book a meeting'. If the time is missing or "
+            "genuinely ambiguous, ask the user instead of inventing one -- do not "
+            "call this tool with a guessed time."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "title": {"type": "STRING", "description": "Event title"},
+                "start": {"type": "STRING", "description": "Start time, local ISO datetime, e.g. '2026-08-30T15:00:00'."},
+                "end": {
+                    "type": "STRING",
+                    "description": "End time, local ISO datetime. Omit if duration_minutes is given instead.",
+                },
+                "duration_minutes": {
+                    "type": "INTEGER",
+                    "description": "Duration in minutes, used only if 'end' is omitted (default 60).",
+                },
+                "description": {"type": "STRING", "description": "Optional event notes/description."},
+                "location": {"type": "STRING", "description": "Optional event location."},
+                "attendees": {
+                    "type": "ARRAY", "items": {"type": "STRING"},
+                    "description": "Optional attendee email addresses.",
+                },
+            },
+            "required": ["title", "start"],
+        },
+    },
+    {
+        "name": "update_calendar_event",
+        "description": (
+            "Modifies an existing REAL Google Calendar event (e.g. moving a meeting "
+            "to a new time). Use event_id if already known from a recent "
+            "get_calendar_events call; otherwise supply query (a word from the event "
+            "title) and day so the right event can be found. If more than one event "
+            "matches, this returns the candidates instead of changing anything -- ask "
+            "the user which one they mean, then call this again with a specific "
+            "event_id."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "event_id": {"type": "STRING", "description": "Google Calendar event ID, if already known."},
+                "query": {"type": "STRING", "description": "Word(s) from the event's title, if event_id is not known."},
+                "day": {
+                    "type": "STRING",
+                    "description": "Local ISO date the event is on, e.g. '2026-08-29' -- used with query.",
+                },
+                "new_title": {"type": "STRING", "description": "New title, if changing it."},
+                "new_start": {"type": "STRING", "description": "New start time, local ISO datetime."},
+                "new_end": {"type": "STRING", "description": "New end time, local ISO datetime."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "delete_calendar_event",
+        "description": (
+            "Deletes/cancels a REAL Google Calendar event. Use event_id if already "
+            "known; otherwise supply query and day so the right event can be found. "
+            "If more than one event matches, this returns the candidates instead of "
+            "deleting anything -- ask the user which one they mean before calling "
+            "this again with a specific event_id. Never call this on an ambiguous or "
+            "uncertain match."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "event_id": {"type": "STRING", "description": "Google Calendar event ID, if already known."},
+                "query": {"type": "STRING", "description": "Word(s) from the event's title, if event_id is not known."},
+                "day": {
+                    "type": "STRING",
+                    "description": "Local ISO date the event is on, e.g. '2026-08-29' -- used with query.",
+                },
+            },
+            "required": [],
+        },
     },
     {
         "name": "send_message",
@@ -836,6 +967,20 @@ LOCATION_REFRESH_TIMEOUT_S = 5.0
 # query asked twice in a row, without pretending to be a general cache.
 NEARBY_CACHE_TTL_S = 5 * 60
 NEARBY_CACHE_MAX_ENTRIES = 20
+
+# ── Google Calendar ──────────────────────────────────────────────────
+# Same "not desktop-only, honestly degrades" reasoning as location's own
+# tools (see the location constants above) -- these work on either
+# surface; a connection is per-SARANA-ACCOUNT (see actions/calendar_
+# store.py's owner-keyed schema), never per-surface, so desktop and web
+# both just honestly report [CALENDAR_NOT_CONNECTED] until that specific
+# account has actually connected Google Calendar.
+CALENDAR_NOT_CONNECTED_RESULT = (
+    "[CALENDAR_NOT_CONNECTED] The user has not connected Google Calendar to "
+    "this SARANA account yet. Tell them honestly and briefly, in your own "
+    "natural words, that Google Calendar isn't connected -- they can connect "
+    "it from Settings in the app. Never pretend a calendar action happened."
+)
 
 
 class JarvisLive:
@@ -1769,6 +1914,182 @@ class JarvisLive:
                         "that you've updated their location."
                     )
 
+            elif name == "get_calendar_events":
+                credentials = await self._get_calendar_credentials()
+                if not credentials:
+                    result = CALENDAR_NOT_CONNECTED_RESULT
+                else:
+                    tzinfo = self._calendar_tzinfo()
+                    try:
+                        time_min = calendar_actions.parse_local_datetime(args.get("start", ""), tzinfo)
+                        time_max = calendar_actions.parse_local_datetime(args.get("end", ""), tzinfo)
+                    except (ValueError, TypeError):
+                        result = "Please specify a valid start and end time."
+                    else:
+                        events = await loop.run_in_executor(
+                            None,
+                            lambda: calendar_actions.get_events(credentials, time_min=time_min, time_max=time_max),
+                        )
+                        result = calendar_actions.format_events(events)
+
+            elif name == "find_free_time":
+                credentials = await self._get_calendar_credentials()
+                if not credentials:
+                    result = CALENDAR_NOT_CONNECTED_RESULT
+                else:
+                    tzinfo = self._calendar_tzinfo()
+                    try:
+                        window_start = calendar_actions.parse_local_datetime(args.get("start", ""), tzinfo)
+                        window_end = calendar_actions.parse_local_datetime(args.get("end", ""), tzinfo)
+                    except (ValueError, TypeError):
+                        result = "Please specify a valid start and end time for the search window."
+                    else:
+                        duration = args.get("duration_minutes") or calendar_actions.DEFAULT_FREE_SLOT_MINUTES
+                        slots = await loop.run_in_executor(
+                            None,
+                            lambda: calendar_actions.find_free_slots(
+                                credentials, tzinfo, window_start=window_start, window_end=window_end,
+                                duration_minutes=duration,
+                            ),
+                        )
+                        result = calendar_actions.format_free_slots(slots, duration)
+
+            elif name == "create_calendar_event":
+                credentials = await self._get_calendar_credentials()
+                if not credentials:
+                    result = CALENDAR_NOT_CONNECTED_RESULT
+                else:
+                    title = (args.get("title") or "").strip()
+                    start = args.get("start", "")
+                    if not title or not start:
+                        result = "Please specify at least a title and a start time for the event."
+                    else:
+                        tzinfo = self._calendar_tzinfo()
+                        try:
+                            created = await loop.run_in_executor(
+                                None,
+                                lambda: calendar_actions.create_event(
+                                    credentials, tzinfo, title=title, start=start,
+                                    end=args.get("end") or None,
+                                    duration_minutes=args.get("duration_minutes"),
+                                    description=args.get("description", ""),
+                                    location=args.get("location", ""),
+                                    attendees=args.get("attendees") or None,
+                                ),
+                            )
+                        except ValueError:
+                            result = "Please specify a valid start (and end, if given) time for the event."
+                        else:
+                            result = (
+                                f"Event created: [{created['id']}] {created['title']} "
+                                f"from {created['start']} to {created['end']}."
+                            )
+
+            elif name == "update_calendar_event":
+                credentials = await self._get_calendar_credentials()
+                if not credentials:
+                    result = CALENDAR_NOT_CONNECTED_RESULT
+                else:
+                    tzinfo = self._calendar_tzinfo()
+                    event_id = (args.get("event_id") or "").strip()
+                    resolved_ok = True
+                    if not event_id:
+                        query = (args.get("query") or "").strip()
+                        day_str = args.get("day", "")
+                        if not query or not day_str:
+                            result = "Please specify which event to change (event_id, or a query and day)."
+                            resolved_ok = False
+                        else:
+                            try:
+                                day_dt = calendar_actions.parse_local_datetime(day_str, tzinfo)
+                            except (ValueError, TypeError):
+                                result = "Please specify a valid date for the event to change."
+                                resolved_ok = False
+                            else:
+                                matches = await loop.run_in_executor(
+                                    None,
+                                    lambda: calendar_actions.find_events_matching(
+                                        credentials, tzinfo, query=query, day=day_dt
+                                    ),
+                                )
+                                if not matches:
+                                    result = f"No event matching '{query}' was found on that day."
+                                    resolved_ok = False
+                                elif len(matches) > 1:
+                                    result = (
+                                        "[CALENDAR_AMBIGUOUS] More than one matching event was found -- "
+                                        "ask the user which one they mean; do not guess or change any of "
+                                        "them yet:\n" + calendar_actions.format_events(matches)
+                                    )
+                                    resolved_ok = False
+                                else:
+                                    event_id = matches[0]["id"]
+
+                    if resolved_ok:
+                        try:
+                            updated = await loop.run_in_executor(
+                                None,
+                                lambda: calendar_actions.update_event(
+                                    credentials, tzinfo, event_id=event_id,
+                                    title=args.get("new_title"),
+                                    start=args.get("new_start"),
+                                    end=args.get("new_end"),
+                                ),
+                            )
+                        except ValueError:
+                            result = "Please specify a valid new start/end time for the event."
+                        else:
+                            result = (
+                                f"Event updated: [{updated['id']}] {updated['title']} "
+                                f"now {updated['start']} to {updated['end']}."
+                            )
+
+            elif name == "delete_calendar_event":
+                credentials = await self._get_calendar_credentials()
+                if not credentials:
+                    result = CALENDAR_NOT_CONNECTED_RESULT
+                else:
+                    tzinfo = self._calendar_tzinfo()
+                    event_id = (args.get("event_id") or "").strip()
+                    resolved_ok = True
+                    if not event_id:
+                        query = (args.get("query") or "").strip()
+                        day_str = args.get("day", "")
+                        if not query or not day_str:
+                            result = "Please specify which event to cancel (event_id, or a query and day)."
+                            resolved_ok = False
+                        else:
+                            try:
+                                day_dt = calendar_actions.parse_local_datetime(day_str, tzinfo)
+                            except (ValueError, TypeError):
+                                result = "Please specify a valid date for the event to cancel."
+                                resolved_ok = False
+                            else:
+                                matches = await loop.run_in_executor(
+                                    None,
+                                    lambda: calendar_actions.find_events_matching(
+                                        credentials, tzinfo, query=query, day=day_dt
+                                    ),
+                                )
+                                if not matches:
+                                    result = f"No event matching '{query}' was found on that day."
+                                    resolved_ok = False
+                                elif len(matches) > 1:
+                                    result = (
+                                        "[CALENDAR_AMBIGUOUS] More than one matching event was found -- "
+                                        "ask the user which one they mean; do not guess or delete any of "
+                                        "them yet:\n" + calendar_actions.format_events(matches)
+                                    )
+                                    resolved_ok = False
+                                else:
+                                    event_id = matches[0]["id"]
+
+                    if resolved_ok:
+                        await loop.run_in_executor(
+                            None, lambda: calendar_actions.delete_event(credentials, event_id)
+                        )
+                        result = "Event cancelled."
+
             elif name == "browser_control":
                 r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
                 result = r or "Done."
@@ -2326,6 +2647,15 @@ class JarvisLive:
         genuinely fresh connection is required for the voice to change —
         already-known, already-documented scope from when voice_preference
         was first wired in.
+
+        Privacy boundary: this greeting fires completely unsolicited and
+        may be heard by anyone in the room, not just the logged-in user —
+        it must NEVER reference, summarize, or hint at previous-session
+        content (see the pop_last_session() call below for the specific
+        fix and why). It receives only safe, non-content context: current
+        time/date, time-of-day category, effective language, and the
+        user's own display name — never long-term memory facts or a
+        prior session's summary as material to build the greeting from.
         """
         memory   = load_memory()
         identity = memory.get("identity", {})
@@ -2375,24 +2705,37 @@ class JarvisLive:
                 f"not mix the two or refer back to the previous one."
             )
 
-        # Inject last session context if available — pop removes it so it's never repeated.
+        # Privacy fix: the startup greeting fires completely unsolicited —
+        # possibly with other people in the room — so it must NEVER
+        # proactively reveal what was discussed last time. A stored
+        # session summary (see _save_session_summary()) can contain
+        # anything the previous conversation touched, including sensitive
+        # personal matters (relationships, arguments, health, finances,
+        # private circumstances), with zero sensitivity filtering applied
+        # when it was generated. Previously this method handed that raw
+        # summary straight to Gemini with "you may briefly and naturally
+        # mention that {when}: {summary}" — which is exactly how a
+        # greeting like "We were talking about your wife..." got produced.
+        #
+        # Fix: still call pop_last_session() here, unchanged — this
+        # preserves the exact existing memory-retrieval behavior (the
+        # stored summary is read and cleared exactly when it was before,
+        # "consumed on read" as designed) — but its CONTENT is never
+        # built into session_clause or handed to Gemini as greeting
+        # material. This is scoped to the unsolicited greeting only:
+        # ordinary long-term memory (identity/preferences/relationships/
+        # etc., already part of system_instruction for the whole
+        # connection — see _build_config()'s mem_str) is untouched by
+        # this, so an explicit question like "what did I tell you about
+        # my wife?" still works exactly as before — that's a completely
+        # different mechanism this fix never touches.
+        #
         # Explicit owner: self._session_owner was just frozen by this same
         # connection's _build_config() call (see that method), so this is
         # always the CURRENT connection's user, not whoever might log in
         # next.
-        last = await asyncio.to_thread(pop_last_session, self._session_owner)
+        await asyncio.to_thread(pop_last_session, self._session_owner)
         session_clause = ""
-        if last:
-            try:
-                # .date() only — avoids mixing a tz-aware `now` (web, see
-                # _local_now()) with the naive date parsed below.
-                _delta = (now.date() - datetime.strptime(last["date"], "%Y-%m-%d").date()).days
-                _when  = "earlier today" if _delta == 0 else ("yesterday" if _delta == 1 else f"{_delta} days ago")
-            except Exception:
-                _when = "last time"
-            session_clause = (
-                f" You may also briefly and naturally mention that {_when}: {last['summary']}"
-            )
 
         p1 = (
             f"It is currently {time_str} on {weekday} (time-of-day category: {category}). "
@@ -3034,6 +3377,78 @@ class JarvisLive:
                 self._location_refresh_waiters.remove(waiter)
             except ValueError:
                 pass
+
+    def _calendar_tzinfo(self):
+        """Resolves the SAME device/session-local timezone _local_now()
+        already uses (web: the browser-reported IANA zone; desktop: the
+        local machine's own clock) as a real tzinfo object, for attaching
+        to the naive local datetime strings Gemini produces for Calendar
+        tool calls (see actions/calendar.py's parse_local_datetime()).
+        Desktop has no IANA zone name to look up, so this falls back to
+        the machine's current fixed UTC offset via astimezone() -- Google
+        Calendar's API accepts an explicit numeric offset in `dateTime`
+        just as well as a named zone, so no IANA-name resolution is
+        needed there at all. Never Render/server time, never UTC, never a
+        hardcoded zone — the same guarantee _local_now() already makes."""
+        if self._web_timezone:
+            try:
+                return ZoneInfo(self._web_timezone)
+            except Exception:
+                pass
+        return datetime.now().astimezone().tzinfo
+
+    async def _get_calendar_credentials(self):
+        """Google Calendar: resolves and returns a ready-to-use
+        Credentials object for the CURRENTLY active identity, or None if
+        that account hasn't connected Google Calendar (or Calendar
+        integration isn't configured in this environment at all).
+
+        Deliberately re-derived fresh from Postgres on EVERY call — no
+        Credentials object is ever cached on self. This mirrors the exact
+        same "no RAM cache" principle _get_current_location()/
+        _resolve_effective_language() already establish: with nothing
+        calendar-related cached on JarvisLive, a logout or identity
+        switch has nothing to leak — the very next Calendar tool call
+        after a switch reads Postgres for self._user_profile's NEW owner,
+        never anything left over from the previous one. The owner itself
+        is read the same way every other per-account lookup in this file
+        already is (self._user_profile's canonical username) — never a
+        display name, never anything the browser/Gemini could influence.
+
+        A near-expiry access token is refreshed here (a real network call
+        to Google, only when actually needed) and the refreshed token is
+        immediately re-persisted so the NEXT call doesn't need to refresh
+        again — see actions/calendar_auth.py's ensure_fresh().
+        """
+        owner = (self._user_profile or {}).get("username", "") or ""
+        if not owner or not calendar_store.is_configured():
+            return None
+        loop = asyncio.get_event_loop()
+        try:
+            row = await loop.run_in_executor(None, lambda: calendar_store.load_credentials(owner))
+            if row is None:
+                return None
+            creds_json, email = row
+            credentials = await loop.run_in_executor(
+                None, lambda: calendar_auth.credentials_from_json(creds_json)
+            )
+            credentials, refreshed = await loop.run_in_executor(
+                None, lambda: calendar_auth.ensure_fresh(credentials)
+            )
+        except Exception as e:
+            print(f"[Calendar] Credential load/refresh failed for '{owner}': {e}")
+            return None
+        if refreshed:
+            try:
+                await loop.run_in_executor(
+                    None, lambda: calendar_store.save_credentials(owner, credentials.to_json(), email)
+                )
+            except Exception as e:
+                # The refreshed token still works for THIS call even if
+                # persisting it failed — just means the next call may need
+                # to refresh again. Never fatal to the current request.
+                print(f"[Calendar] Failed to persist refreshed token for '{owner}': {e}")
+        return credentials
 
     def _local_now(self) -> datetime:
         """The single source of truth for "what time is it right now" for

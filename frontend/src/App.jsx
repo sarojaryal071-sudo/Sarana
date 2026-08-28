@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAssistantDispatch, useAssistantState } from "./state/AssistantContext";
-import { fetchSession, sendCommand, sendInterrupt, sendLocation, logout, ApiError } from "./lib/api";
+import {
+  fetchSession, sendCommand, sendInterrupt, sendLocation, logout, ApiError,
+  googleCalendarConnectUrl, fetchCalendarStatus, disconnectCalendar,
+} from "./lib/api";
 import { getCurrentLocation } from "./lib/geolocation";
 import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
@@ -40,6 +43,9 @@ export default function App() {
   const [sessionError, setSessionError] = useState(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Google Calendar: null while unknown/loading, otherwise {connected, email}
+  // — never a token, see lib/api.js's fetchCalendarStatus().
+  const [calendarStatus, setCalendarStatus] = useState(null);
   const socketRef = useRef(null);
   const audioRef = useRef(null);
   const micRef = useRef(null);
@@ -95,6 +101,35 @@ export default function App() {
         username: session.username,
       });
     }
+  }, [dispatch]);
+
+  // Google Calendar: after returning from Google's consent screen, the
+  // backend redirects back here with a ?calendar=connected|error|
+  // cancelled query param (see dashboard/server.py's /auth/google/
+  // callback) — never a token of any kind, just an outcome flag. This is
+  // a fresh page load, so the SARANA auth token itself is restored
+  // separately by the effect above (sessionStorage survives the round
+  // trip through Google unaffected) — this effect only surfaces a brief
+  // message and cleans the URL; the calendar-status effect below already
+  // re-fetches status on every fresh authenticated mount, so no separate
+  // forced refresh is needed here.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("calendar");
+    if (!result) return;
+
+    const messages = {
+      connected: "Google Calendar connected.",
+      error: "Couldn't connect Google Calendar — please try again.",
+      cancelled: "Google Calendar connection was cancelled.",
+    };
+    if (messages[result]) {
+      dispatch({ type: "SYS_MESSAGE", text: messages[result], ts: null });
+    }
+
+    params.delete("calendar");
+    const rest = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (rest ? `?${rest}` : ""));
   }, [dispatch]);
 
   // ── wire up /ws + /ws/audio-out once authenticated ──────────────────────
@@ -225,6 +260,51 @@ export default function App() {
 
     requestAndSendLocation(state.token);
   }, [state.authenticationState, state.token]);
+
+  // Google Calendar: fetch connection status once per authenticated
+  // mount (fresh login, restored session, or a fresh mount right after
+  // returning from the OAuth redirect above) — this is what actually
+  // reflects a just-completed connect/disconnect back into the UI, not a
+  // forced refresh from the redirect-handling effect itself. Only ever
+  // {"connected": bool, "email": str} — see lib/api.js's
+  // fetchCalendarStatus(); never a token.
+  useEffect(() => {
+    if (state.authenticationState !== "authenticated" || !state.token) {
+      setCalendarStatus(null);
+      return;
+    }
+    let cancelled = false;
+    fetchCalendarStatus(state.token)
+      .then((s) => { if (!cancelled) setCalendarStatus(s); })
+      .catch(() => { if (!cancelled) setCalendarStatus({ connected: false, email: "" }); });
+    return () => { cancelled = true; };
+  }, [state.authenticationState, state.token]);
+
+  // "Connect Google Calendar": a real full-page navigation to our own
+  // backend (GET /auth/google), which itself redirects to Google's
+  // consent screen — never a fetch, never handles a Google token
+  // directly in the browser at all (see lib/api.js's
+  // googleCalendarConnectUrl()).
+  function handleConnectCalendar() {
+    if (!state.token) return;
+    window.location.href = googleCalendarConnectUrl(state.token);
+  }
+
+  async function handleDisconnectCalendar() {
+    if (!state.token) return;
+    try {
+      await disconnectCalendar(state.token);
+    } catch {
+      /* backend unreachable/erroring -- status is still re-fetched below
+         either way, same "don't trap the user" tolerance App.jsx's own
+         handleLogout() already uses */
+    }
+    try {
+      setCalendarStatus(await fetchCalendarStatus(state.token));
+    } catch {
+      setCalendarStatus({ connected: false, email: "" });
+    }
+  }
 
   function handleAuthenticated(session) {
     // Item 8: activity log = current session's UI history, not persistent
@@ -382,6 +462,9 @@ export default function App() {
         onClose={() => setMenuOpen(false)}
         messages={state.messages}
         onLogout={handleLogout}
+        calendarStatus={calendarStatus}
+        onConnectCalendar={handleConnectCalendar}
+        onDisconnectCalendar={handleDisconnectCalendar}
       />
       {!authenticated && (
         <LoginScreen

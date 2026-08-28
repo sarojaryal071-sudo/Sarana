@@ -14,7 +14,10 @@ const VIEW_TITLES = {
   settings: "Settings",
 };
 
-export default function SidePanel({ open, onClose, messages, onLogout }) {
+export default function SidePanel({
+  open, onClose, messages, onLogout,
+  calendarStatus, onConnectCalendar, onDisconnectCalendar,
+}) {
   const [view, setView] = useState("menu"); // "menu" | "activity" | "settings"
 
   // Reset back to the nav list after the drawer finishes closing, so it
@@ -65,6 +68,32 @@ export default function SidePanel({ open, onClose, messages, onLogout }) {
           {view === "settings" && (
             <div className="settings-placeholder">
               <p>Settings will be configured here in a future update.</p>
+              <div className="settings-calendar">
+                <p className="settings-calendar-label">Google Calendar</p>
+                {calendarStatus?.connected ? (
+                  <>
+                    <p className="settings-calendar-status">
+                      Google Calendar connected
+                      {calendarStatus.email ? ` (${calendarStatus.email})` : ""}
+                    </p>
+                    <button
+                      type="button"
+                      className="settings-calendar-btn settings-calendar-btn-disconnect"
+                      onClick={onDisconnectCalendar}
+                    >
+                      Disconnect
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="settings-calendar-btn"
+                    onClick={onConnectCalendar}
+                  >
+                    Connect Google Calendar
+                  </button>
+                )}
+              </div>
             </div>
           )}
         </div>

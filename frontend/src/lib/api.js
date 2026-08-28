@@ -141,6 +141,40 @@ export async function sendLocation(token, { latitude, longitude, accuracy, times
   return asJson(resp);
 }
 
+/** Builds the URL to navigate the browser to for GET /auth/google — a
+ * full-page redirect (window.location.href = ...), never a fetch: the
+ * whole point is for the browser to leave SARANA, go through Google's own
+ * consent screen, and come back — nothing here ever touches a Google
+ * token directly. `return_to` is our own origin, so the backend's
+ * callback can send the browser back to wherever it actually started
+ * from (validated server-side against the existing CORS allowlist — see
+ * dashboard/server.py's /auth/google). */
+export function googleCalendarConnectUrl(token) {
+  const params = new URLSearchParams({ token, return_to: window.location.origin });
+  return `${BACKEND_URL}/auth/google?${params.toString()}`;
+}
+
+/** GET /api/calendar/status — {"connected": bool, "email": str}. Never
+ * returns a token/credential of any kind (see dashboard/server.py's own
+ * route docstring). */
+export async function fetchCalendarStatus(token) {
+  const resp = await fetch(`${BACKEND_URL}/api/calendar/status`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return asJson(resp);
+}
+
+/** POST /api/calendar/disconnect — removes SARANA's stored Google
+ * Calendar credentials for the current account and best-effort revokes
+ * Google's own authorization. */
+export async function disconnectCalendar(token) {
+  const resp = await fetch(`${BACKEND_URL}/api/calendar/disconnect`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return asJson(resp);
+}
+
 /** POST /api/logout — removes this token and its session bookkeeping
  * server-side (see dashboard/server.py's _forget_token()). Safe to call
  * with an already-invalid/expired token — always resolves {"ok": true},

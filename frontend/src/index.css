@@ -678,6 +678,54 @@ input {
   line-height: 1.6;
 }
 
+/* ── Google Calendar connect/disconnect (Settings) ──────────────────────── */
+.settings-calendar {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-a);
+}
+
+.settings-calendar-label {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.settings-calendar-status {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--pri);
+}
+
+.settings-calendar-btn {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  width: 100%;
+  padding: 11px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-a);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.settings-calendar-btn:hover {
+  background: var(--pri-ghost);
+  border-color: var(--pri);
+  color: var(--pri);
+}
+
+.settings-calendar-btn-disconnect:hover {
+  background: #140008;
+  border-color: var(--muted-c);
+  color: var(--muted-c);
+}
+
 /* ── footer: logout + credit, pinned below the nav list ────────────────── */
 .side-panel-footer {
   flex-shrink: 0;
