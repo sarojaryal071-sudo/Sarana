@@ -38,3 +38,16 @@ psycopg[binary]>=3.1,<4
 # hardcoded timezone), so this is required, not optional, wherever the web
 # login's timezone is used.
 tzdata
+
+# Google Calendar OAuth/API: actions/calendar_auth.py imports
+# google_auth_oauthlib.flow.Flow (google-auth-oauthlib itself; it also
+# pulls in google-auth, already present here transitively via
+# google-genai, as the build log confirmed) and actions/calendar.py
+# imports googleapiclient.discovery.build (google-api-python-client).
+# Both are guarded with try/except ImportError so their absence degrades
+# to "Calendar unavailable" rather than crashing the server (see
+# dashboard/server.py's [CALENDAR_CONFIG] startup diagnostic) — but the
+# feature needs them actually installed to work, and requirements.txt
+# alone doesn't reach Render, which builds from this file.
+google-auth-oauthlib>=1.0,<2
+google-api-python-client

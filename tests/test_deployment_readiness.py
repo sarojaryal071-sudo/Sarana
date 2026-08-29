@@ -189,6 +189,66 @@ def test_play_audio_continues_broadcasting_when_sd_is_none() -> None:
     print("test_play_audio_continues_broadcasting_when_sd_is_none: PASS")
 
 
+# ── Google Calendar OAuth deps actually reach Render's build ────────────
+# Regression test for the exact bug found in production: requirements.txt
+# (desktop) and requirements-backend.txt (what Render's `pip install -r`
+# actually runs — see this file's own header comment) are two SEPARATE
+# lists. google-auth-oauthlib/google-api-python-client were added to the
+# former but not the latter, so calendar_auth.py's/calendar.py's own
+# try/except ImportError guards silently set _OAUTH_LIBS_OK=False on
+# Render even though everything worked locally — exactly what
+# dashboard/server.py's [CALENDAR_CONFIG] startup diagnostic (see
+# tests/test_calendar_config_diagnostic.py) was added to surface.
+
+def _backend_requirement_names() -> set[str]:
+    """Package names (lowercased, no version pin/extras) listed in
+    requirements-backend.txt — the file Render's build actually uses."""
+    import re
+    repo_root = Path(__file__).resolve().parent.parent
+    names = set()
+    for line in (repo_root / "requirements-backend.txt").read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        name = re.split(r"[<>=\[;]", line, maxsplit=1)[0].strip().lower()
+        names.add(name)
+    return names
+
+
+def test_backend_requirements_include_calendar_oauth_libs() -> None:
+    """actions/calendar_auth.py imports google_auth_oauthlib.flow.Flow;
+    actions/calendar.py imports googleapiclient.discovery.build (see each
+    module's own try/except ImportError guard) — both packages must be
+    listed in requirements-backend.txt, not just requirements.txt."""
+    names = _backend_requirement_names()
+    assert "google-auth-oauthlib" in names, (
+        "google-auth-oauthlib missing from requirements-backend.txt -- "
+        "actions/calendar_auth.py's Flow import will silently fail on Render"
+    )
+    assert "google-api-python-client" in names, (
+        "google-api-python-client missing from requirements-backend.txt -- "
+        "actions/calendar.py's googleapiclient.discovery.build import will silently fail on Render"
+    )
+    print("test_backend_requirements_include_calendar_oauth_libs: PASS")
+
+
+def test_calendar_oauth_libs_actually_importable_in_this_environment() -> None:
+    """A requirements.txt line only *asks* pip to install something --
+    this confirms the guarded imports in actions/calendar_auth.py and
+    actions/calendar.py actually resolved to real packages in the
+    environment these tests run in (mirroring what [CALENDAR_CONFIG]
+    reports as oauth_libs_imported on Render)."""
+    from actions import calendar as calendar_actions
+    from actions import calendar_auth
+    assert calendar_auth._OAUTH_LIBS_OK is True, (
+        "google_auth_oauthlib/google-auth failed to import in this environment"
+    )
+    assert calendar_actions._API_OK is True, (
+        "googleapiclient failed to import in this environment"
+    )
+    print("test_calendar_oauth_libs_actually_importable_in_this_environment: PASS")
+
+
 def test_main_module_imports_with_sounddevice_unavailable() -> None:
     """The literal repro from the PortAudio bug report: `from main import
     JarvisLive` must succeed even when sounddevice/PortAudio can't be
@@ -234,4 +294,6 @@ if __name__ == "__main__":
     test_play_audio_continues_broadcasting_when_sd_is_none()
     test_main_module_imports_with_sounddevice_unavailable()
     test_headless_still_no_pyqt6()
+    test_backend_requirements_include_calendar_oauth_libs()
+    test_calendar_oauth_libs_actually_importable_in_this_environment()
     print("\nAll deployment-readiness tests passed.")
