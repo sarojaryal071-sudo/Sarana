@@ -891,6 +891,26 @@ TOOL_DECLARATIONS = [
             "required": ["category", "key", "value"]
         }
     },
+    {
+        "name": "cancel_active_task",
+        "description": (
+            "Stops or withdraws a backend task you are currently running or just "
+            "started (e.g. checking the calendar, saving a memory, looking up the "
+            "weather) because the user explicitly said to stop, cancel, or changed "
+            "their mind before it finished — e.g. 'stop that', 'cancel it', 'never "
+            "mind, don't do it', 'don't create that event'. Do NOT call this for an "
+            "ordinary interruption where the user simply started talking about "
+            "something else — only call it when the user is clearly asking you to "
+            "stop or undo the specific thing you were just doing. If nothing is "
+            "currently running, or the task already finished, this tells you that "
+            "honestly so you never claim to have cancelled something that already "
+            "happened."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {},
+        }
+    },
 ]
 
 # ── Phase 3: capability awareness ────────────────────────────────────────
@@ -930,6 +950,23 @@ DESKTOP_ONLY_TOOLS = frozenset({
     "computer_settings", "desktop_control", "code_helper", "dev_agent",
     "file_processor", "computer_control", "game_updater", "flight_finder",
     "system_status", "shutdown_jarvis",
+})
+
+# ── Task cancellation (barge-in vs. explicit cancel) ────────────────────
+# Tools that only ever READ external state — cancelling one mid-flight,
+# even if its network call already went out, has no external side effect
+# to misreport, so cancel_active_task (see _execute_tool()) can honestly
+# call these "cancelled" outright. Anything NOT in this set is treated as
+# potentially mutating (Calendar create/update/delete, save_memory,
+# reminder, etc.) and is deliberately never claimed as cancelled once it
+# has already started running — see cancel_active_task's own handling for
+# why: a background thread already talking to an external service (e.g.
+# Google Calendar) can't be safely/forcibly stopped mid-call, and this
+# codebase's own explicit requirement is to never falsely claim a
+# cancellation it can't guarantee.
+_READ_ONLY_TOOLS = frozenset({
+    "get_weather", "get_current_place", "find_nearby_places", "get_directions",
+    "get_calendar_events", "find_free_time", "system_status", "web_search",
 })
 
 # ── Location capabilities (weather/geo/routing) ─────────────────────────
@@ -1165,6 +1202,26 @@ class JarvisLive:
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
         self._interrupted          = False   # True while draining audio after user interrupt
+        # Tool execution / receive-loop decoupling: a dedicated background
+        # consumer (see _process_tool_calls()) drains this queue so the
+        # Gemini receive loop (_receive_audio()) is never blocked waiting
+        # on a tool's own network I/O — same "bounded queue + one
+        # consumer" pattern already used for out_queue/audio_in_queue/
+        # _phone_audio_queue in this file, not a new architecture. Both
+        # are recreated fresh per-connection (see run()'s connect loop).
+        self._tool_call_queue: asyncio.Queue | None = None
+        self._pending_tool_calls: dict[str, dict] = {}   # fc.id -> {"name", "status", "cancelled"}
+        # cancel_active_task support: which single tool call, if any, is
+        # RIGHT NOW executing inside _handle_tool_batch() — the only thing
+        # cancel_active_task (an ordinary tool call itself, handled
+        # out-of-band so it never waits behind what it's meant to
+        # interrupt — see _receive_audio()) is allowed to inspect/cancel.
+        # Never touched by speech-interruption handling (sc.interrupted) —
+        # that is a completely separate concept (see _execute_tool()'s
+        # cancel_active_task branch and this task's own audit notes).
+        self._active_tool_task: asyncio.Task | None = None
+        self._active_tool_call_id: str | None = None
+        self._active_tool_name: str | None = None
         self.ui.on_text_command   = self._on_text_command
         self.ui.on_remote_clicked = self._make_remote_key
         self.ui.on_interrupt      = self.interrupt
@@ -1742,6 +1799,57 @@ class JarvisLive:
                 id=fc.id, name=name,
                 response={"result": "ok", "silent": True}
             )
+
+        if name == "cancel_active_task":
+            # Explicit, user-requested cancellation — a DIFFERENT concept
+            # from speech interruption/barge-in (see _receive_audio()'s
+            # sc.interrupted handling, which never touches
+            # self._active_tool_task). This branch only runs when Gemini
+            # itself decided the user's words were an explicit stop/cancel
+            # request (see this tool's own description) — it is never
+            # inferred here from raw text.
+            if not self.ui.muted:
+                self._push_state("LISTENING")
+            task      = self._active_tool_task
+            call_name = self._active_tool_name
+            if task is None or task.done():
+                # Nothing running, or it already finished by the time the
+                # cancellation request arrived — never claim a
+                # cancellation that didn't/couldn't happen.
+                result = (
+                    "[TASK_ALREADY_DONE] There is no task currently running to "
+                    "cancel — it either already finished or nothing was in "
+                    "progress. Tell the user honestly; never claim you cancelled "
+                    "something that already happened."
+                )
+            elif call_name in _READ_ONLY_TOOLS:
+                # Read-only — cancelling it, even if its network call
+                # already went out, has no external state to misreport.
+                task.cancel()
+                result = (
+                    f"[TASK_CANCELLED] The in-progress '{call_name}' lookup was "
+                    f"stopped as requested. Nothing external was changed — it "
+                    f"was only checking information."
+                )
+            else:
+                # A mutating tool (Calendar create/update/delete,
+                # save_memory, reminder, etc.) that has already started
+                # running its own network I/O in a background thread (see
+                # this method's loop.run_in_executor() call sites) — that
+                # thread cannot be safely/forcibly stopped mid-call, so it
+                # is left to finish naturally (its result still reaches
+                # Gemini normally). Per this task's own explicit
+                # requirement: never claim a cancellation that can't be
+                # guaranteed.
+                result = (
+                    f"[TASK_MAY_HAVE_COMPLETED] The '{call_name}' request had "
+                    f"already started and may have already reached the external "
+                    f"service — it could not be safely stopped mid-operation. "
+                    f"Tell the user honestly that you're not certain it was "
+                    f"stopped in time, and offer to check or undo it if that's "
+                    f"possible, rather than claiming it was cancelled."
+                )
+            return types.FunctionResponse(id=fc.id, name=name, response={"result": result})
 
         # Phase 3: capability awareness — never attempt (and never let
         # Gemini believe it accomplished) a tool that needs local desktop
@@ -2363,6 +2471,44 @@ class JarvisLive:
                     if response.server_content:
                         sc = response.server_content
 
+                        if sc.interrupted:
+                            # Barge-in: Gemini's own server-side VAD detected
+                            # the user talking over SARANA. This is a SPEECH
+                            # interruption ONLY — it must never be treated as
+                            # "cancel whatever backend task is running" (see
+                            # _execute_tool()'s cancel_active_task, the only
+                            # path allowed to touch self._active_tool_task —
+                            # deliberately not referenced here). Stop
+                            # accepting more of the interrupted response's
+                            # own audio (the `if self._interrupted:` check on
+                            # response.data above), drop whatever of it is
+                            # already queued for local/browser playback, and
+                            # tell connected browsers to flush anything they
+                            # already received and may still have scheduled
+                            # (see dashboard/server.py's broadcast_audio_stop()
+                            # — audioOut.js's stopPlayback() is the browser
+                            # side of this same cut). The eventual
+                            # turn_complete for this same (now-interrupted)
+                            # response is handled by the existing
+                            # self._interrupted branch below, which resets
+                            # in_buf/out_buf — nothing further to do with
+                            # those here.
+                            self._interrupted = True
+                            _drained = 0
+                            while True:
+                                try:
+                                    self.audio_in_queue.get_nowait()
+                                    _drained += 1
+                                except asyncio.QueueEmpty:
+                                    break
+                            if _drained:
+                                print(f"[JARVIS] Barge-in — {_drained} queued audio chunk(s) discarded")
+                            self.set_speaking(False)
+                            if self._turn_done_event:
+                                self._turn_done_event.clear()
+                            if self._dashboard:
+                                asyncio.create_task(self._dashboard.broadcast_audio_stop())
+
                         if sc.output_transcription and sc.output_transcription.text:
                             txt = _clean_transcript(sc.output_transcription.text)
                             if txt and txt != (out_buf[-1] if out_buf else ""):
@@ -2442,48 +2588,66 @@ class JarvisLive:
                                 asyncio.create_task(_cam_close())
 
                     if response.tool_call:
-                        # Item 6 audit (highest-risk item — deliberately
-                        # NOT restructured): each fc is awaited in-line,
-                        # sequentially, on this same receive loop, so the
-                        # `async for` above is paused (no further Gemini
-                        # events drained for THIS response stream) for the
-                        # duration of every tool call in a turn. A
-                        # background-task/concurrent version was
-                        # considered and rejected: google-genai's
-                        # send_tool_response() has no documented contract
-                        # for being called concurrently from overlapping
-                        # tasks on the same session, and getting that
-                        # wrong risks exactly what this task warns
-                        # against — out-of-order or duplicate tool
-                        # responses — with no live Gemini connection
-                        # available in this environment to verify it's
-                        # actually safe. Instrumented instead, so a real
-                        # decision can be made from real numbers rather
-                        # than guessing: logs any tool call whose
-                        # run_in_executor work takes long enough to be a
-                        # user-noticeable pause.
-                        _tool_batch_start = time.monotonic()
-                        fn_responses = []
+                        # Item 6 audit follow-up: tool execution now runs on
+                        # a dedicated background consumer (_process_tool_
+                        # calls()/_handle_tool_batch(), fed by self.
+                        # _tool_call_queue) instead of being awaited inline
+                        # on this loop — the SAME "bounded queue + one
+                        # consumer" pattern already used for out_queue/
+                        # audio_in_queue/_phone_audio_queue in this file,
+                        # not a new architecture. Within one batch, function
+                        # calls are still executed strictly in order and
+                        # their responses still sent together in one
+                        # send_tool_response() call (see _handle_tool_
+                        # batch()); batches are drained strictly FIFO by the
+                        # one worker task — so ordering and the function-
+                        # response contract are unchanged from before. What
+                        # changes: THIS loop — the only thing that can
+                        # observe Gemini's own barge-in signal (sc.
+                        # interrupted, above) or a tool_call_cancellation —
+                        # is never blocked waiting on a tool's own network
+                        # I/O.
+                        #
+                        # cancel_active_task is the one exception: it exists
+                        # specifically to interrupt whatever tool is
+                        # CURRENTLY running, so it must never wait behind it
+                        # in the same FIFO worker. It's handled immediately,
+                        # inline, right here instead — safe to do because
+                        # it's fast/local (inspects or cancels an
+                        # asyncio.Task; no network I/O of its own), so this
+                        # doesn't reintroduce the receive-loop-blocking
+                        # problem normal tool execution would.
+                        _deferred = []
                         for fc in response.tool_call.function_calls:
-                            print(f"[JARVIS] 📞 {fc.name}")
-                            _tool_start = time.monotonic()
-                            fr = await self._execute_tool(fc)
-                            _tool_elapsed = time.monotonic() - _tool_start
-                            if _tool_elapsed > 0.3:
-                                print(
-                                    f"[JARVIS] Tool '{fc.name}' took {_tool_elapsed:.2f}s "
-                                    f"— receive loop was paused for this long"
-                                )
-                            fn_responses.append(fr)
-                        _tool_batch_elapsed = time.monotonic() - _tool_batch_start
-                        if _tool_batch_elapsed > 0.3:
-                            print(
-                                f"[JARVIS] Tool-call batch ({len(fn_responses)} call(s)) "
-                                f"took {_tool_batch_elapsed:.2f}s total"
-                            )
-                        await self.session.send_tool_response(
-                            function_responses=fn_responses
-                        )
+                            if fc.name == "cancel_active_task":
+                                fr = await self._execute_tool(fc)
+                                await self.session.send_tool_response(function_responses=[fr])
+                                continue
+                            self._pending_tool_calls[fc.id] = {
+                                "name": fc.name, "status": "queued", "cancelled": False,
+                            }
+                            _deferred.append(fc)
+                        if _deferred:
+                            self._tool_call_queue.put_nowait(_deferred)
+
+                    if response.tool_call_cancellation:
+                        # The model itself withdrew interest in one or more
+                        # pending function calls (e.g. it changed its mind
+                        # after the user talked over it) — see google.genai.
+                        # types.LiveServerToolCallCancellation. A call still
+                        # QUEUED (not yet reached by the worker) is simply
+                        # marked cancelled so _handle_tool_batch() skips it
+                        # entirely once it gets there — nothing was done,
+                        # nothing to undo. A call already RUNNING is left to
+                        # finish exactly as before: if it already reached an
+                        # external system, the side effect is real and must
+                        # not be abandoned or misreported — only the
+                        # (no-longer-wanted) send_tool_response for that one
+                        # id is skipped.
+                        for _cid in response.tool_call_cancellation.ids:
+                            _entry = self._pending_tool_calls.get(_cid)
+                            if _entry:
+                                _entry["cancelled"] = True
         except Exception as e:
             # ASCII-only — same reasoning as _receive_audio()'s startup
             # print above: this line sits directly on the error path that
@@ -2492,6 +2656,101 @@ class JarvisLive:
             print(f"[JARVIS] Recv error: {e}")
             traceback.print_exc()
             raise
+
+    async def _process_tool_calls(self) -> None:
+        """Dedicated background consumer for self._tool_call_queue — the
+        piece that lets _receive_audio() enqueue a tool-call batch and move
+        on immediately instead of blocking on it (see that method's own
+        comment). Batches are drained strictly FIFO, one at a time, so
+        cross-batch ordering matches exactly what the old inline code did;
+        _handle_tool_batch() preserves in-batch ordering and the "one
+        send_tool_response() per batch" contract the same way. Any
+        unhandled exception is left to propagate (after logging, matching
+        _receive_audio()'s own error-handling style) so it cancels this
+        connection's TaskGroup the same way a _receive_audio() failure
+        always has — this task's failure mode is intentionally identical.
+        """
+        while True:
+            function_calls = await self._tool_call_queue.get()
+            try:
+                await self._handle_tool_batch(function_calls)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[JARVIS] Tool-call batch error: {e}")
+                traceback.print_exc()
+                raise
+
+    async def _handle_tool_batch(self, function_calls) -> None:
+        """Executes one tool_call batch off the Gemini receive loop. Each fc
+        is still awaited sequentially, in order (never uncontrolled
+        parallel tool execution), and every response is sent together in
+        one send_tool_response() call — identical semantics to the old
+        inline version, just running on this dedicated worker instead of
+        _receive_audio() itself.
+        """
+        _tool_batch_start = time.monotonic()
+        fn_responses = []
+        for fc in function_calls:
+            entry = self._pending_tool_calls.get(fc.id)
+            if entry and entry.get("cancelled"):
+                # Withdrawn by the model itself (tool_call_cancellation)
+                # before we got to it — never started, nothing to respond to.
+                self._pending_tool_calls.pop(fc.id, None)
+                continue
+
+            print(f"[JARVIS] 📞 {fc.name}")
+            if entry is not None:
+                entry["status"] = "running"
+            self._active_tool_call_id = fc.id
+            self._active_tool_name    = fc.name
+            task = asyncio.ensure_future(self._execute_tool(fc))
+            self._active_tool_task = task
+            _tool_start = time.monotonic()
+            try:
+                fr = await task
+            except asyncio.CancelledError:
+                # Two different things raise CancelledError at this same
+                # await point, and they must NOT be handled the same way:
+                # (a) cancel_active_task called task.cancel() on THIS
+                # child — by the time `await task` raises, task.cancelled()
+                # is already True, since the task only reaches that state
+                # once it's genuinely finished cancelling. Safe to swallow:
+                # that branch only ever cancels a call classified as
+                # read-only/side-effect-free (see _READ_ONLY_TOOLS), and
+                # the model already has its answer via cancel_active_task's
+                # own function response — nothing further to respond with.
+                # (b) THIS worker task itself is being cancelled (e.g. the
+                # whole connection/TaskGroup is tearing down) while
+                # suspended here — task.cancelled() is still False in that
+                # case (the child was never asked to cancel), and this
+                # CancelledError must propagate so the worker actually
+                # shuts down instead of looping past its own cancellation.
+                if not task.cancelled():
+                    raise
+                continue
+            finally:
+                self._pending_tool_calls.pop(fc.id, None)
+                self._active_tool_task     = None
+                self._active_tool_call_id  = None
+                self._active_tool_name     = None
+            _tool_elapsed = time.monotonic() - _tool_start
+            if _tool_elapsed > 0.3:
+                print(
+                    f"[JARVIS] Tool '{fc.name}' took {_tool_elapsed:.2f}s "
+                    f"— executed off the receive loop, conversation stayed responsive"
+                )
+            fn_responses.append(fr)
+
+        if not fn_responses:
+            return   # every fc in this batch was withdrawn — nothing Gemini still expects a reply for
+        _tool_batch_elapsed = time.monotonic() - _tool_batch_start
+        if _tool_batch_elapsed > 0.3:
+            print(
+                f"[JARVIS] Tool-call batch ({len(fn_responses)} call(s)) "
+                f"took {_tool_batch_elapsed:.2f}s total"
+            )
+        await self.session.send_tool_response(function_responses=fn_responses)
 
     async def _play_audio(self):
         # ASCII-only print — same reasoning as _listen_audio()'s note above.
@@ -2581,13 +2840,19 @@ class JarvisLive:
                         stream = None
 
                 # Phase 4: fan the same audio out to any connected remote
-                # clients. Fire-and-forget — must never block, delay, or
-                # interrupt local playback; broadcast_audio() isolates
-                # per-client errors internally and never raises, and a
-                # missing/absent dashboard is simply skipped.
+                # clients. Audio-out backpressure fix: broadcast_audio() is
+                # now a fast, non-blocking put_nowait per client (each
+                # client has its own bounded queue + dedicated sender task —
+                # see dashboard/server.py) — it never does network I/O
+                # itself, so it no longer needs (or benefits from) its own
+                # per-chunk asyncio.create_task() here; that wrapping was
+                # exactly what let sends pile up unboundedly against a slow
+                # client. Still guarded so a missing/absent dashboard, or
+                # any unexpected error, never blocks or interrupts local
+                # playback.
                 if self._dashboard:
                     try:
-                        asyncio.create_task(self._dashboard.broadcast_audio(payload))
+                        await self._dashboard.broadcast_audio(payload)
                     except Exception:
                         pass
 
@@ -3613,6 +3878,7 @@ class JarvisLive:
                     self.session              = session
                     self.audio_in_queue       = asyncio.Queue()
                     self.out_queue            = asyncio.Queue(maxsize=200)
+                    self._tool_call_queue     = asyncio.Queue()
                     self._turn_done_event     = asyncio.Event()
                     self._reconnect_requested = asyncio.Event()
 
@@ -3623,6 +3889,10 @@ class JarvisLive:
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
                     self._interrupted          = False
+                    self._pending_tool_calls   = {}
+                    self._active_tool_task     = None
+                    self._active_tool_call_id  = None
+                    self._active_tool_name     = None
                     # Reliability audit: this connection's own baseline —
                     # a proactive check-in's 15-minute silence gate must be
                     # measured from THIS conversation actually starting,
@@ -3659,12 +3929,39 @@ class JarvisLive:
                         raise _IdentityChanged()
 
                     print("[JARVIS] Connected.")
-                    self._push_state("LISTENING")
+                    # Startup lifecycle fix: don't announce LISTENING until
+                    # any pending startup greeting has actually finished
+                    # being spoken. Previously this pushed LISTENING
+                    # unconditionally right here, BEFORE the greeting task
+                    # below was even scheduled — the frontend (mic auto-
+                    # start, the "LISTENING" display) would treat SARANA as
+                    # ready for normal input while it was still about to
+                    # greet, which was both misleading (the mic is actually
+                    # still being ignored during the greeting — see
+                    # _listen_audio()/_relay_phone_audio()'s own "not
+                    # speaking" gate) and made the greeting feel like it was
+                    # talking over the user. When a greeting IS about to
+                    # fire, stay in THINKING (already pushed at the top of
+                    # this connect attempt) — set_speaking(False), called
+                    # naturally once the greeting's own audio finishes
+                    # playing (see _play_audio()), pushes the real LISTENING
+                    # transition itself once it's actually true. No new
+                    # state and no artificial delay: this reuses the exact
+                    # mechanism every other spoken response already uses:
+                    # the short, purposeful pause is _send_startup_
+                    # briefing()'s own existing asyncio.sleep(0.3), unchanged.
+                    _greeting_pending = (
+                        (self._auto_start and not self._briefing_sent and get_brief_enabled())
+                        or self._pending_web_greeting
+                    )
+                    if not _greeting_pending:
+                        self._push_state("LISTENING")
                     self.ui.write_log("SYS: SARANA online.")
 
                     tg.create_task(self._send_realtime())
                     tg.create_task(self._listen_audio())
                     tg.create_task(self._receive_audio())
+                    tg.create_task(self._process_tool_calls())
                     tg.create_task(self._play_audio())
                     tg.create_task(self._run_system_monitor())
                     tg.create_task(self._run_background_monitor())

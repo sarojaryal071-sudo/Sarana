@@ -621,6 +621,14 @@ class DashboardServer:
         self._clients: set[WebSocket]     = set()
         self._client_roles: dict[WebSocket, str] = {}   # ws → "client" | "desktop" (Phase 3 bookkeeping only)
         self._audio_out_clients: set[WebSocket] = set()  # /ws/audio-out subscribers (Phase 4)
+        # Audio-out backpressure fix: one bounded queue + one dedicated
+        # sender task per /ws/audio-out client (see _register_audio_client()/
+        # _audio_sender_loop()/broadcast_audio() below) — replaces the old
+        # unbounded asyncio.create_task() per chunk. Keyed by the same
+        # WebSocket objects as self._audio_out_clients.
+        self._audio_out_queues: dict[WebSocket, "asyncio.Queue"] = {}
+        self._audio_out_senders: dict[WebSocket, "asyncio.Task"] = {}
+        self._audio_out_dropped: int = 0   # instrumentation — same pattern as _phone_audio_dropped below
         self._history: list[dict]         = []
         self._command_queue               = asyncio.Queue()
         self._wake_callback               = None
@@ -898,24 +906,119 @@ class DashboardServer:
         """
         await self.broadcast({"type": "content", "title": title, "text": text})
 
+    # ── Audio-out backpressure fix ───────────────────────────────────────
+    # Root cause this replaces: _play_audio() used to fan audio out via a
+    # brand-new, unawaited asyncio.create_task(broadcast_audio(chunk)) per
+    # ~200ms batch, with no queue and no cap on how many of those could be
+    # in flight against one client at once. On a client whose downlink
+    # (e.g. a phone on cellular) is ever slower than real-time audio, sends
+    # piled up — concurrent, unordered, unbounded — and got progressively
+    # worse turn over turn. Fix: exactly the same "bounded queue + one
+    # dedicated consumer" pattern already used everywhere else in this
+    # codebase (main.py's out_queue/audio_in_queue/_phone_audio_queue) —
+    # one queue and one sender task per client, so sends to a given client
+    # are always strictly serialized and ordered, a slow client only ever
+    # backs up its OWN queue (bounded, with drop-and-count backpressure —
+    # never delivery to any other client, and never unbounded memory/task
+    # growth), and broadcast_audio() itself is a fast, non-blocking
+    # put_nowait — it never does network I/O and never needs to be wrapped
+    # in its own task by callers.
+
+    _AUDIO_OUT_QUEUE_MAXSIZE = 40   # ≈8s of audio at ~200ms/batch — enough slack for brief jitter, bounded either way
+
+    def _register_audio_client(self, ws: WebSocket) -> None:
+        """Wire up one /ws/audio-out client: adds it to self._audio_out_clients
+        and gives it its own bounded queue + dedicated sender task (see
+        _audio_sender_loop()). Idempotent — safe to call more than once for
+        the same client."""
+        self._audio_out_clients.add(ws)
+        if ws in self._audio_out_queues:
+            return
+        queue = asyncio.Queue(maxsize=self._AUDIO_OUT_QUEUE_MAXSIZE)
+        self._audio_out_queues[ws] = queue
+        self._audio_out_senders[ws] = asyncio.create_task(self._audio_sender_loop(ws, queue))
+
+    async def _unregister_audio_client(self, ws: WebSocket) -> None:
+        """Reverses _register_audio_client(): drops the client and cancels
+        its sender task cleanly (awaiting the cancellation so the task is
+        actually gone, not just requested to stop, before this returns) —
+        called from audio_out_ws()'s finally block on disconnect."""
+        self._audio_out_clients.discard(ws)
+        self._audio_out_queues.pop(ws, None)
+        task = self._audio_out_senders.pop(ws, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _audio_sender_loop(self, ws: WebSocket, queue: "asyncio.Queue") -> None:
+        """The ONLY coroutine ever allowed to call ws.send_bytes() for this
+        client — one dedicated consumer per client guarantees sends are
+        always strictly serialized (never concurrent) and always delivered
+        in the order they were queued, with no help needed from a lock.
+        Exits (and lets the finally below prune this client) the moment a
+        send fails — same "one client's failure never affects the others"
+        isolation broadcast_audio() always had, just enforced per-client
+        instead of per-broadcast-call now."""
+        try:
+            while True:
+                chunk = await queue.get()
+                try:
+                    await ws.send_bytes(chunk)
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._audio_out_clients.discard(ws)
+            self._audio_out_queues.pop(ws, None)
+            self._audio_out_senders.pop(ws, None)
+
     async def broadcast_audio(self, chunk: bytes) -> None:
         """Fan out one raw PCM16 audio chunk — the exact same bytes main.py's
         _play_audio() just wrote to the local speaker — to every currently
-        connected /ws/audio-out client (Phase 4).
+        connected /ws/audio-out client (Phase 4), via each client's own
+        bounded queue (see _register_audio_client()/_audio_sender_loop()
+        above) rather than a direct/concurrent send from here.
 
-        Mirrors broadcast()'s existing per-client isolation: one client's
-        send error or disconnect never affects delivery to the others, and
-        this method itself never raises, so callers (main.py's audio loop)
-        can fire it without their own try/except and without it ever
-        delaying or interrupting local playback.
+        Never blocks and never raises: this is just a put_nowait per client
+        (no network I/O happens in this method at all any more), so callers
+        (main.py's audio loop) can await it directly without wrapping it in
+        their own task and without it ever delaying or interrupting local
+        playback. A client whose queue is already full (its own downlink
+        can't keep up with real-time audio) has its chunk dropped — with a
+        rate-limited counter, same pattern as main.py's out_queue/
+        _phone_audio_queue — rather than piling up unboundedly; delivery to
+        every other client is completely unaffected.
         """
-        dead: set[WebSocket] = set()
         for ws in list(self._audio_out_clients):
+            queue = self._audio_out_queues.get(ws)
+            if queue is None:
+                continue   # registered client with no queue yet/already torn down — skip safely
             try:
-                await ws.send_bytes(chunk)
-            except Exception:
-                dead.add(ws)
-        self._audio_out_clients -= dead
+                queue.put_nowait(chunk)
+            except asyncio.QueueFull:
+                self._audio_out_dropped += 1
+                if self._audio_out_dropped % 50 == 1:
+                    print(
+                        f"[Dashboard] audio-out queue full for a client — "
+                        f"{self._audio_out_dropped} chunk(s) dropped so far"
+                    )
+
+    async def broadcast_audio_stop(self) -> None:
+        """Server → client signal telling the browser to immediately flush
+        whatever assistant audio it already received and may still have
+        scheduled to play (see frontend/src/lib/audioOut.js's stopPlayback()
+        and App.jsx's "audio_stop" case) — fired the moment Gemini's own
+        server-side barge-in detection reports the user started talking
+        over SARANA (see main.py's `sc.interrupted` handling). Deliberately
+        NOT routed through broadcast()/self._history, for the same reason
+        broadcast_state()/broadcast_location_refresh_request() aren't: this
+        is live, one-off signaling, not conversation content worth
+        replaying to a client that connects later."""
+        await self._send_to_clients({"type": "audio_stop"})
 
     # ── FastAPI app ───────────────────────────────────────────────────────
 
@@ -1644,14 +1747,14 @@ class DashboardServer:
                 await websocket.close(code=4001)
                 return
             await websocket.accept()
-            self._audio_out_clients.add(websocket)
+            self._register_audio_client(websocket)
             try:
                 while True:
                     await websocket.receive_bytes()   # ignored; detects disconnect only
             except WebSocketDisconnect:
                 pass
             finally:
-                self._audio_out_clients.discard(websocket)
+                await self._unregister_audio_client(websocket)
 
         # ── File sharing ──────────────────────────────────────────────────────
 

@@ -52,16 +52,25 @@ class _FakeWS:
 
 def test_broadcast_audio_fanout_and_isolation() -> None:
     """Points 2-5: unchanged delivery, multi-client fan-out, one bad client
-    isolated from the others, broadcast_audio() itself never raises."""
+    isolated from the others, broadcast_audio() itself never raises.
+
+    Audio-out backpressure fix: delivery now happens on each client's own
+    dedicated sender task (see dashboard/server.py's _register_audio_client()/
+    _audio_sender_loop()) rather than synchronously inside broadcast_audio()
+    itself, so this test registers clients the same way the real
+    /ws/audio-out route does and gives the background sender tasks a brief
+    moment to actually run before asserting delivery."""
 
     async def _run():
         server = DashboardServer()
         good1, good2, bad = _FakeWS(), _FakeWS(), _FakeWS(fail=True)
-        server._audio_out_clients.update([good1, good2, bad])
+        for ws in (good1, good2, bad):
+            server._register_audio_client(ws)
 
         chunk = bytes(range(256)) * 4   # stand-in PCM16 payload, 1024 bytes
 
         await server.broadcast_audio(chunk)   # must not raise despite `bad`
+        await asyncio.sleep(0.05)             # let the sender tasks actually run
 
         assert good1.received == [chunk], "chunk must reach client 1 unchanged"
         assert good2.received == [chunk], "chunk must reach client 2 unchanged"
@@ -72,6 +81,7 @@ def test_broadcast_audio_fanout_and_isolation() -> None:
         # A second broadcast after pruning: still fine, still isolated.
         chunk2 = b"\x01\x02" * 50
         await server.broadcast_audio(chunk2)
+        await asyncio.sleep(0.05)
         assert good1.received == [chunk, chunk2]
         assert good2.received == [chunk, chunk2]
 

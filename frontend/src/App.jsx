@@ -177,6 +177,19 @@ export default function App() {
             // not an explicit backend-requested refresh.
             requestAndSendLocation(state.token);
             break;
+          case "audio_stop":
+            // Barge-in: Gemini's own server-side VAD detected the user
+            // talking over SARANA (see main.py's sc.interrupted handling /
+            // dashboard/server.py's broadcast_audio_stop()). Flushes
+            // whatever assistant audio the browser already received over
+            // /ws/audio-out and may still have scheduled to play, so
+            // playback stops immediately instead of finishing out audio
+            // that was already in flight before the interruption was
+            // detected. Mirrors handleInterrupt()'s own stopPlayback()
+            // call — this is the automatic, server-initiated counterpart
+            // of that manual control.
+            audioRef.current?.stopPlayback();
+            break;
           default:
             break; // unknown type — never crash, matches backend's own tolerance
         }
