@@ -1370,13 +1370,19 @@ class DashboardServer:
 
             self._purge_stale_oauth_states()
             state = secrets.token_urlsafe(32)
+            auth_url, code_verifier = calendar_auth.build_auth_url(state)
             self._google_oauth_states[state] = {
                 "owner": owner,
                 "return_to": safe_return_to,
                 "expires": time.time() + 600,   # 10 minutes — a real consent flow, not a long-lived token
+                # PKCE: this exact verifier must accompany the token
+                # exchange at the callback (see calendar_auth.build_auth_url()'s
+                # own docstring) — stored alongside state rather than a new
+                # persistence system since it shares state's exact lifetime
+                # (single-use, popped together, same 10-minute expiry).
+                "code_verifier": code_verifier,
             }
 
-            auth_url = calendar_auth.build_auth_url(state)
             return RedirectResponse(auth_url)
 
         @app.get("/auth/google/callback")
@@ -1429,11 +1435,22 @@ class DashboardServer:
                 return RedirectResponse(f"{frontend}/?calendar=error")
 
             owner = entry["owner"]
+            # PKCE: the exact verifier build_auth_url() generated for THIS
+            # state, at connect time — see that function's own docstring.
+            # entry was already popped (single-use) above, so this is
+            # inherently one-time-use and gone whether the exchange below
+            # succeeds or fails; no separate cleanup needed. A missing
+            # verifier (e.g. an in-memory state entry from before this
+            # fix, surviving a redeploy mid-flow) falls through to "" —
+            # Google rejects that exactly like any other invalid
+            # verifier, landing on the existing except/?calendar=error
+            # path below rather than crashing.
+            code_verifier = entry.get("code_verifier", "")
             print(f"[Calendar] exchange starting for '{owner}'", flush=True)
             loop = asyncio.get_event_loop()
 
             def _do_exchange_and_store():
-                credentials = calendar_auth.exchange_code(code)
+                credentials = calendar_auth.exchange_code(code, code_verifier)
                 print(f"[Calendar] exchange succeeded for '{owner}'", flush=True)
                 email = calendar_auth.fetch_email(credentials)
                 calendar_store.init_schema()

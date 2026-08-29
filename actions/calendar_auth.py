@@ -71,13 +71,29 @@ def _client_config() -> dict:
     }
 
 
-def build_auth_url(state: str) -> str:
+def build_auth_url(state: str) -> tuple[str, str]:
     """Builds the Google consent-screen URL for GET /auth/google to
     redirect the browser to. `state` is our OWN CSRF/identity-binding
     token (see dashboard/server.py's _google_oauth_states) -- Google
     echoes it back unchanged to the callback, where we look it up
     ourselves; this module treats it as an opaque string, never
-    generates or validates it."""
+    generates or validates it.
+
+    Returns (auth_url, code_verifier). google-auth-oauthlib's Flow
+    defaults to autogenerate_code_verifier=True -- authorization_url()
+    below silently generates a PKCE code_verifier and embeds its
+    corresponding code_challenge in auth_url, binding this specific
+    authorization request to that verifier. Google then REQUIRES the
+    same code_verifier on the token exchange (exchange_code() below) or
+    rejects it with invalid_grant ("Missing code verifier") -- which is
+    exactly what happened in production, because a *different* Flow
+    object (with no code_verifier at all) was used for that exchange.
+    The verifier must therefore be threaded through to exchange_code()
+    by the caller (dashboard/server.py stores it in the same
+    _google_oauth_states entry as `state` -- see /auth/google) -- it
+    cannot be recovered from `state` or regenerated later; a mismatched
+    or missing verifier is rejected by Google the same way a missing one
+    is."""
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES)
     flow.redirect_uri = os.environ["GOOGLE_REDIRECT_URI"]
     auth_url, _ = flow.authorization_url(
@@ -86,17 +102,22 @@ def build_auth_url(state: str) -> str:
         prompt="consent",             # ensures a refresh_token is (re)issued even on a repeat connect
         state=state,
     )
-    return auth_url
+    return auth_url, flow.code_verifier
 
 
-def exchange_code(code: str) -> "Credentials":
+def exchange_code(code: str, code_verifier: str) -> "Credentials":
     """Exchanges an authorization code (from GET /auth/google/callback)
-    for real Credentials. Raises on any failure (expired/invalid code,
-    network error) -- callers must not treat a failed exchange as
-    success."""
+    for real Credentials. `code_verifier` must be the exact value
+    build_auth_url() returned for the SAME authorization request (see
+    that function's own docstring for why) -- passing it explicitly here
+    rather than relying on Flow's own state means this works correctly
+    even though this is a brand new Flow object from the one
+    build_auth_url() used. Raises on any failure (expired/invalid code,
+    missing/wrong verifier, network error) -- callers must not treat a
+    failed exchange as success."""
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES)
     flow.redirect_uri = os.environ["GOOGLE_REDIRECT_URI"]
-    flow.fetch_token(code=code)
+    flow.fetch_token(code=code, code_verifier=code_verifier)
     return flow.credentials
 
 

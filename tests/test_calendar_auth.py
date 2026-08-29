@@ -67,20 +67,44 @@ def test_client_config_never_logs_or_leaks_beyond_the_dict() -> None:
     print("test_client_config_never_logs_or_leaks_beyond_the_dict: PASS")
 
 
-# ── authorization URL ───────────────────────────────────────────────────
+# ── authorization URL / PKCE ─────────────────────────────────────────────
+# Regression coverage for the production bug: google-auth-oauthlib's Flow
+# defaults to autogenerate_code_verifier=True, so authorization_url()
+# silently generates a PKCE code_verifier and embeds its code_challenge in
+# the URL -- Google then requires that SAME verifier on the token exchange
+# (a DIFFERENT Flow object, per exchange_code()'s own docstring) or rejects
+# it with invalid_grant ("Missing code verifier"), which is exactly what
+# happened live. build_auth_url() must therefore hand the verifier back to
+# its caller rather than letting it vanish with the discarded Flow object.
 
 def test_build_auth_url_includes_state_and_offline_access() -> None:
     fake_flow = MagicMock()
     fake_flow.authorization_url.return_value = ("https://accounts.google.com/o/oauth2/auth?mock=1", "unused")
+    fake_flow.code_verifier = "fake-pkce-verifier-xyz"
     with patch.dict(os.environ, _ENV), \
          patch.object(calendar_auth.Flow, "from_client_config", return_value=fake_flow):
-        url = calendar_auth.build_auth_url("my-state-token")
+        url, verifier = calendar_auth.build_auth_url("my-state-token")
     assert url == "https://accounts.google.com/o/oauth2/auth?mock=1"
     kwargs = fake_flow.authorization_url.call_args.kwargs
     assert kwargs["state"] == "my-state-token"
     assert kwargs["access_type"] == "offline"
     assert kwargs["prompt"] == "consent"
     print("test_build_auth_url_includes_state_and_offline_access: PASS")
+
+
+def test_build_auth_url_returns_the_flow_generated_code_verifier() -> None:
+    """The returned verifier must be EXACTLY flow.code_verifier -- the
+    same value authorization_url() used to compute the code_challenge
+    embedded in the URL Google receives -- not a separately generated or
+    empty value."""
+    fake_flow = MagicMock()
+    fake_flow.authorization_url.return_value = ("https://accounts.google.com/o/oauth2/auth?mock=1", "unused")
+    fake_flow.code_verifier = "this-exact-verifier-was-used-for-the-code-challenge"
+    with patch.dict(os.environ, _ENV), \
+         patch.object(calendar_auth.Flow, "from_client_config", return_value=fake_flow):
+        _url, verifier = calendar_auth.build_auth_url("some-state")
+    assert verifier == "this-exact-verifier-was-used-for-the-code-challenge"
+    print("test_build_auth_url_returns_the_flow_generated_code_verifier: PASS")
 
 
 def test_scopes_are_narrow_not_full_calendar_scope() -> None:
@@ -97,10 +121,23 @@ def test_exchange_code_returns_credentials() -> None:
     fake_flow.credentials = fake_credentials
     with patch.dict(os.environ, _ENV), \
          patch.object(calendar_auth.Flow, "from_client_config", return_value=fake_flow):
-        creds = calendar_auth.exchange_code("auth-code-123")
-    fake_flow.fetch_token.assert_called_once_with(code="auth-code-123")
+        creds = calendar_auth.exchange_code("auth-code-123", "the-pkce-verifier")
+    fake_flow.fetch_token.assert_called_once_with(code="auth-code-123", code_verifier="the-pkce-verifier")
     assert creds is fake_credentials
     print("test_exchange_code_returns_credentials: PASS")
+
+
+def test_exchange_code_sends_the_exact_verifier_it_was_given() -> None:
+    """The regression test for the actual production bug: fetch_token()
+    must receive whatever code_verifier the caller passed in -- not
+    None, not a freshly-generated one from this (different) Flow
+    object."""
+    fake_flow = MagicMock()
+    with patch.dict(os.environ, _ENV), \
+         patch.object(calendar_auth.Flow, "from_client_config", return_value=fake_flow):
+        calendar_auth.exchange_code("some-code", "verifier-from-build-auth-url")
+    assert fake_flow.fetch_token.call_args.kwargs["code_verifier"] == "verifier-from-build-auth-url"
+    print("test_exchange_code_sends_the_exact_verifier_it_was_given: PASS")
 
 
 def test_exchange_code_failure_propagates_honestly() -> None:
@@ -109,7 +146,7 @@ def test_exchange_code_failure_propagates_honestly() -> None:
     with patch.dict(os.environ, _ENV), \
          patch.object(calendar_auth.Flow, "from_client_config", return_value=fake_flow):
         try:
-            calendar_auth.exchange_code("expired-or-reused-code")
+            calendar_auth.exchange_code("expired-or-reused-code", "some-verifier")
             assert False, "must propagate a genuine exchange failure"
         except RuntimeError:
             pass
@@ -202,8 +239,10 @@ if __name__ == "__main__":
     test_is_configured_false_without_oauth_libs()
     test_client_config_never_logs_or_leaks_beyond_the_dict()
     test_build_auth_url_includes_state_and_offline_access()
+    test_build_auth_url_returns_the_flow_generated_code_verifier()
     test_scopes_are_narrow_not_full_calendar_scope()
     test_exchange_code_returns_credentials()
+    test_exchange_code_sends_the_exact_verifier_it_was_given()
     test_exchange_code_failure_propagates_honestly()
     test_ensure_fresh_no_op_when_already_valid()
     test_ensure_fresh_refreshes_when_expired_with_refresh_token()
