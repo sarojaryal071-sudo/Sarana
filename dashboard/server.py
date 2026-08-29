@@ -1390,15 +1390,33 @@ class DashboardServer:
             be active by the time it arrives — not a convention, an
             actual enforced check.
             """
+            # Diagnostic checkpoint logging ONLY -- booleans/owner username/
+            # exception type, never state/code values or any credential.
+            # Added to answer "which branch actually fired" from Render's
+            # log tab alone, the same way [CALENDAR_CONFIG] answers "are
+            # the deps/env vars there" -- see that diagnostic's own comment
+            # a few routes up. flush=True on every line here specifically
+            # because sys.stdout is NOT reconfigured for line buffering
+            # anywhere in this process (only encoding is, see main.py's
+            # own stdout/stderr reconfigure()), so a non-flushed print can
+            # sit in Render's block-buffered stdout indefinitely.
+            print(
+                f"[Calendar] callback reached: state_present={bool(state)} "
+                f"code_present={bool(code)} error_present={bool(error)}",
+                flush=True,
+            )
+
             entry = self._google_oauth_states.pop(state, None) if state else None
             frontend = (entry or {}).get("return_to") or _default_frontend_origin()
 
             if error:
                 # User declined consent, or Google reported some other
                 # problem — never treated as success.
+                print("[Calendar] Google returned error param -> cancelled", flush=True)
                 return RedirectResponse(f"{frontend}/?calendar=cancelled")
 
             if not entry or entry["expires"] < time.time():
+                print("[Calendar] state missing/expired/already used -> 400", flush=True)
                 return HTMLResponse(
                     "<h2>This Google Calendar connection link has expired or "
                     "was already used.</h2><p>Please try connecting again from "
@@ -1407,25 +1425,34 @@ class DashboardServer:
                 )
 
             if not code:
+                print("[Calendar] no code in callback -> error", flush=True)
                 return RedirectResponse(f"{frontend}/?calendar=error")
 
             owner = entry["owner"]
+            print(f"[Calendar] exchange starting for '{owner}'", flush=True)
             loop = asyncio.get_event_loop()
 
             def _do_exchange_and_store():
                 credentials = calendar_auth.exchange_code(code)
+                print(f"[Calendar] exchange succeeded for '{owner}'", flush=True)
                 email = calendar_auth.fetch_email(credentials)
                 calendar_store.init_schema()
+                print(f"[Calendar] storage starting for '{owner}'", flush=True)
                 calendar_store.save_credentials(owner, credentials.to_json(), email)
+                print(f"[Calendar] storage succeeded for '{owner}'", flush=True)
 
             try:
                 await loop.run_in_executor(None, _do_exchange_and_store)
             except Exception as e:
                 # Never logs the code or any token — see calendar_auth.py's
-                # own docstring for that guarantee.
-                print(f"[Calendar] OAuth exchange failed for '{owner}': {e}")
+                # own docstring for that guarantee. type(e).__name__
+                # distinguishes a Google/oauthlib rejection from a
+                # Postgres/KeyError-class storage failure without needing
+                # more detail than that.
+                print(f"[Calendar] OAuth exchange/store failed for '{owner}': {type(e).__name__}: {e}", flush=True)
                 return RedirectResponse(f"{frontend}/?calendar=error")
 
+            print(f"[Calendar] callback complete for '{owner}' -> connected", flush=True)
             return RedirectResponse(f"{frontend}/?calendar=connected")
 
         @app.get("/api/calendar/status")
