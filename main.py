@@ -519,11 +519,14 @@ TOOL_DECLARATIONS = [
     {
         "name": "screen_process",
         "description": (
-            "Captures the screen or webcam image and lets you analyze it. "
-            "MUST be called when user asks what is on screen, what you see, "
-            "look at camera, analyze my screen, etc. "
-            "You have NO visual ability without this tool. "
-            "After the image is captured it is sent directly to you — describe what you see and answer the user's question. "
+            "Captures YOUR OWN screen or webcam (the device you're running "
+            "on) and lets you analyze it. MUST be called when user asks "
+            "what is on THEIR screen, to look through YOUR camera, or to "
+            "analyze THEIR screen. This is separate from a photo the user "
+            "attaches or sends you directly in the conversation — that "
+            "arrives on its own, with no tool call needed here; just look "
+            "at it and answer naturally. "
+            "After this tool captures a screen/webcam image it is sent directly to you — describe what you see and answer the user's question. "
             "When using camera: the live view stays open until user says close it or calls close_camera."
         ),
         "parameters": {
@@ -1240,6 +1243,17 @@ class JarvisLive:
         self._vision_close_pending = False   # True after vision injected; next turn_complete closes camera
         self._vision_last_time     = 0.0     # monotonic time of last screen_process call (cooldown guard)
         self._vision_busy          = False   # True while a vision capture/inject cycle is in flight
+        # Diagnostic only (not a behavior change) — see sc.interrupted
+        # handling in _receive_audio(). Live-API testing found no evidence
+        # that sending a web image turn concurrently with an in-flight
+        # response causes it to be discarded (Gemini correctly queued and
+        # answered both in two independent live reproductions). The one
+        # untested variable is genuine concurrent SPEECH triggering real
+        # server-side VAD, which can't be faithfully simulated offline.
+        # This timestamp costs nothing and gives the NEXT real-device
+        # session concrete before/after evidence instead of a guess, if a
+        # barge-in ever is observed near a web image send.
+        self._last_web_image_sent_at = 0.0
         self._interrupted          = False   # True while draining audio after user interrupt
         # Tool execution / receive-loop decoupling: a dedicated background
         # consumer (see _process_tool_calls()) drains this queue so the
@@ -1679,7 +1693,8 @@ class JarvisLive:
                 "opening or controlling apps on the user's own computer, "
                 "controlling their local browser, changing their computer's "
                 "settings, moving mouse/keyboard on their machine, reading "
-                "files on their device, camera/screen vision, running local "
+                "files on their device, capturing YOUR OWN screen or webcam "
+                "directly (the screen_process tool), running local "
                 "dev/code tools, flight search, opening YouTube locally, "
                 "setting OS-level reminders, or restarting/shutting SARANA down"
             )
@@ -1692,8 +1707,14 @@ class JarvisLive:
                 "limitation honestly and briefly, in your own natural words, "
                 "never claim the action happened. You DO genuinely have: "
                 "normal conversation, remembering things (save_memory), "
-                "general web search, and background topic monitoring — don't "
-                "undersell those either.\n\n"
+                "general web search, background topic monitoring, AND real "
+                "image understanding — when the user attaches a photo or "
+                "takes one with their device camera and sends it to you, you "
+                "genuinely CAN see and discuss it (it arrives directly in the "
+                "conversation, not through screen_process or any tool call) "
+                "— never tell the user you can't see an image they've "
+                "actually sent you; just look at it and answer. Don't "
+                "undersell any of this either.\n\n"
             )
             # Permissions foundation: microphone access is entirely a
             # client-side (browser) fact with no tool call of its own — so
@@ -2589,6 +2610,15 @@ class JarvisLive:
                                     break
                             if _drained:
                                 print(f"[JARVIS] Barge-in — {_drained} queued audio chunk(s) discarded")
+                            # Diagnostic only (see self._last_web_image_sent_at's
+                            # own comment) — makes a real-device correlation
+                            # checkable from the server console instead of
+                            # guessed, without changing any behavior here.
+                            if self._last_web_image_sent_at:
+                                _since_img = time.monotonic() - self._last_web_image_sent_at
+                                if _since_img < 15.0:
+                                    print(f"[JARVIS] ⚠️ Barge-in {_since_img:.1f}s after a web image "
+                                          f"turn was sent — if the image answer went missing, this is the lead to follow.")
                             self.set_speaking(False)
                             if self._turn_done_event:
                                 self._turn_done_event.clear()
@@ -3949,7 +3979,24 @@ class JarvisLive:
         happened in dashboard/server.py's /ws handler before an item ever
         reaches self._dashboard._image_command_queue — this method trusts
         its queue the same way _process_dashboard_commands() trusts its
-        own."""
+        own.
+
+        Runtime debugging finding: live-API testing (a direct
+        send_client_content(inline_data=...) reproduction, AND running this
+        exact method unmodified against a real connected session) both
+        proved the core mechanism — compress -> base64 -> inline_data ->
+        this same self.session -> Gemini -> transcript — works correctly
+        end to end; Gemini genuinely analyzed a real test image both times.
+        So a failure here was never silently "not working" at the Gemini
+        API level — every failure branch below (no session in time, a
+        compress error, a send error) used to be logged to the SERVER
+        CONSOLE ONLY, with nothing at all reaching the browser — a real
+        image analysis failure and a completely successful-but-unheard
+        response looked IDENTICAL to the user: silence. Every branch now
+        also tells the user something happened, via the dashboard's
+        existing "sys" broadcast (the same one already used for "Phone
+        microphone live." etc. — no new message type, no frontend change
+        needed, App.jsx already renders "sys" as SYS_MESSAGE)."""
         import base64 as _b64
         while True:
             try:
@@ -3965,10 +4012,30 @@ class JarvisLive:
                     if self.session:
                         break
                     await asyncio.sleep(0.1)
-                if self.session:
+                if not self.session:
+                    print(f"[Dashboard] Dropped image command (no session): {text!r}")
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast({
+                            "type": "sys",
+                            "text": "SARANA wasn't ready yet — try sending that image again.",
+                        }))
+                    continue
+
+                try:
                     source_format = mime.split("/")[-1].upper() if "/" in mime else "JPEG"
                     img_bytes, out_mime = _compress(raw_bytes, source_format)
+                except Exception as e:
+                    print(f"[Dashboard] Image compress failed: {e}")
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast({
+                            "type": "sys",
+                            "text": "Sorry, I couldn't process that image.",
+                        }))
+                    continue
+
+                try:
                     b64 = _b64.b64encode(img_bytes).decode("ascii")
+                    print(f"[Vision] 📤 web image, {len(img_bytes):,} bytes (mime={out_mime}) → main session")
                     await self.session.send_client_content(
                         turns={"parts": [
                             {"inline_data": {"mime_type": out_mime, "data": b64}},
@@ -3976,9 +4043,15 @@ class JarvisLive:
                         ]},
                         turn_complete=True,
                     )
+                    self._last_web_image_sent_at = time.monotonic()   # see sc.interrupted diagnostic
                     self.ui.write_log(f"[Web image]: {text}")
-                else:
-                    print(f"[Dashboard] Dropped image command (no session): {text!r}")
+                except Exception as e:
+                    print(f"[Dashboard] Image send failed: {e}")
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast({
+                            "type": "sys",
+                            "text": "Sorry, I couldn't send that image to SARANA just now.",
+                        }))
             except asyncio.TimeoutError:
                 pass
             except Exception as e:
@@ -4121,6 +4194,7 @@ class JarvisLive:
                     self._vision_close_pending = False
                     self._vision_busy          = False
                     self._vision_last_time     = 0.0
+                    self._last_web_image_sent_at = 0.0
                     self._interrupted          = False
                     self._pending_tool_calls   = {}
                     self._active_tool_task     = None
