@@ -460,13 +460,14 @@ input {
   padding: 4px 10px;
 }
 
-/* ── web live camera vision ─────────────────────────────────────────── */
+/* ── web visual context (camera + screen) ─────────────────────────────── */
 /* The live preview renders INSIDE the exact same "orb-stage" area Orb.jsx
-   itself occupies (see CameraVisionPanel.jsx, which uses className=
-   "orb-stage" for its own wrapper — the two are never mounted together,
-   see App.jsx) — never a second/separate floating box. These rules only
-   style the video/overlay CONTENT within that already-existing, already-
-   positioned (.orb-stage is position:relative) area. */
+   itself occupies (see VisionStage.jsx, which uses className="orb-stage"
+   for its own wrapper — the two are never mounted together, see App.jsx)
+   — never a second/separate floating box. These rules only style the
+   video/overlay CONTENT within that already-existing, already-positioned
+   (.orb-stage is position:relative) area. Shared by both camera and
+   screen sources — see VisionStage.jsx's own header note. */
 .vision-stage-video {
   width: 100%;
   height: 100%;
@@ -475,10 +476,10 @@ input {
   background: #000;
 }
 
-/* Small, unobtrusive camera-active indicator — intentionally the only
-   camera-specific control-adjacent element in the main interface; the
-   existing INTERRUPT button (Controls.jsx) is what actually stops the
-   camera (see App.jsx's handleInterrupt) — no separate Stop button here. */
+/* Small, unobtrusive camera/screen-active indicator — intentionally the
+   only capture-specific control-adjacent element in the main interface;
+   the existing INTERRUPT button (Controls.jsx) is what actually stops
+   capture (see App.jsx's handleInterrupt) — no separate Stop button here. */
 .vision-stage-badge {
   position: absolute;
   top: 10px;
@@ -492,6 +493,33 @@ input {
   border: 1px solid var(--border-b);
   border-radius: 999px;
   pointer-events: none;
+}
+
+/* Phase 1 — camera flip: the ONE camera-specific control added to this
+   area (screen sharing has no equivalent — a display has no "other
+   side"). Small and unobtrusive, bottom-right so it never collides with
+   the badge (top-right) or overlaps Controls.jsx below this stage. */
+.vision-stage-flip {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--pri);
+  background: rgba(1, 13, 20, 0.75);
+  border: 1px solid var(--border-b);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.vision-stage-flip:hover {
+  background: var(--pri-ghost);
+}
+.vision-stage-flip:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* Permission prompt / error states — an overlay within the SAME orb-stage

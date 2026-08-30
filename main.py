@@ -584,7 +584,19 @@ TOOL_DECLARATIONS = [
             "see a fresh look after they adjust; the camera stays open the "
             "whole time. Never confidently describe something you genuinely "
             "can't make out — say so and ask for a better view instead of "
-            "guessing."
+            "guessing. "
+            "For a task that genuinely needs REPEATED looks over a period "
+            "of time as the user moves or the situation changes — e.g. "
+            "helping them navigate by watching their surroundings, walking "
+            "them through a physical task step by step — set mode='guided' "
+            "on the FIRST call. This keeps the camera available for longer "
+            "and gives you more patience between looks (the user may need "
+            "time to walk or act between observations); you still only get "
+            "a fresh look each time you call this again, and you should "
+            "still end the session yourself (by simply not calling it "
+            "again) once the guided task is actually done. Omit mode (or "
+            "use 'quick') for an ordinary one-off look — that's the right "
+            "default for almost everything."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -596,6 +608,54 @@ TOOL_DECLARATIONS = [
                 "facing": {
                     "type": "STRING",
                     "description": "'environment' for the rear/back camera (default — better for showing objects), or 'user' for the front camera.",
+                },
+                "mode": {
+                    "type": "STRING",
+                    "description": "'quick' (default) for a one-off look, or 'guided' for a longer task needing repeated looks over time (e.g. navigation help). Only meaningful on the FIRST call of a session — ignored on later calls that continue an already-open one.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "web_screen_vision",
+        "description": (
+            "WEB/MOBILE ONLY. Uses browser screen-sharing to see what's "
+            "currently on the user's OWN screen/display — for questions "
+            "like 'what's on my screen', 'what does this error mean', "
+            "'can you read this', 'what am I looking at on my screen'. "
+            "This is a COMPLETELY SEPARATE capability from web_camera_vision "
+            "(the physical camera) — never use one for the other; a "
+            "question about the screen needs THIS tool, a question about "
+            "the user's physical surroundings/what they're holding needs "
+            "web_camera_vision instead. Also different from an attached "
+            "photo — that's already visible without calling anything. "
+            "MANDATORY: you must call this and actually receive real screen "
+            "views back before answering ANY question about what's "
+            "currently on the user's screen — never guess. "
+            "Calling this asks the browser to start screen sharing (the "
+            "browser shows its own native picker/permission prompt — this "
+            "may not be available at all on some mobile browsers, "
+            "especially iOS Safari; if it isn't, you'll be told so "
+            "honestly and should explain that to the user rather than "
+            "claiming it worked). Say something short and natural first, "
+            "then wait — fresh screen views arrive as a later message. "
+            "Same call-again-for-another-look pattern as web_camera_vision: "
+            "answer once clear, or ask what to check/scroll to and call "
+            "again once you need a fresh view. Use mode='guided' on the "
+            "first call for a longer task like walking through a series of "
+            "steps on screen; omit it (or use 'quick') for a single check."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "text": {
+                    "type": "STRING",
+                    "description": "What to look for or answer, e.g. the user's own question. Optional — omit to just describe what's seen.",
+                },
+                "mode": {
+                    "type": "STRING",
+                    "description": "'quick' (default) for a one-off look, or 'guided' for a longer task needing repeated looks (e.g. walking through steps on screen). Only meaningful on the FIRST call.",
                 },
             },
             "required": [],
@@ -1009,26 +1069,74 @@ DESKTOP_ONLY_TOOLS = frozenset({
     "system_status", "shutdown_jarvis",
 })
 
-# ── Web live camera vision ───────────────────────────────────────────────
-# The mirror image of DESKTOP_ONLY_TOOLS: web_camera_vision needs a
-# BROWSER camera (getUserMedia), which a desktop session has no use for —
-# desktop already has direct OS-level camera access via screen_process
-# (angle="camera"). Same TOOL_DECLARATIONS-is-always-sent-either-way
-# architecture as DESKTOP_ONLY_TOOLS (see that constant's own comment) —
-# gating happens at execution time in _execute_tool(), not by hiding the
-# declaration itself.
-WEB_ONLY_TOOLS = frozenset({"web_camera_vision"})
+# ── Web visual context (camera + screen) ─────────────────────────────────
+# The mirror image of DESKTOP_ONLY_TOOLS: web_camera_vision/web_screen_
+# vision need BROWSER capture (getUserMedia/getDisplayMedia), which a
+# desktop session has no use for — desktop already has direct OS-level
+# screen/camera access via screen_process. Same TOOL_DECLARATIONS-is-
+# always-sent-either-way architecture as DESKTOP_ONLY_TOOLS (see that
+# constant's own comment) — gating happens at execution time in
+# _execute_tool(), not by hiding the declaration itself.
+WEB_ONLY_TOOLS = frozenset({"web_camera_vision", "web_screen_vision"})
 
-# Web live camera vision — timing constants for the adaptive observation
-# loop (see _execute_tool()'s "web_camera_vision" branch and
-# _process_web_vision_frames()). Deliberately separate from desktop's own
-# _vision_last_time/4.0s cooldown — a completely different state machine
-# (self._web_vision_session), never shared.
-WEB_VISION_SESSION_MAX_S    = 45.0  # hard cap on one vision "conversation" (all bursts combined)
+# Visual Context Manager (Phase 5) — deliberately NOT a class/subsystem,
+# just the small set of names that keep "camera" vs "screen" vs "quick"
+# vs "guided" from being scattered as ad-hoc strings across the tool
+# handlers and the frame consumer. self._web_vision_session (one shared
+# dict shape — see _new_web_vision_session() below) carries a "source"
+# and "mode" field using these values; camera and screen still go through
+# completely separate tools/browser APIs/broadcasts — only the batching/
+# timeout/injection machinery in _process_web_vision_frames() is shared,
+# exactly as it already was for a single source.
+WEB_VISION_SOURCES = frozenset({"camera", "screen"})
+WEB_VISION_MODES    = frozenset({"quick", "guided"})
+
+# Web visual context — timing constants for the adaptive observation loop
+# (see _new_web_vision_session()/_execute_tool()'s web_camera_vision/
+# web_screen_vision branches and _process_web_vision_frames()).
+# Deliberately separate from desktop's own _vision_last_time/4.0s
+# cooldown — a completely different state machine (self._web_vision_
+# session), never shared with screen_process/close_camera.
 WEB_VISION_BURST_WINDOW_S   = 4.0   # how long one observation burst collects frames before evaluating
 WEB_VISION_BURST_MAX_FRAMES = 4     # cap frames per burst regardless of window
-WEB_VISION_GRACE_S          = 6.0   # no further "look again" call within this long after an answer -> done
 WEB_VISION_CALL_COOLDOWN_S  = 1.5   # guards against a runaway double tool-call
+# "quick" (the original, default behavior) vs "guided" (Phase 2 — a task
+# that genuinely needs repeated looks over time, e.g. navigation help):
+# guided sessions get a much longer hard lifetime and more patience
+# between looks (the user may need real time to walk/act between
+# observations) — but are otherwise driven by the EXACT same call-again-
+# for-another-look mechanism as quick mode, never a background poller.
+WEB_VISION_SESSION_MAX_S         = {"quick": 45.0, "guided": 10 * 60.0}
+WEB_VISION_GRACE_S               = {"quick": 6.0,  "guided": 45.0}
+
+
+def _new_web_vision_session(request_id: str, source: str, mode: str, text: str, now: float) -> dict:
+    """Visual Context Manager (Phase 5) — the ONE place a fresh
+    self._web_vision_session dict is built, shared by both
+    web_camera_vision and web_screen_vision (see _execute_tool()) so the
+    two tools can never silently drift into slightly different session
+    shapes. "source" (WEB_VISION_SOURCES) and "mode" (WEB_VISION_MODES)
+    are the only two axes that distinguish a camera session from a
+    screen one, or a quick look from a guided task, from this point on —
+    everything else (batching/timeout/injection in
+    _process_web_vision_frames()) is identical regardless of which
+    browser capture API is actually feeding it. Deliberately a plain
+    function + dict, not a class hierarchy — see this task's own "do not
+    over-engineer" instruction."""
+    return {
+        "request_id": request_id,
+        "source": source,       # "camera" | "screen"
+        "mode": mode,           # "quick" | "guided"
+        "started": now,
+        "deadline": now + WEB_VISION_SESSION_MAX_S[mode],
+        "frames": [],
+        "burst_armed_at": now,
+        "awaiting_burst": True,
+        "burst_token": 0,       # see _process_web_vision_frames()'s own note on why this exists
+        "text": text,
+        "last_answered_at": None,
+    }
+
 
 # ── Task cancellation (barge-in vs. explicit cancel) ────────────────────
 # Tools that only ever READ external state — cancelling one mid-flight,
@@ -1805,25 +1913,32 @@ class JarvisLive:
                 "conversation, not through screen_process or any tool call) "
                 "— never tell the user you can't see an image they've "
                 "actually sent you; just look at it and answer. You can ALSO "
-                "genuinely ask to see something LIVE right now, through the "
-                "user's own device camera, via the web_camera_vision tool — "
-                "use it deliberately, only when a question actually needs a "
-                "live look (see that tool's own description), never for "
+                "genuinely ask to see something LIVE right now: through the "
+                "user's own device camera via web_camera_vision (their "
+                "physical surroundings/what they're holding), or through "
+                "their SCREEN via web_screen_vision (what's currently "
+                "displayed on their device) — two separate, deliberate "
+                "capabilities; use whichever one actually matches the "
+                "question, only when a question genuinely needs a live "
+                "look (see each tool's own description), never for "
                 "ordinary questions. Don't undersell any of this either.\n\n"
                 "CRITICAL — never invent what you have not actually seen: "
-                "you have NO knowledge of what the user is currently holding, "
-                "wearing, or what is physically around them right now UNLESS "
+                "you have NO knowledge of what the user is currently "
+                "holding, wearing, or what is physically around them, AND "
+                "NO knowledge of what is currently on their screen, UNLESS "
                 "either (a) they already attached/sent you a photo in this "
-                "conversation, or (b) you called web_camera_vision AND a "
-                "later message in this same conversation is tagged "
-                "[VISION_OBSERVATION] with real camera views. If asked what "
-                "you currently see, what's in their hand, or anything else "
-                "about their live physical surroundings, and NEITHER of "
-                "those has actually happened yet, you MUST call "
-                "web_camera_vision and wait — never guess or describe a "
-                "color, object, or shape you have not genuinely been shown. "
-                "Answering from imagination here is a serious failure, worse "
-                "than saying you need a moment to look.\n\n"
+                "conversation, or (b) you called web_camera_vision or "
+                "web_screen_vision AND a later message in this same "
+                "conversation is tagged [VISION_OBSERVATION] with real "
+                "views back from that same call. If asked what you "
+                "currently see (physically or on their screen), what's in "
+                "their hand, what an error on screen says, or anything "
+                "else that needs a real live look, and NEITHER of those "
+                "has actually happened yet, you MUST call the matching "
+                "tool and wait — never guess or describe a color, object, "
+                "shape, or on-screen text you have not genuinely been "
+                "shown. Answering from imagination here is a serious "
+                "failure, worse than saying you need a moment to look.\n\n"
             )
             # Permissions foundation: microphone access is entirely a
             # client-side (browser) fact with no tool call of its own — so
@@ -2104,14 +2219,22 @@ class JarvisLive:
             print(f"[JARVIS] Capability unavailable in desktop runtime: {name}")
             if not self.ui.muted:
                 self._push_state("LISTENING")
+            # Tool-aware advice: desktop's screen_process already covers
+            # BOTH of these (angle='camera' for the webcam, angle='screen'
+            # for the display) — point at whichever one actually matches
+            # the web-only tool that was attempted, not a hardcoded one.
+            _desktop_equivalent = (
+                "angle='camera' to look through this device's own webcam"
+                if name == "web_camera_vision" else
+                "angle='screen' to look at this device's own display"
+            )
             return types.FunctionResponse(
                 id=fc.id, name=name,
                 response={"result": (
                     f"[CAPABILITY_UNAVAILABLE] '{name}' is a web-only "
                     f"capability — this is the desktop app, which already "
-                    f"has direct camera access. Use screen_process with "
-                    f"angle='camera' instead to look through this device's "
-                    f"own camera."
+                    f"has direct access. Use screen_process with "
+                    f"{_desktop_equivalent}."
                 )},
             )
 
@@ -2500,26 +2623,32 @@ class JarvisLive:
                 _now = time.monotonic()
                 if (_now - self._web_vision_last_call) < WEB_VISION_CALL_COOLDOWN_S:
                     result = "Still setting up the last camera request — wait a moment before calling this again."
+                elif self._web_vision_session is not None and self._web_vision_session.get("source") != "camera":
+                    # A screen-vision session is already occupying the
+                    # single shared slot (see _new_web_vision_session()) —
+                    # never silently hijack it into a camera session.
+                    result = (
+                        "A screen-view request is still open from a moment ago — "
+                        "let that finish (answer, or it will time out on its own) "
+                        "before opening the camera."
+                    )
                 else:
                     self._web_vision_last_call = _now
                     facing = (args.get("facing") or "environment").strip().lower()
                     if facing not in ("environment", "user"):
                         facing = "environment"
                     user_text = (args.get("text") or "").strip()
+                    mode = (args.get("mode") or "quick").strip().lower()
+                    if mode not in WEB_VISION_MODES:
+                        mode = "quick"
 
                     if self._web_vision_session is None:
                         request_id = uuid.uuid4().hex[:12]
-                        self._web_vision_session = {
-                            "request_id": request_id,
-                            "started": _now,
-                            "deadline": _now + WEB_VISION_SESSION_MAX_S,
-                            "frames": [],
-                            "burst_armed_at": _now,
-                            "awaiting_burst": True,
-                            "burst_token": 0,   # see _process_web_vision_frames()'s own note on why this exists
-                            "text": user_text or "Describe clearly what the camera is currently seeing.",
-                            "last_answered_at": None,
-                        }
+                        self._web_vision_session = _new_web_vision_session(
+                            request_id, "camera", mode,
+                            user_text or "Describe clearly what the camera is currently seeing.",
+                            _now,
+                        )
                         if self._dashboard:
                             asyncio.create_task(
                                 self._dashboard.broadcast_camera_vision_request(request_id, facing)
@@ -2542,7 +2671,7 @@ class JarvisLive:
                                 "type": "sys",
                                 "text": "📷 Camera requested — waiting for your device…",
                             }))
-                        print(f"[WebVision] 📷 session opened ({request_id}), facing={facing}")
+                        print(f"[WebVision] 📷 camera session opened ({request_id}), facing={facing}, mode={mode}")
                         result = (
                             "[VISION_ACTIVE] Immediately say ONE short natural sentence "
                             "in the user's own language, telling them you're opening "
@@ -2559,13 +2688,84 @@ class JarvisLive:
                         session["burst_token"]    = session.get("burst_token", 0) + 1
                         if user_text:
                             session["text"] = user_text
-                        print(f"[WebVision] 👁 continuing session ({session['request_id']})")
+                        print(f"[WebVision] 👁 continuing camera session ({session['request_id']})")
                         result = (
                             "[VISION_ACTIVE] The camera is already open and still "
                             "watching. Say something brief and natural acknowledging "
                             "you're still looking (do NOT repeat a full sentence about "
                             "opening the camera again) — a fresh batch of views will "
                             "arrive shortly as a later message."
+                        )
+
+            elif name == "web_screen_vision":
+                # Mirrors the web_camera_vision branch above exactly (see
+                # its own comments for the shared reasoning) — the only
+                # differences are the browser capture mechanism
+                # (getDisplayMedia, entirely a frontend concern — see
+                # lib/screenVision.js) and which broadcast/diagnostic text
+                # is used. Shares self._web_vision_session,
+                # self._web_vision_last_call, and the entire
+                # _process_web_vision_frames() batching/timeout machinery
+                # with the camera path — see _new_web_vision_session()'s
+                # own docstring for why that's a deliberate, minimal
+                # Visual Context Manager rather than a parallel subsystem.
+                _now = time.monotonic()
+                if (_now - self._web_vision_last_call) < WEB_VISION_CALL_COOLDOWN_S:
+                    result = "Still setting up the last screen-view request — wait a moment before calling this again."
+                elif self._web_vision_session is not None and self._web_vision_session.get("source") != "screen":
+                    result = (
+                        "A camera-view request is still open from a moment ago — "
+                        "let that finish (answer, or it will time out on its own) "
+                        "before viewing the screen."
+                    )
+                else:
+                    self._web_vision_last_call = _now
+                    user_text = (args.get("text") or "").strip()
+                    mode = (args.get("mode") or "quick").strip().lower()
+                    if mode not in WEB_VISION_MODES:
+                        mode = "quick"
+
+                    if self._web_vision_session is None:
+                        request_id = uuid.uuid4().hex[:12]
+                        self._web_vision_session = _new_web_vision_session(
+                            request_id, "screen", mode,
+                            user_text or "Describe clearly what is currently on the user's screen.",
+                            _now,
+                        )
+                        if self._dashboard:
+                            asyncio.create_task(
+                                self._dashboard.broadcast_screen_vision_request(request_id)
+                            )
+                            asyncio.create_task(self._dashboard.broadcast({
+                                "type": "sys",
+                                "text": "🖥️ Screen view requested — waiting for your device…",
+                            }))
+                        print(f"[WebVision] 🖥️ screen session opened ({request_id}), mode={mode}")
+                        result = (
+                            "[VISION_ACTIVE] Immediately say ONE short natural sentence "
+                            "in the user's own language, telling them you're about to "
+                            "look at their screen — they may need to allow screen "
+                            "sharing. Do NOT describe or guess anything yet; the actual "
+                            "screen views arrive in a few seconds, as a later message in "
+                            "this same conversation. If the browser reports screen "
+                            "sharing isn't supported here, you'll be told that honestly "
+                            "instead — explain that to the user rather than claiming it "
+                            "worked."
+                        )
+                    else:
+                        session = self._web_vision_session
+                        session["frames"]         = []
+                        session["burst_armed_at"] = _now
+                        session["awaiting_burst"] = True
+                        session["burst_token"]    = session.get("burst_token", 0) + 1
+                        if user_text:
+                            session["text"] = user_text
+                        print(f"[WebVision] 👁 continuing screen session ({session['request_id']})")
+                        result = (
+                            "[VISION_ACTIVE] The screen share is already open and still "
+                            "watching. Say something brief and natural acknowledging "
+                            "you're still looking — a fresh batch of views will arrive "
+                            "shortly as a later message."
                         )
 
             elif name == "computer_settings":
@@ -4294,8 +4494,22 @@ class JarvisLive:
 
         Never touches screen_process/close_camera/self._pending_vision —
         an entirely separate, web-only state machine, deliberately not
-        unified with desktop's single-frame mechanism."""
+        unified with desktop's single-frame mechanism.
+
+        Source-agnostic by design (Phase 5 — see _new_web_vision_session()):
+        a session's "source" ("camera" | "screen") only changes which
+        stop broadcast fires and which noun appears in Gemini-facing
+        text; batching/timeout/injection below is identical either way."""
         import base64 as _b64
+
+        async def _broadcast_stop(sess: dict) -> None:
+            if not self._dashboard:
+                return
+            if sess.get("source") == "screen":
+                await self._dashboard.broadcast_screen_vision_stop(sess["request_id"])
+            else:
+                await self._dashboard.broadcast_camera_vision_stop(sess["request_id"])
+
         while True:
             try:
                 item = await asyncio.wait_for(
@@ -4329,8 +4543,7 @@ class JarvisLive:
                         if one.get("control") == "stop":
                             print(f"[WebVision] 🛑 client-requested stop ({session['request_id']}): {one.get('reason')!r}")
                             self._web_vision_session = None
-                            if self._dashboard:
-                                asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
+                            asyncio.create_task(_broadcast_stop(session))
                         elif "data" in one:
                             if len(session["frames"]) >= WEB_VISION_BURST_MAX_FRAMES:
                                 # Burst already has enough — drop the excess
@@ -4357,15 +4570,19 @@ class JarvisLive:
                 if session is None:
                     continue
 
+                source = session.get("source", "camera")
+                noun = "camera" if source == "camera" else "screen"
+
                 # Hard cap — regardless of state, one vision "conversation"
-                # can't run forever.
+                # can't run forever (per-mode: quick vs guided — see
+                # WEB_VISION_SESSION_MAX_S).
                 if now >= session["deadline"]:
-                    print(f"[WebVision] ⏱ hard timeout ({session['request_id']})")
+                    print(f"[WebVision] ⏱ hard timeout ({session['request_id']}, source={source})")
                     if session.get("awaiting_burst") and self.session:
                         try:
                             await self.session.send_client_content(
                                 turns={"parts": [{"text": (
-                                    "[VISION_TIMEOUT] The camera didn't provide a clear "
+                                    f"[VISION_TIMEOUT] The {noun} didn't provide a clear "
                                     "enough view in time. Tell the user honestly and "
                                     "briefly that you weren't able to get a good look "
                                     "just now, without inventing what you saw."
@@ -4375,8 +4592,7 @@ class JarvisLive:
                         except Exception as e:
                             print(f"[WebVision] Timeout notice send failed: {e}")
                     self._web_vision_session = None
-                    if self._dashboard:
-                        asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
+                    asyncio.create_task(_broadcast_stop(session))
                     continue
 
                 if session.get("awaiting_burst"):
@@ -4395,7 +4611,7 @@ class JarvisLive:
                         if now - session["started"] < 6.0:
                             session["burst_armed_at"] = now
                             continue
-                        print(f"[WebVision] No frames received ({session['request_id']}) — giving up")
+                        print(f"[WebVision] No frames received ({session['request_id']}, source={source}) — giving up")
                         if self._dashboard:
                             # Diagnostic-only, same reasoning as the
                             # "camera requested" marker above — proves the
@@ -4404,27 +4620,26 @@ class JarvisLive:
                             # failure from the tool never being called at all).
                             asyncio.create_task(self._dashboard.broadcast({
                                 "type": "sys",
-                                "text": "⚠️ No camera image arrived — camera may be unavailable or permission wasn't granted.",
+                                "text": f"⚠️ No {noun} image arrived — {noun} may be unavailable, unsupported, or permission wasn't granted.",
                             }))
                         if self.session:
                             try:
                                 await self.session.send_client_content(
                                     turns={"parts": [{"text": (
-                                        "[VISION_UNAVAILABLE] No camera images arrived at "
-                                        "all — the user's camera may be unavailable, busy, "
-                                        "or they didn't grant permission. Tell them "
-                                        "honestly and briefly that you couldn't access "
-                                        "their camera right now. Do NOT guess or invent "
-                                        "what they might be showing you — you have seen "
-                                        "nothing."
+                                        f"[VISION_UNAVAILABLE] No {noun} images arrived at "
+                                        f"all — the user's {noun} may be unavailable, busy, "
+                                        "unsupported on their browser, or they didn't grant "
+                                        "permission. Tell them honestly and briefly that you "
+                                        f"couldn't access their {noun} right now. Do NOT guess "
+                                        "or invent what they might be showing you — you have "
+                                        "seen nothing."
                                     )}]},
                                     turn_complete=True,
                                 )
                             except Exception as e:
                                 print(f"[WebVision] Unavailable notice send failed: {e}")
                         self._web_vision_session = None
-                        if self._dashboard:
-                            asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
+                        asyncio.create_task(_broadcast_stop(session))
                         continue
 
                     if not self.session:
@@ -4435,17 +4650,23 @@ class JarvisLive:
                         for mime_t, img_b in frames
                     ]
                     n = len(parts)
+                    tool_name = "web_camera_vision" if source == "camera" else "web_screen_vision"
+                    guidance = (
+                        "hold steady, move closer, find better light, center it, move "
+                        "what's blocking it"
+                        if source == "camera" else
+                        "scroll to the right part, zoom in, switch to the right window/tab"
+                    )
                     parts.append({"text": (
                         f"[VISION_OBSERVATION] Here {'is' if n == 1 else 'are'} {n} fresh "
-                        f"view{'s' if n != 1 else ''} from the user's own camera, sampled "
+                        f"view{'s' if n != 1 else ''} from the user's own {noun}, sampled "
                         f"moments apart, about: \"{session['text']}\". If you can clearly "
                         f"identify or answer this, answer now naturally — do NOT call "
-                        f"web_camera_vision again. If it's not clear enough (too blurry, "
-                        f"too dark, too far away, partly out of frame, glare, or blocked), "
-                        f"briefly and naturally tell the user what to adjust — hold "
-                        f"steady, move closer, find better light, center it, move what's "
-                        f"blocking it — THEN call web_camera_vision again so you can see "
-                        f"another look once they've adjusted. Never confidently describe "
+                        f"{tool_name} again. If it's not clear enough (too blurry, too "
+                        f"dark, too far away, partly out of frame/view, glare, or "
+                        f"blocked), briefly and naturally tell the user what to adjust — "
+                        f"{guidance} — THEN call {tool_name} again so you can see another "
+                        f"look once they've adjusted. Never confidently describe "
                         f"something you genuinely can't make out."
                     )})
                     # Captured before the await below — see this dict's own
@@ -4464,7 +4685,7 @@ class JarvisLive:
                             # (never the frame content itself, only a count).
                             asyncio.create_task(self._dashboard.broadcast({
                                 "type": "sys",
-                                "text": f"👁 Analyzing {n} camera view{'s' if n != 1 else ''}…",
+                                "text": f"👁 Analyzing {n} {noun} view{'s' if n != 1 else ''}…",
                             }))
                         await self.session.send_client_content(turns={"parts": parts}, turn_complete=True)
                         current = self._web_vision_session
@@ -4479,14 +4700,17 @@ class JarvisLive:
                         print(f"[WebVision] Burst send failed: {e}")
                 else:
                     # Already answered this burst — waiting to see if Gemini
-                    # asks for another look (a fresh web_camera_vision call
-                    # re-arms awaiting_burst above). No re-call within the
-                    # grace window means the vision request is genuinely done.
-                    if (now - (session.get("last_answered_at") or now)) >= WEB_VISION_GRACE_S:
-                        print(f"[WebVision] ✅ session finished, no further look requested ({session['request_id']})")
+                    # asks for another look (a fresh web_camera_vision/
+                    # web_screen_vision call re-arms awaiting_burst above).
+                    # No re-call within the grace window (per-mode: a
+                    # guided task gets much more patience than a quick
+                    # look — see WEB_VISION_GRACE_S) means the request is
+                    # genuinely done.
+                    grace_s = WEB_VISION_GRACE_S[session.get("mode", "quick")]
+                    if (now - (session.get("last_answered_at") or now)) >= grace_s:
+                        print(f"[WebVision] ✅ session finished, no further look requested ({session['request_id']}, source={source})")
                         self._web_vision_session = None
-                        if self._dashboard:
-                            asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
+                        asyncio.create_task(_broadcast_stop(session))
             except asyncio.CancelledError:
                 raise
             except Exception as e:

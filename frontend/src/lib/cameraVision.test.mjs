@@ -51,7 +51,7 @@ Object.defineProperty(globalThis, "navigator", {
   value: mockNavigator, configurable: true, writable: true,
 });
 
-const { startCameraVision, stopCameraVision, getStream, activeRequestId } =
+const { startCameraVision, stopCameraVision, getStream, activeRequestId, flipCameraFacing, currentFacing } =
   await import("./cameraVision.js");
 
 test("startCameraVision requests facingMode:{ideal:...} — never {exact:...}", async () => {
@@ -129,6 +129,80 @@ test("starting for a DIFFERENT requestId stops the previous stream first", async
   await startCameraVision("req-6b", "environment", {});
   assert.equal(oldTrack.stopped, true, "switching requestId must stop the old MediaStream's tracks");
   assert.equal(activeRequestId(), "req-6b");
+  stopCameraVision();
+});
+
+// ── Phase 1: camera flip ─────────────────────────────────────────────────
+
+test("flipCameraFacing() requests the opposite facingMode and stops the OLD stream only after success", async () => {
+  const oldTrack = { stopped: false, stop() { this.stopped = true; } };
+  mockNavigator.mediaDevices.getUserMedia = async () => ({ getTracks: () => [oldTrack] });
+  await startCameraVision("req-flip-1", "environment", {});
+  assert.equal(currentFacing(), "environment");
+
+  let newConstraints = null;
+  const newTrack = { stop() {} };
+  mockNavigator.mediaDevices.getUserMedia = async (c) => {
+    newConstraints = c;
+    return { getTracks: () => [newTrack] };
+  };
+  const result = await flipCameraFacing();
+  assert.equal(result.ok, true);
+  assert.equal(result.facing, "user");
+  assert.equal(newConstraints.video.facingMode.ideal, "user");
+  assert.ok(!("exact" in newConstraints.video.facingMode));
+  assert.equal(oldTrack.stopped, true, "the old stream's tracks must be stopped after a successful flip");
+  assert.equal(currentFacing(), "user");
+  stopCameraVision();
+});
+
+test("flipCameraFacing() flips back and forth (user -> environment) correctly", async () => {
+  mockNavigator.mediaDevices.getUserMedia = async () => ({ getTracks: () => [{ stop() {} }] });
+  await startCameraVision("req-flip-2", "user", {});
+  assert.equal(currentFacing(), "user");
+  const r1 = await flipCameraFacing();
+  assert.equal(r1.facing, "environment");
+  const r2 = await flipCameraFacing();
+  assert.equal(r2.facing, "user");
+  stopCameraVision();
+});
+
+test("a failed flip (single-camera device / OverconstrainedError) leaves the CURRENT stream untouched and running", async () => {
+  const currentTrack = { stopped: false, stop() { this.stopped = true; } };
+  mockNavigator.mediaDevices.getUserMedia = async () => ({ getTracks: () => [currentTrack] });
+  await startCameraVision("req-flip-3", "environment", {});
+
+  mockNavigator.mediaDevices.getUserMedia = async () => {
+    const err = new Error("no second camera");
+    err.name = "OverconstrainedError";
+    throw err;
+  };
+  const result = await flipCameraFacing();
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "single_camera");
+  assert.equal(currentTrack.stopped, false, "a failed flip must never stop the currently-active stream");
+  assert.equal(currentFacing(), "environment", "facing must not change on a failed flip");
+  assert.ok(getStream(), "the session must still be streaming after a failed flip");
+  stopCameraVision();
+});
+
+test("flipCameraFacing() is a no-op (never calls getUserMedia) when no session is active", async () => {
+  let calls = 0;
+  mockNavigator.mediaDevices.getUserMedia = async () => {
+    calls += 1;
+    return { getTracks: () => [{ stop() {} }] };
+  };
+  const result = await flipCameraFacing();
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "not_active");
+  assert.equal(calls, 0);
+});
+
+test("flip never creates a new session/requestId — activeRequestId is unchanged before and after", async () => {
+  mockNavigator.mediaDevices.getUserMedia = async () => ({ getTracks: () => [{ stop() {} }] });
+  await startCameraVision("req-flip-4", "environment", {});
+  await flipCameraFacing();
+  assert.equal(activeRequestId(), "req-flip-4");
   stopCameraVision();
 });
 

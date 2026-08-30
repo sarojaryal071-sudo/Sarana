@@ -30,7 +30,8 @@ from dashboard.server import DashboardServer
 from core.headless_surface import HeadlessSurface
 from main import (
     JarvisLive, DESKTOP_ONLY_TOOLS, WEB_ONLY_TOOLS, TOOL_DECLARATIONS,
-    WEB_VISION_BURST_MAX_FRAMES,
+    WEB_VISION_BURST_MAX_FRAMES, WEB_VISION_SESSION_MAX_S, WEB_VISION_GRACE_S,
+    WEB_VISION_MODES, WEB_VISION_SOURCES, _new_web_vision_session,
 )
 
 
@@ -67,8 +68,10 @@ class _RecordingDashboard:
 
     def __init__(self):
         self._vision_frame_queue = asyncio.Queue()
-        self.requests = []   # (request_id, facing)
-        self.stops = []      # request_id
+        self.requests = []          # (request_id, facing) — camera
+        self.stops = []             # request_id — camera
+        self.screen_requests = []   # request_id — Phase 4
+        self.screen_stops = []      # request_id — Phase 4
         self.sys_messages = []   # diagnostic "sys" broadcasts (see main.py's
                                   # VISION_REQUESTED/VISION_FRAME_RECEIVED notes)
 
@@ -77,6 +80,12 @@ class _RecordingDashboard:
 
     async def broadcast_camera_vision_stop(self, request_id):
         self.stops.append(request_id)
+
+    async def broadcast_screen_vision_request(self, request_id):
+        self.screen_requests.append(request_id)
+
+    async def broadcast_screen_vision_stop(self, request_id):
+        self.screen_stops.append(request_id)
 
     async def broadcast(self, msg):
         if msg.get("type") == "sys":
@@ -550,9 +559,13 @@ def test_web_vision_frame_processing_never_writes_a_file() -> None:
 def test_web_capabilities_text_forbids_answering_without_a_real_look() -> None:
     jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
     text = jarvis._build_config().system_instruction
-    assert "you have NO knowledge of what the user is currently holding" in text
+    assert "you have NO knowledge of what the user is currently" in text
     assert "VISION_OBSERVATION" in text
-    assert "you MUST call web_camera_vision and wait" in text
+    assert "you MUST call the matching tool and wait" in text
+    # Phase 4: the same hallucination guard must cover screen vision too,
+    # not just camera.
+    assert "web_screen_vision" in text
+    assert "NO knowledge of what is currently on their screen" in text
     print("test_web_capabilities_text_forbids_answering_without_a_real_look: PASS")
 
 
@@ -749,6 +762,258 @@ def test_frame_processing_survives_an_unexpected_exception() -> None:
     print("test_frame_processing_survives_an_unexpected_exception: PASS")
 
 
+# ── Phase 5: Visual Context Manager (the shared session factory) ─────────
+
+def test_new_web_vision_session_factory_sets_source_mode_and_per_mode_deadline() -> None:
+    now = time.monotonic()
+    s = _new_web_vision_session("id-1", "camera", "quick", "look", now)
+    assert s["source"] == "camera"
+    assert s["mode"] == "quick"
+    assert s["deadline"] == now + WEB_VISION_SESSION_MAX_S["quick"]
+    assert s["awaiting_burst"] is True
+    assert s["frames"] == []
+    print("test_new_web_vision_session_factory_sets_source_mode_and_per_mode_deadline: PASS")
+
+
+def test_guided_mode_gets_a_much_longer_deadline_and_grace_than_quick() -> None:
+    now = time.monotonic()
+    quick = _new_web_vision_session("id-2", "camera", "quick", "look", now)
+    guided = _new_web_vision_session("id-3", "camera", "guided", "look", now)
+    assert guided["deadline"] > quick["deadline"]
+    assert WEB_VISION_GRACE_S["guided"] > WEB_VISION_GRACE_S["quick"]
+    print("test_guided_mode_gets_a_much_longer_deadline_and_grace_than_quick: PASS")
+
+
+def test_web_vision_sources_and_modes_are_exactly_the_expected_two_values_each() -> None:
+    assert WEB_VISION_SOURCES == {"camera", "screen"}
+    assert WEB_VISION_MODES == {"quick", "guided"}
+    print("test_web_vision_sources_and_modes_are_exactly_the_expected_two_values_each: PASS")
+
+
+# ── Phase 2: guided mode via the tool call itself ─────────────────────────
+
+def test_web_camera_vision_mode_guided_uses_the_longer_deadline() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        await jarvis._execute_tool(_fc("web_camera_vision", text="help me navigate", mode="guided"))
+        await asyncio.sleep(0.05)
+        session = jarvis._web_vision_session
+        assert session["mode"] == "guided"
+        assert session["deadline"] - session["started"] == WEB_VISION_SESSION_MAX_S["guided"]
+    asyncio.run(_run())
+    print("test_web_camera_vision_mode_guided_uses_the_longer_deadline: PASS")
+
+
+def test_web_camera_vision_omitted_mode_defaults_to_quick() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        await jarvis._execute_tool(_fc("web_camera_vision", text="what's this"))
+        await asyncio.sleep(0.05)
+        assert jarvis._web_vision_session["mode"] == "quick"
+    asyncio.run(_run())
+    print("test_web_camera_vision_omitted_mode_defaults_to_quick: PASS")
+
+
+def test_web_camera_vision_invalid_mode_falls_back_to_quick() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        await jarvis._execute_tool(_fc("web_camera_vision", text="x", mode="bogus"))
+        await asyncio.sleep(0.05)
+        assert jarvis._web_vision_session["mode"] == "quick"
+    asyncio.run(_run())
+    print("test_web_camera_vision_invalid_mode_falls_back_to_quick: PASS")
+
+
+# ── Phase 4: web_screen_vision tool ────────────────────────────────────────
+
+def test_web_screen_vision_is_web_only_and_never_desktop_only() -> None:
+    assert "web_screen_vision" in WEB_ONLY_TOOLS
+    assert "web_screen_vision" not in DESKTOP_ONLY_TOOLS
+    print("test_web_screen_vision_is_web_only_and_never_desktop_only: PASS")
+
+
+def test_web_screen_vision_blocked_on_desktop_with_screen_process_screen_redirect() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=True)   # desktop
+        fr = await jarvis._execute_tool(_fc("web_screen_vision", text="what's on my screen"))
+        result = fr.response["result"]
+        assert "[CAPABILITY_UNAVAILABLE]" in result
+        assert "angle='screen'" in result
+        assert "angle='camera'" not in result, "desktop redirect must recommend the SCREEN angle, not camera, for web_screen_vision"
+        assert jarvis._web_vision_session is None
+    asyncio.run(_run())
+    print("test_web_screen_vision_blocked_on_desktop_with_screen_process_screen_redirect: PASS")
+
+
+def test_web_camera_vision_blocked_on_desktop_still_recommends_camera_angle() -> None:
+    """Regression: the desktop-gating message must stay tool-aware after
+    web_screen_vision was added — camera still gets camera advice."""
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        fr = await jarvis._execute_tool(_fc("web_camera_vision", text="x"))
+        result = fr.response["result"]
+        assert "angle='camera'" in result
+        assert "angle='screen'" not in result
+    asyncio.run(_run())
+    print("test_web_camera_vision_blocked_on_desktop_still_recommends_camera_angle: PASS")
+
+
+def test_web_screen_vision_opens_session_and_broadcasts_screen_request() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        fr = await jarvis._execute_tool(_fc("web_screen_vision", text="what's on my screen"))
+        await asyncio.sleep(0.05)
+        assert "[VISION_ACTIVE]" in fr.response["result"]
+        session = jarvis._web_vision_session
+        assert session is not None
+        assert session["source"] == "screen"
+        assert len(jarvis._dashboard.screen_requests) == 1
+        assert jarvis._dashboard.screen_requests[0] == session["request_id"]
+        assert not jarvis._dashboard.requests, "a screen request must never also broadcast a camera_vision_request"
+    asyncio.run(_run())
+    print("test_web_screen_vision_opens_session_and_broadcasts_screen_request: PASS")
+
+
+def test_web_camera_vision_blocked_while_screen_session_already_active() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        await jarvis._execute_tool(_fc("web_screen_vision", text="check my screen"))
+        await asyncio.sleep(0.05)
+        screen_request_id = jarvis._web_vision_session["request_id"]
+        jarvis._web_vision_last_call = 0.0   # bypass cooldown for this test
+
+        fr = await jarvis._execute_tool(_fc("web_camera_vision", text="what's in my hand"))
+        result = fr.response["result"]
+        assert "screen-view request is still open" in result
+        assert jarvis._web_vision_session["request_id"] == screen_request_id, "the active screen session must be untouched"
+        assert jarvis._web_vision_session["source"] == "screen"
+        assert not jarvis._dashboard.requests, "camera must never be broadcast while a screen session owns the slot"
+    asyncio.run(_run())
+    print("test_web_camera_vision_blocked_while_screen_session_already_active: PASS")
+
+
+def test_web_screen_vision_blocked_while_camera_session_already_active() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        await jarvis._execute_tool(_fc("web_camera_vision", text="what's in my hand"))
+        await asyncio.sleep(0.05)
+        camera_request_id = jarvis._web_vision_session["request_id"]
+        jarvis._web_vision_last_call = 0.0
+
+        fr = await jarvis._execute_tool(_fc("web_screen_vision", text="what's on my screen"))
+        result = fr.response["result"]
+        assert "camera-view request is still open" in result
+        assert jarvis._web_vision_session["request_id"] == camera_request_id
+        assert jarvis._web_vision_session["source"] == "camera"
+        assert not jarvis._dashboard.screen_requests
+    asyncio.run(_run())
+    print("test_web_screen_vision_blocked_while_camera_session_already_active: PASS")
+
+
+def test_web_screen_vision_declaration_distinguishes_from_camera_and_upload() -> None:
+    decl = next(t for t in TOOL_DECLARATIONS if t["name"] == "web_screen_vision")
+    desc = decl["description"]
+    assert "COMPLETELY SEPARATE capability from web_camera_vision" in desc
+    assert "MANDATORY" in desc
+    print("test_web_screen_vision_declaration_distinguishes_from_camera_and_upload: PASS")
+
+
+# ── real DashboardServer (not the fake) — broadcast method shapes ────────
+
+def test_real_dashboard_broadcast_screen_vision_request_and_stop_shapes() -> None:
+    """Confirms the actual DashboardServer methods (not the test fake)
+    send the correct WS message shape — mirrors how vision_frame/
+    vision_control are exercised against the real server elsewhere in
+    this file."""
+    async def _run():
+        token = "test-token-screen-broadcast"
+        server = _server_with_token(token)
+        client = TestClient(server.app)
+        with client.websocket_connect(f"/ws?token={token}") as ws:
+            await server.broadcast_screen_vision_request("req-real-1")
+            msg1 = ws.receive_json()
+            assert msg1 == {"type": "screen_vision_request", "request_id": "req-real-1"}
+
+            await server.broadcast_screen_vision_stop("req-real-1")
+            msg2 = ws.receive_json()
+            assert msg2 == {"type": "screen_vision_stop", "request_id": "req-real-1"}
+    asyncio.run(_run())
+    print("test_real_dashboard_broadcast_screen_vision_request_and_stop_shapes: PASS")
+
+
+# ── source-awareness in the frame consumer (camera vs screen) ────────────
+
+def test_screen_session_stop_uses_screen_broadcast_never_camera_broadcast() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        jarvis.session = _FakeVisionSession()
+        now = time.monotonic()
+        jarvis._web_vision_session = _new_web_vision_session("req-scr-stop", "screen", "quick", "look", now)
+        await jarvis._dashboard._vision_frame_queue.put({
+            "request_id": "req-scr-stop", "control": "stop", "reason": "user_stopped",
+        })
+        await _run_frames_tick(jarvis, iterations=20, delay=0.05)
+        assert jarvis._dashboard.screen_stops == ["req-scr-stop"]
+        assert jarvis._dashboard.stops == [], "a screen session must never fire the camera stop broadcast"
+    asyncio.run(_run())
+    print("test_screen_session_stop_uses_screen_broadcast_never_camera_broadcast: PASS")
+
+
+def test_screen_burst_injection_uses_screen_wording_not_camera() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        fake_session = _FakeVisionSession()
+        jarvis.session = fake_session
+        now = time.monotonic()
+        jarvis._web_vision_session = _new_web_vision_session("req-scr-burst", "screen", "quick", "what does this say", now)
+        jarvis._web_vision_session["burst_armed_at"] = now - 100   # force burst-ready immediately
+        await jarvis._dashboard._vision_frame_queue.put({
+            "request_id": "req-scr-burst", "seq": 0,
+            "mime_type": "image/jpeg", "data": _real_jpeg_bytes(),
+        })
+        await _run_frames_tick(jarvis, iterations=20, delay=0.05)
+        assert len(fake_session.calls) == 1
+        text = next(p["text"] for p in fake_session.calls[0]["turns"]["parts"] if "text" in p)
+        assert "web_screen_vision" in text
+        assert "web_camera_vision" not in text
+        assert "screen" in text
+    asyncio.run(_run())
+    print("test_screen_burst_injection_uses_screen_wording_not_camera: PASS")
+
+
+def test_screen_no_frames_uses_screen_diagnostic_wording() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        jarvis.session = _FakeVisionSession()
+        now = time.monotonic()
+        jarvis._web_vision_session = _new_web_vision_session("req-scr-empty", "screen", "quick", "look", now)
+        jarvis._web_vision_session["started"] = now - 10
+        jarvis._web_vision_session["burst_armed_at"] = now - 100
+        await _run_frames_tick(jarvis, iterations=20, delay=0.05)
+        assert any("No screen image arrived" in m for m in jarvis._dashboard.sys_messages)
+        assert jarvis._dashboard.screen_stops == ["req-scr-empty"]
+    asyncio.run(_run())
+    print("test_screen_no_frames_uses_screen_diagnostic_wording: PASS")
+
+
+def test_screen_hard_timeout_uses_screen_broadcast_and_wording() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        fake_session = _FakeVisionSession()
+        jarvis.session = fake_session
+        now = time.monotonic()
+        session = _new_web_vision_session("req-scr-timeout", "screen", "quick", "look", now)
+        session["deadline"] = now - 1   # already past
+        jarvis._web_vision_session = session
+        await _run_frames_tick(jarvis, iterations=10, delay=0.05)
+        assert jarvis._dashboard.screen_stops == ["req-scr-timeout"]
+        assert jarvis._dashboard.stops == []
+        text = fake_session.calls[0]["turns"]["parts"][0]["text"]
+        assert "The screen didn't provide" in text
+    asyncio.run(_run())
+    print("test_screen_hard_timeout_uses_screen_broadcast_and_wording: PASS")
+
+
 if __name__ == "__main__":
     test_web_camera_vision_is_web_only_and_never_desktop_only()
     test_web_camera_vision_blocked_on_desktop_with_screen_process_redirect()
@@ -784,4 +1049,22 @@ if __name__ == "__main__":
     test_burst_injection_emits_an_analyzing_diagnostic()
     test_no_frames_gives_up_emits_a_no_image_diagnostic()
     test_frame_processing_survives_an_unexpected_exception()
+    test_new_web_vision_session_factory_sets_source_mode_and_per_mode_deadline()
+    test_guided_mode_gets_a_much_longer_deadline_and_grace_than_quick()
+    test_web_vision_sources_and_modes_are_exactly_the_expected_two_values_each()
+    test_web_camera_vision_mode_guided_uses_the_longer_deadline()
+    test_web_camera_vision_omitted_mode_defaults_to_quick()
+    test_web_camera_vision_invalid_mode_falls_back_to_quick()
+    test_web_screen_vision_is_web_only_and_never_desktop_only()
+    test_web_screen_vision_blocked_on_desktop_with_screen_process_screen_redirect()
+    test_web_camera_vision_blocked_on_desktop_still_recommends_camera_angle()
+    test_web_screen_vision_opens_session_and_broadcasts_screen_request()
+    test_web_camera_vision_blocked_while_screen_session_already_active()
+    test_web_screen_vision_blocked_while_camera_session_already_active()
+    test_web_screen_vision_declaration_distinguishes_from_camera_and_upload()
+    test_screen_session_stop_uses_screen_broadcast_never_camera_broadcast()
+    test_screen_burst_injection_uses_screen_wording_not_camera()
+    test_screen_no_frames_uses_screen_diagnostic_wording()
+    test_screen_hard_timeout_uses_screen_broadcast_and_wording()
+    test_real_dashboard_broadcast_screen_vision_request_and_stop_shapes()
     print("\nAll web-camera-vision tests passed.")

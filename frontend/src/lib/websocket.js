@@ -10,15 +10,19 @@
 //                        as the desktop screen_process tool already uses
 //                        (see main.py's _process_dashboard_image_commands()).
 //                      {"type": "vision_frame", "request_id", "seq",
-//                        "mime_type", "data": <base64>}  — web LIVE camera
-//                        vision: one sampled camera frame for an ALREADY-
-//                        open request (see main.py's web_camera_vision
-//                        tool / lib/cameraVision.js). Never sent unless a
-//                        "camera_vision_request" was received first.
+//                        "mime_type", "data": <base64>}  — web visual
+//                        context: one sampled frame (camera OR screen —
+//                        see components/VisionStage.jsx) for an ALREADY-
+//                        open request (see main.py's web_camera_vision/
+//                        web_screen_vision tools / lib/cameraVision.js /
+//                        lib/screenVision.js). Never sent unless a
+//                        "camera_vision_request"/"screen_vision_request"
+//                        was received first.
 //                      {"type": "vision_control", "request_id",
 //                        "action": "stop", "reason"}  — client-side
 //                        lifecycle signal for an active vision request
-//                        (user pressed Stop, camera failed mid-stream)
+//                        (user pressed Stop/INTERRUPT, tab backgrounded,
+//                        camera/screen capture failed mid-stream)
 //                      {"type": "device_action_result", ...}  (not sent by
 //                        this frontend — that's a Phase 6 desktop-agent
 //                        message, reserved but not implemented anywhere yet)
@@ -37,10 +41,17 @@
 //                      {"type": "camera_vision_request", "request_id",
 //                        "facing"}  — web live camera vision: the backend
 //                        wants the browser to open its camera (see
-//                        components/CameraVisionPanel.jsx)
+//                        components/VisionStage.jsx)
 //                      {"type": "camera_vision_stop", "request_id"}  — the
 //                        backend's own observation session ended; stop the
 //                        camera for this request_id
+//                      {"type": "screen_vision_request", "request_id"}  —
+//                        web screen vision (Phase 4): the backend wants
+//                        the browser to start screen sharing (see
+//                        lib/screenVision.js) — mirrors
+//                        "camera_vision_request" exactly, no "facing"
+//                      {"type": "screen_vision_stop", "request_id"}  —
+//                        mirrors "camera_vision_stop" exactly
 //                      {"type": "device_action", ...}  (reserved, unsent today)
 //                      {"type": "pong", "t": <the ping's own timestamp>}
 //                        (handled internally, never forwarded to onMessage)

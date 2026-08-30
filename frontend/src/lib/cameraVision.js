@@ -38,6 +38,7 @@ let _seq = 0;
 let _activeRequestId = null;
 let _onFrame = null;      // (base64, mimeType, seq) => void
 let _onStatus = null;     // (status) => void — "starting"|"streaming"|"denied"|"unavailable"|"stopped"
+let _currentFacing = "environment";   // Phase 1: which physical camera is live right now
 
 function _setStatus(s) {
   try { _onStatus?.(s); } catch { /* a UI callback failing must never break capture */ }
@@ -146,6 +147,7 @@ export async function startCameraVision(requestId, facing, { onFrame, onStatus }
   }
 
   _activeRequestId = requestId;
+  _currentFacing = facing === "user" ? "user" : "environment";
   _seq = 0;
 
   _video = document.createElement("video");
@@ -160,10 +162,67 @@ export async function startCameraVision(requestId, facing, { onFrame, onStatus }
   return true;
 }
 
+/**
+ * Phase 1 — camera flip: switches the live stream between the rear
+ * ("environment") and front ("user") camera WITHOUT touching the
+ * request_id, the Gemini session, the WebSocket, or the sampling
+ * loop/callbacks — only the underlying MediaStream is replaced. Safe to
+ * call only while a session is already streaming (no-op otherwise).
+ *
+ * Requests the NEW stream before stopping the old one, so a failure
+ * (OverconstrainedError — no second camera on this device; NotAllowedError;
+ * NotReadableError — camera busy) leaves the current stream completely
+ * untouched and still running; only a genuine success swaps anything.
+ * Callers (see VisionStage.jsx) must re-read getStream() and rebind their
+ * own preview <video>'s srcObject afterward — this module never assumes
+ * which element(s) are displaying the feed.
+ *
+ * Resolves {ok: true, facing} on success, or {ok: false, reason} on
+ * failure — never throws.
+ */
+export async function flipCameraFacing() {
+  if (!_activeRequestId || !_stream) {
+    return { ok: false, reason: "not_active" };
+  }
+  const nextFacing = _currentFacing === "user" ? "environment" : "user";
+  let newStream;
+  try {
+    newStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: nextFacing } },
+      audio: false,
+    });
+  } catch (e) {
+    // Old stream is untouched — the active session continues exactly as
+    // it was; the caller decides how to tell the user this failed.
+    const reason =
+      e?.name === "OverconstrainedError" || e?.name === "NotFoundError"
+        ? "single_camera"
+        : e?.name === "NotAllowedError"
+          ? "denied"
+          : "unavailable";
+    return { ok: false, reason };
+  }
+
+  _stream.getTracks().forEach((t) => t.stop());
+  _stream = newStream;
+  _currentFacing = nextFacing;
+  if (_video) {
+    _video.srcObject = newStream;
+    try { await _video.play(); } catch { /* autoplay quirks — sampling still resumes once frames flow */ }
+  }
+  return { ok: true, facing: nextFacing };
+}
+
+export function currentFacing() {
+  return _currentFacing;
+}
+
 /** The live MediaStream for the current session, or null — components
  * wanting to DISPLAY the feed bind their own <video> element's
  * srcObject to this (a stream can back more than one <video> at once);
- * the internal _video above is sampling-only and never mounted. */
+ * the internal _video above is sampling-only and never mounted. Re-read
+ * this after a successful flipCameraFacing() — the stream object itself
+ * changes. */
 export function getStream() {
   return _stream;
 }
@@ -187,6 +246,7 @@ export function stopCameraVision() {
   }
   _canvas = null;
   _activeRequestId = null;
+  _currentFacing = "environment";
   _onFrame = null;
   _setStatus("stopped");
   _onStatus = null;

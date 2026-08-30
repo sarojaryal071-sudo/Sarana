@@ -12,6 +12,7 @@ import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
 import { MicStreamer } from "./lib/mic";
 import { stopCameraVision } from "./lib/cameraVision";
+import { stopScreenVision } from "./lib/screenVision";
 import LoginScreen, { readStoredSession, clearStoredToken } from "./components/LoginScreen";
 import Header from "./components/Header";
 import Orb from "./components/Orb";
@@ -20,7 +21,7 @@ import ContentPanel from "./components/ContentPanel";
 import Controls from "./components/Controls";
 import ConnectionBanner from "./components/ConnectionBanner";
 import ToolsRail from "./components/ToolsRail";
-import CameraVisionPanel from "./components/CameraVisionPanel";
+import VisionStage from "./components/VisionStage";
 
 const SESSION_RETRY_MS = 4000;
 
@@ -69,14 +70,16 @@ export default function App() {
   const micRef = useRef(null);
   const micAutoStartedRef = useRef(false); // item 1: auto-start mic once per login, not per utterance
   const locationRequestedRef = useRef(false); // location foundation: one browser location attempt per login
-  // Web live camera vision: {requestId, facing} | null — mirrors the
-  // backend's own self._web_vision_session (main.py), set by the
-  // "camera_vision_request" WS message and cleared by "camera_vision_stop"
-  // or the existing INTERRUPT control (see handleInterrupt) — no separate
-  // Stop button exists for this. Deliberately separate state from
-  // `pendingImage` (Controls.jsx) — an entirely different feature. While
-  // non-null, CameraVisionPanel renders in place of Orb (see the render
-  // below) — the two are never both mounted at once.
+  // Web visual context (Phases 1-5): {source: "camera"|"screen",
+  // requestId, facing} | null — mirrors the backend's own
+  // self._web_vision_session (main.py), set by the "camera_vision_request"/
+  // "screen_vision_request" WS messages and cleared by
+  // "camera_vision_stop"/"screen_vision_stop" or the existing INTERRUPT
+  // control (see handleInterrupt) — no separate Stop button exists for
+  // this. Deliberately separate state from `pendingImage` (Controls.jsx)
+  // — an entirely different feature. While non-null, VisionStage renders
+  // in place of Orb (see the render below) — the two are never both
+  // mounted at once.
   const [visionRequest, setVisionRequest] = useState(null);
 
   // ── GET /api/session — unauthenticated, works before any login ─────────
@@ -233,28 +236,41 @@ export default function App() {
             dispatch({ type: "SYS_MESSAGE", text: msg.error || "That image couldn't be sent.", ts: null });
             break;
           case "vision_error":
-            // Web live camera vision: dashboard/server.py rejected a
-            // "vision_frame" — same treatment as image_error. A single
-            // rejected sampled frame isn't fatal to the session (more
-            // frames follow every ~900ms — see lib/cameraVision.js), so
-            // this is surfaced but doesn't itself stop the camera.
-            dispatch({ type: "SYS_MESSAGE", text: msg.error || "A camera frame couldn't be sent.", ts: null });
+            // Web visual context (camera or screen — see VisionStage.jsx):
+            // dashboard/server.py rejected a "vision_frame" — same
+            // treatment as image_error. A single rejected sampled frame
+            // isn't fatal to the session (more frames follow shortly), so
+            // this is surfaced but doesn't itself stop capture.
+            dispatch({ type: "SYS_MESSAGE", text: msg.error || "A frame couldn't be sent.", ts: null });
             break;
           case "camera_vision_request":
             // Backend (main.py's web_camera_vision tool) wants to look
-            // through the browser's camera — mounts CameraVisionPanel,
-            // which owns the actual getUserMedia lifecycle (see
+            // through the browser's camera — mounts VisionStage, which
+            // owns the actual getUserMedia lifecycle (see
             // lib/cameraVision.js). A second request while one is already
             // active (Gemini asking for "another look") just replaces the
-            // facing/requestId — the panel's own effect re-arms sampling.
-            setVisionRequest({ requestId: msg.request_id, facing: msg.facing || "environment" });
+            // facing/requestId — VisionStage's own effect re-arms sampling.
+            setVisionRequest({ source: "camera", requestId: msg.request_id, facing: msg.facing || "environment" });
             break;
           case "camera_vision_stop":
             // The backend's own observation session ended (answered,
             // timed out, or nothing arrived) — stop and unmount, but only
             // if this is actually the CURRENTLY active request (never let
             // a stale stop for an old request tear down a newer one).
-            setVisionRequest((cur) => (cur && cur.requestId === msg.request_id ? null : cur));
+            setVisionRequest((cur) => (cur && cur.source === "camera" && cur.requestId === msg.request_id ? null : cur));
+            break;
+          case "screen_vision_request":
+            // Phase 4 — backend (main.py's web_screen_vision tool) wants
+            // to see the user's screen — mounts the SAME VisionStage
+            // component with source="screen", which owns the
+            // getDisplayMedia lifecycle instead (see lib/screenVision.js).
+            // Never confused with camera_vision_request — a completely
+            // separate capability/browser API, just sharing the same thin
+            // UI shell (see VisionStage.jsx's own header note).
+            setVisionRequest({ source: "screen", requestId: msg.request_id });
+            break;
+          case "screen_vision_stop":
+            setVisionRequest((cur) => (cur && cur.source === "screen" && cur.requestId === msg.request_id ? null : cur));
             break;
           case "device_action":
             // Reserved for Phase 6's desktop-agent dispatch — nothing sends
@@ -345,13 +361,16 @@ export default function App() {
       // permissionManager.resetSession()'s own docstring for why that
       // precedent, not localStorage, is what this was modeled on).
       permissionManager.resetSession();
-      // Web live camera vision: a session ending (logout/token change)
-      // must never leave a camera running unattended — stop it directly
-      // (CameraVisionPanel's own unmount effect would also catch this,
-      // but the panel only unmounts on the NEXT render; this is immediate)
-      // and clear the request so the panel doesn't try to reuse a stale
-      // requestId if a new login starts.
+      // Web visual context: a session ending (logout/token change) must
+      // never leave a camera or screen share running unattended — stop
+      // both directly (VisionStage's own unmount effect would also catch
+      // this, but it only unmounts on the NEXT render; this is immediate)
+      // and clear the request so it doesn't try to reuse a stale
+      // requestId if a new login starts. Calling the "wrong" source's
+      // stop is always a harmless no-op (see each lib's own idempotent
+      // stop function).
       stopCameraVision();
+      stopScreenVision();
       setVisionRequest(null);
     };
   }, [state.authenticationState, state.token, dispatch]);
@@ -529,10 +548,10 @@ export default function App() {
   // STATUS_MESSAGE case).
   function handleInterrupt() {
     audioRef.current?.stopPlayback();
-    // Web live camera vision: the existing INTERRUPT control doubles as
-    // the camera's stop control too — no new/separate button was added
-    // for this (see CameraVisionPanel.jsx, which no longer renders one).
-    // A no-op when no vision request is active.
+    // Web visual context: the existing INTERRUPT control doubles as the
+    // camera/screen-share stop control too — no new/separate button was
+    // added for this (see VisionStage.jsx, which renders no Stop button
+    // of its own). A no-op when no vision request is active.
     if (visionRequest) {
       handleVisionStopped("user_interrupt");
     }
@@ -586,9 +605,10 @@ export default function App() {
     }
   }
 
-  // Web live camera vision: forwards one sampled frame from
-  // CameraVisionPanel (lib/cameraVision.js) over the same authenticated
-  // WS as everything else — see websocket.js's sendVisionFrame() / main.py's
+  // Web visual context: forwards one sampled frame from VisionStage
+  // (lib/cameraVision.js or lib/screenVision.js, whichever source is
+  // active) over the same authenticated WS as everything else — see
+  // websocket.js's sendVisionFrame() / main.py's
   // _process_web_vision_frames(). Deliberately no dispatch/log entry per
   // frame (several arrive per second-ish; that would flood the Activity
   // Log) — the conversation itself is what SARANA says once it evaluates
@@ -598,10 +618,10 @@ export default function App() {
     socketRef.current?.sendVisionFrame(visionRequest.requestId, base64, mimeType, seq);
   }
 
-  // Fired when the user presses Stop in the panel, or the camera itself
-  // fails mid-stream — tells the backend so it can end
-  // self._web_vision_session immediately instead of waiting out its own
-  // grace/timeout window, then clears local state.
+  // Fired when the user presses INTERRUPT while active, the tab is
+  // backgrounded, or camera/screen capture fails mid-stream — tells the
+  // backend so it can end self._web_vision_session immediately instead
+  // of waiting out its own grace/timeout window, then clears local state.
   function handleVisionStopped(reason) {
     if (visionRequest) {
       socketRef.current?.sendVisionControl(visionRequest.requestId, "stop", reason);
@@ -676,13 +696,14 @@ export default function App() {
           <ToolsRail tools={state.tools} />
         </div>
         <div className="panel-center">
-          {/* Web live camera vision: the live preview replaces the animated
-              orb in its own slot — never a second, separate floating box
-              (see CameraVisionPanel.jsx, which renders into the identical
-              "orb-stage" area Orb.jsx itself uses). Exactly one of the two
-              is ever mounted. */}
+          {/* Web visual context (camera or screen): the live preview
+              replaces the animated orb in its own slot — never a second,
+              separate floating box (see VisionStage.jsx, which renders
+              into the identical "orb-stage" area Orb.jsx itself uses).
+              Exactly one of the two is ever mounted. */}
           {authenticated && visionRequest ? (
-            <CameraVisionPanel
+            <VisionStage
+              source={visionRequest.source}
               requestId={visionRequest.requestId}
               facing={visionRequest.facing}
               onFrame={handleVisionFrame}

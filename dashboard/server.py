@@ -32,25 +32,30 @@ WSS /ws  (existing route, extended, fully backward compatible)
                                   commands(), which injects it into the
                                   SAME live Gemini session desktop's
                                   screen_process tool already uses
-        "vision_frame"          — web LIVE camera vision: one sampled
-                                  browser camera frame ({"request_id",
-                                  "seq", "mime_type", "data": <base64>}),
-                                  validated here exactly like
-                                  "image_command" and queued to
-                                  self._vision_frame_queue; see main.py's
-                                  web_camera_vision tool /
+        "vision_frame"          — web visual context (camera OR screen —
+                                  see Phase 4/5): one sampled frame
+                                  ({"request_id", "seq", "mime_type",
+                                  "data": <base64>}), validated here
+                                  exactly like "image_command" and queued
+                                  to self._vision_frame_queue; see main.py's
+                                  web_camera_vision/web_screen_vision tools /
                                   _process_web_vision_frames(), which
                                   batches several frames into short
                                   "observation bursts" before injecting
-                                  them into the same Gemini session
-        "vision_control"        — web live camera vision: a client-side
+                                  them into the same Gemini session. Which
+                                  source it came from is tracked entirely
+                                  by main.py's session state (via
+                                  request_id) — this handler treats camera
+                                  and screen frames identically
+        "vision_control"        — web visual context: a client-side
                                   lifecycle signal for an active vision
                                   request ({"request_id", "action": "stop",
                                   "reason"}) — e.g. the user pressed Stop,
-                                  or the browser's camera failed. Queued to
-                                  self._vision_frame_queue alongside actual
-                                  frames (main.py's consumer distinguishes
-                                  them by the presence of "control")
+                                  or the browser's camera/screen share
+                                  failed. Queued to self._vision_frame_queue
+                                  alongside actual frames (main.py's
+                                  consumer distinguishes them by the
+                                  presence of "control")
         "device_action_result" — protocol shape reserved for Phase 6
                                   (Desktop Device Agent); recognized so it
                                   doesn't fall through as noise, but nothing
@@ -85,6 +90,17 @@ WSS /ws  (existing route, extended, fully backward compatible)
                                    broadcast_camera_vision_stop()) — same
                                    non-history treatment as
                                    "camera_vision_request"
+        "screen_vision_request"  — web screen vision (Phase 4): server
+                                   asks the browser to start screen
+                                   sharing (getDisplayMedia) for a given
+                                   request_id (see
+                                   broadcast_screen_vision_request()) —
+                                   mirrors "camera_vision_request" exactly
+        "screen_vision_stop"     — web screen vision: server tells the
+                                   browser to stop screen sharing for a
+                                   given request_id (see
+                                   broadcast_screen_vision_stop()) —
+                                   mirrors "camera_vision_stop" exactly
         "device_action"         — protocol shape reserved for Phase 6;
                                    nothing sends this yet
 
@@ -1041,6 +1057,28 @@ class DashboardServer:
         broadcast_camera_vision_request() above."""
         await self._send_to_clients({
             "type": "camera_vision_stop",
+            "request_id": request_id,
+        })
+
+    async def broadcast_screen_vision_request(self, request_id: str) -> None:
+        """Web screen vision (Phase 4): server -> client signal asking the
+        browser to start screen sharing (getDisplayMedia -- see
+        main.py's web_screen_vision tool / lib/screenVision.js) and stream
+        sampled frames for the given request_id. Mirrors
+        broadcast_camera_vision_request() exactly -- same non-history
+        reasoning, same "live, one-off signal" treatment. No `facing`
+        (screen capture has no camera direction)."""
+        await self._send_to_clients({
+            "type": "screen_vision_request",
+            "request_id": request_id,
+        })
+
+    async def broadcast_screen_vision_stop(self, request_id: str) -> None:
+        """Web screen vision: server -> client signal telling the browser
+        to stop screen sharing for the given request_id. Mirrors
+        broadcast_camera_vision_stop() exactly."""
+        await self._send_to_clients({
+            "type": "screen_vision_stop",
             "request_id": request_id,
         })
 
@@ -2137,7 +2175,7 @@ class DashboardServer:
                         elif not b64 or len(b64) > MAX_IMAGE_B64_CHARS:
                             await websocket.send_json({
                                 "type": "vision_error", "request_id": request_id,
-                                "error": "That camera frame is too large to send.",
+                                "error": "That frame is too large to send.",
                             })
                         else:
                             try:
@@ -2147,12 +2185,12 @@ class DashboardServer:
                             if raw is None or len(raw) > MAX_IMAGE_BYTES:
                                 await websocket.send_json({
                                     "type": "vision_error", "request_id": request_id,
-                                    "error": "That camera frame couldn't be read.",
+                                    "error": "That frame couldn't be read.",
                                 })
                             elif _PIL_OK and not _looks_like_a_real_image(raw):
                                 await websocket.send_json({
                                     "type": "vision_error", "request_id": request_id,
-                                    "error": "That doesn't look like a valid camera frame.",
+                                    "error": "That doesn't look like a valid frame.",
                                 })
                             else:
                                 await self._vision_frame_queue.put({
