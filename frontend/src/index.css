@@ -461,98 +461,64 @@ input {
 }
 
 /* ── web live camera vision ─────────────────────────────────────────── */
-/* Small floating card, never fullscreen (see CameraVisionPanel.jsx) —
-   fixed to a corner so its position in the component tree doesn't
-   matter, and mobile/portrait-friendly (wide enough to read, never wider
-   than the viewport). Deliberately separate from .image-preview-* above —
-   a different feature, styled to match the same dark-cyan HUD language. */
-.vision-panel {
-  position: fixed;
-  right: 12px;
-  bottom: 88px; /* clears the docked Controls bar so it never overlaps typing */
-  width: min(260px, calc(100vw - 24px));
-  background: var(--panel);
-  border: 1px solid var(--border-b);
-  border-radius: 6px;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
-  z-index: 40;
-  overflow: hidden;
-}
-
-.vision-panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 8px;
-  background: var(--panel-2);
-  border-bottom: 1px solid var(--border);
-}
-
-.vision-panel-title {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.vision-panel-min {
-  flex-shrink: 0;
-  background: transparent;
-  border: 1px solid var(--border-a);
-  color: var(--pri);
-  border-radius: 4px;
-  min-width: 26px;
-  min-height: 26px;
-  cursor: pointer;
-  font-size: 12px;
-  line-height: 1;
-}
-.vision-panel-min:hover {
-  background: var(--pri-ghost);
-}
-
-.vision-panel-body {
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.vision-panel-video {
+/* The live preview renders INSIDE the exact same "orb-stage" area Orb.jsx
+   itself occupies (see CameraVisionPanel.jsx, which uses className=
+   "orb-stage" for its own wrapper — the two are never mounted together,
+   see App.jsx) — never a second/separate floating box. These rules only
+   style the video/overlay CONTENT within that already-existing, already-
+   positioned (.orb-stage is position:relative) area. */
+.vision-stage-video {
   width: 100%;
-  aspect-ratio: 4 / 3;
+  height: 100%;
   object-fit: cover;
-  border-radius: 4px;
-  border: 1px solid var(--border-a);
+  display: block;
   background: #000;
 }
 
-.vision-panel-permission p,
-.vision-panel-error {
-  margin: 0 0 6px;
-  font-size: 12px;
+/* Small, unobtrusive camera-active indicator — intentionally the only
+   camera-specific control-adjacent element in the main interface; the
+   existing INTERRUPT button (Controls.jsx) is what actually stops the
+   camera (see App.jsx's handleInterrupt) — no separate Stop button here. */
+.vision-stage-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text);
+  background: rgba(1, 13, 20, 0.75);
+  border: 1px solid var(--border-b);
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+/* Permission prompt / error states — an overlay within the SAME orb-stage
+   area (never a separate modal/card), covering it only while genuinely
+   needed (no active preview to show yet). */
+.vision-stage-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  padding: 16px;
+  background: rgba(1, 13, 20, 0.9);
+}
+
+.vision-stage-overlay p {
+  margin: 0;
+  font-size: 13px;
   color: var(--text-dim);
+  max-width: 32ch;
 }
 
-.vision-panel-error {
+.vision-stage-overlay p.vision-stage-error {
   color: var(--muted-c);
-}
-
-.vision-panel-stop {
-  min-height: 34px;
-  padding: 6px 10px;
-}
-
-/* Minimized: header only, body hidden entirely (see the component's own
-   conditional render) — the camera keeps sampling in the background
-   (lib/cameraVision.js has no idea the UI is minimized), only the
-   preview/controls are hidden. */
-.vision-panel-minimized {
-  width: auto;
 }
 
 /* ── login overlay ──────────────────────────────────────────────────── */

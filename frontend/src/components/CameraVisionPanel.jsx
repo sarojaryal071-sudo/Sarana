@@ -1,7 +1,13 @@
-// src/components/CameraVisionPanel.jsx — small floating live-camera
-// preview for SARANA Web Live Camera Vision (see lib/cameraVision.js,
-// main.py's web_camera_vision tool, dashboard/server.py's
+// src/components/CameraVisionPanel.jsx — live camera preview for SARANA
+// Web Live Camera Vision (see lib/cameraVision.js, main.py's
+// web_camera_vision tool, dashboard/server.py's
 // "camera_vision_request"/"camera_vision_stop" WS messages).
+//
+// Renders INTO the exact same "orb-stage" slot Orb.jsx normally occupies
+// (see App.jsx, which mounts exactly one of the two at a time) — this is
+// the visual centerpiece replacement, never a second/separate floating
+// box. Camera lifecycle logic (getUserMedia, permission gating, sampling)
+// is unchanged from before; only where its output is rendered changed.
 //
 // Deliberately separate from the existing photo-upload picker
 // (Controls.jsx's 📎/📷 buttons, lib/image.js) — this component never
@@ -9,10 +15,9 @@
 // mounted (requestId non-null) by App.jsx in direct response to a real
 // backend request; unmounting always stops the camera (see the cleanup
 // effect below), so there is no path that leaves the camera running with
-// nothing on screen.
-//
-// Never fullscreen — a small fixed-position card, mobile/portrait-
-// friendly, with an explicit Stop control and a minimize toggle.
+// nothing on screen. Stopping while mounted is done through the existing
+// INTERRUPT control (App.jsx's handleInterrupt), not a dedicated button
+// here — no new control was added to the interface for this.
 import { useEffect, useRef, useState } from "react";
 import { permissionManager } from "../lib/permissions";
 import { startCameraVision, stopCameraVision, getStream } from "../lib/cameraVision";
@@ -27,7 +32,6 @@ export default function CameraVisionPanel({ requestId, facing, onFrame, onStoppe
   const videoRef = useRef(null);
   // starting | streaming | prompt | denied | unavailable | sarana_disabled | stopped
   const [status, setStatus] = useState("starting");
-  const [minimized, setMinimized] = useState(false);
 
   function attachPreview() {
     const stream = getStream();
@@ -37,7 +41,6 @@ export default function CameraVisionPanel({ requestId, facing, onFrame, onStoppe
   useEffect(() => {
     if (!requestId) return undefined;
     let cancelled = false;
-    setMinimized(false);
 
     async function begin() {
       const ok = await startCameraVision(requestId, facing, {
@@ -82,11 +85,6 @@ export default function CameraVisionPanel({ requestId, facing, onFrame, onStoppe
     if (ok) attachPreview();
   }
 
-  function handleStop() {
-    stopCameraVision();
-    onStopped?.("user_stopped");
-  }
-
   // iOS Safari (and most mobile browsers) suspend a camera stream when the
   // tab/app is backgrounded — continuing to hold it open there is neither
   // reliable nor something the user can see is happening. Stop cleanly and
@@ -109,40 +107,28 @@ export default function CameraVisionPanel({ requestId, facing, onFrame, onStoppe
   const showVideo = status === "starting" || status === "streaming";
   const errorCopy = STATUS_COPY[status];
 
+  // Same "orb-stage" class Orb.jsx's own wrapper uses (see index.css) —
+  // this is what makes the preview occupy Orb's exact slot rather than a
+  // new/separate area; no extra floating container is introduced.
   return (
-    <div className={`vision-panel${minimized ? " vision-panel-minimized" : ""}`}>
-      <div className="vision-panel-header">
-        <span className="vision-panel-title">
-          {status === "streaming" ? "👁 SARANA is looking…" : "👁 SARANA's camera"}
-        </span>
-        <button
-          type="button"
-          className="vision-panel-min"
-          onClick={() => setMinimized((m) => !m)}
-          aria-label={minimized ? "Expand camera preview" : "Minimize camera preview"}
-        >
-          {minimized ? "▢" : "—"}
-        </button>
-      </div>
-      {!minimized && (
-        <div className="vision-panel-body">
-          {status === "prompt" && (
-            <div className="vision-panel-permission">
-              <p>SARANA wants to look through your camera.</p>
-              <button type="button" className="btn" onClick={handleAllow}>
-                Allow Camera
-              </button>
-            </div>
-          )}
-          {errorCopy && <p className="vision-panel-error">{errorCopy}</p>}
-          {showVideo && (
-            <video ref={videoRef} className="vision-panel-video" autoPlay muted playsInline />
-          )}
-          {status !== "prompt" && (
-            <button type="button" className="btn danger vision-panel-stop" onClick={handleStop}>
-              Stop
-            </button>
-          )}
+    <div className="orb-stage">
+      {showVideo && (
+        <video ref={videoRef} className="vision-stage-video" autoPlay muted playsInline />
+      )}
+      {status === "streaming" && (
+        <span className="vision-stage-badge">👁 watching</span>
+      )}
+      {status === "prompt" && (
+        <div className="vision-stage-overlay">
+          <p>SARANA wants to look through your camera.</p>
+          <button type="button" className="btn" onClick={handleAllow}>
+            Allow Camera
+          </button>
+        </div>
+      )}
+      {errorCopy && (
+        <div className="vision-stage-overlay">
+          <p className="vision-stage-error">{errorCopy}</p>
         </div>
       )}
     </div>

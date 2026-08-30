@@ -72,8 +72,11 @@ export default function App() {
   // Web live camera vision: {requestId, facing} | null — mirrors the
   // backend's own self._web_vision_session (main.py), set by the
   // "camera_vision_request" WS message and cleared by "camera_vision_stop"
-  // or the panel's own Stop button. Deliberately separate state from
-  // `pendingImage` (Controls.jsx) — an entirely different feature.
+  // or the existing INTERRUPT control (see handleInterrupt) — no separate
+  // Stop button exists for this. Deliberately separate state from
+  // `pendingImage` (Controls.jsx) — an entirely different feature. While
+  // non-null, CameraVisionPanel renders in place of Orb (see the render
+  // below) — the two are never both mounted at once.
   const [visionRequest, setVisionRequest] = useState(null);
 
   // ── GET /api/session — unauthenticated, works before any login ─────────
@@ -526,6 +529,13 @@ export default function App() {
   // STATUS_MESSAGE case).
   function handleInterrupt() {
     audioRef.current?.stopPlayback();
+    // Web live camera vision: the existing INTERRUPT control doubles as
+    // the camera's stop control too — no new/separate button was added
+    // for this (see CameraVisionPanel.jsx, which no longer renders one).
+    // A no-op when no vision request is active.
+    if (visionRequest) {
+      handleVisionStopped("user_interrupt");
+    }
     if (state.token) {
       sendInterrupt(state.token).catch(() => {
         dispatch({ type: "SYS_MESSAGE", text: "Interrupt failed to send.", ts: null });
@@ -666,7 +676,21 @@ export default function App() {
           <ToolsRail tools={state.tools} />
         </div>
         <div className="panel-center">
-          <Orb status={displayStatus} assistantName={state.assistantName} />
+          {/* Web live camera vision: the live preview replaces the animated
+              orb in its own slot — never a second, separate floating box
+              (see CameraVisionPanel.jsx, which renders into the identical
+              "orb-stage" area Orb.jsx itself uses). Exactly one of the two
+              is ever mounted. */}
+          {authenticated && visionRequest ? (
+            <CameraVisionPanel
+              requestId={visionRequest.requestId}
+              facing={visionRequest.facing}
+              onFrame={handleVisionFrame}
+              onStopped={handleVisionStopped}
+            />
+          ) : (
+            <Orb status={displayStatus} assistantName={state.assistantName} />
+          )}
           <ContentPanel content={state.content} onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })} />
           <Controls
             onSend={handleSend}
@@ -692,14 +716,6 @@ export default function App() {
           assistantName={state.assistantName}
           onAuthenticated={handleAuthenticated}
           error={state.authError}
-        />
-      )}
-      {authenticated && visionRequest && (
-        <CameraVisionPanel
-          requestId={visionRequest.requestId}
-          facing={visionRequest.facing}
-          onFrame={handleVisionFrame}
-          onStopped={handleVisionStopped}
         />
       )}
     </div>
