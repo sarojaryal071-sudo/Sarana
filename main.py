@@ -3743,7 +3743,23 @@ class JarvisLive:
         new valid fix. No dashboard/no browser connected at all just
         means the refresh can't happen -- handled the same way as a
         refresh that times out.
+
+        Capability coordinator (privacy enforcement): if the frontend's
+        last reported EFFECTIVE location state is "denied" -- which
+        covers both a real browser denial AND the user having turned
+        Location off in Settings while the browser itself still allows
+        it (see frontend/src/lib/permissions.js's own two-layer model) --
+        this returns None immediately, WITHOUT ever reading
+        self._session_location. This is the one thing that makes "off"
+        actually enforced rather than merely displayed: a fix fetched
+        and cached before the user switched it off must never keep being
+        used just because it's still sitting in RAM and hasn't expired
+        by LOCATION_MAX_AGE_S yet. Never attempts a browser refresh in
+        this case either -- there is nothing to refresh toward while the
+        capability is off.
         """
+        if self._session_permissions.get("location") == "denied":
+            return None
         loc = self._session_location
         now = time.monotonic()
 

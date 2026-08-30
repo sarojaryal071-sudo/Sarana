@@ -151,6 +151,42 @@ export default function App() {
   useEffect(() => {
     if (state.authenticationState !== "authenticated" || !state.token) return;
 
+    // Capability coordinator: the microphone's "consumer" — the thing
+    // that actually starts/stops streaming once permissionManager's
+    // EFFECTIVE microphone state changes, from any of: the main mic
+    // button, the Settings switch, or a live browser permission change
+    // (e.g. revoked mid-conversation via the browser's own UI). Neither
+    // the button nor Settings decides on/off directly anymore — both
+    // call permissionManager.toggle()/enable(), and this is the one
+    // place that turns that decision into a real MicStreamer start/stop.
+    // Registered fresh per token (this effect re-runs on every login/
+    // token change) so a fresh login always drives a MicStreamer bound
+    // to ITS OWN token — mirrors this same effect's ownership of
+    // micRef's lifecycle below.
+    permissionManager.registerConsumer("microphone", {
+      onEnable: () => {
+        if (!micRef.current) {
+          micRef.current = new MicStreamer(state.token, (s) => {
+            dispatch({ type: "MIC_STATE", value: s });
+            // A real getUserMedia attempt just observed the ACTUAL
+            // permission outcome directly — fold it into the shared
+            // cache so Settings and the backend both reflect it, even
+            // on a browser (e.g. Firefox) where the Permissions API
+            // itself can't be queried for "microphone" ahead of time.
+            if (s === "denied" || s === "unsupported") {
+              permissionManager.reportObserved("microphone", s);
+            } else if (s === "streaming") {
+              permissionManager.reportObserved("microphone", "granted");
+            }
+          });
+        }
+        micRef.current.start();
+      },
+      onDisable: () => {
+        micRef.current?.stop();
+      },
+    });
+
     const socket = new JarvisSocket(state.token, {
       onState: (s) => {
         const mapped = s === "open" ? "connected" : s === "connecting" ? "connecting" : "reconnecting";
@@ -190,7 +226,18 @@ export default function App() {
             // requestAndSendLocation()). Not gated by locationRequestedRef
             // — that ref only limits the automatic once-per-login attempt,
             // not an explicit backend-requested refresh.
-            requestAndSendLocation(state.token);
+            //
+            // Capability coordinator: unlike the once-per-login attempt
+            // below (which always runs at a moment SARANA's own location
+            // preference is guaranteed to still be at its session-start
+            // default), this can fire LATER in the same session, after
+            // the user may have turned Location off in Settings — a
+            // silent fetch-and-send at that point would use location
+            // behind the user's back even though no dialog would show.
+            // Respect the same effective state everything else does.
+            if (permissionManager.getEffectiveState("location") === "granted") {
+              requestAndSendLocation(state.token);
+            }
             break;
           case "audio_stop":
             // Barge-in: Gemini's own server-side VAD detected the user
@@ -239,31 +286,45 @@ export default function App() {
       micRef.current?.stop();
       micRef.current = null;
       micAutoStartedRef.current = false;
+      // The consumer closure above is bound to THIS token — clear it so
+      // nothing stale can fire between this teardown and the next
+      // login's fresh registration.
+      permissionManager.registerConsumer("microphone", undefined);
       // Location foundation: the next login (even the same account
       // logging back in) gets its own fresh browser location attempt —
       // mirrors micAutoStartedRef's reset above for the same reason.
       locationRequestedRef.current = false;
+      // Capability coordinator: forgets SARANA's own enable preference
+      // for every capability at the exact same point the refs above
+      // reset — the next login starts fresh at the default (enabled),
+      // mirroring the mic/location auto-request effects' own existing
+      // "never remember across a reload/relogin" behavior (see
+      // permissionManager.resetSession()'s own docstring for why that
+      // precedent, not localStorage, is what this was modeled on).
+      permissionManager.resetSession();
     };
   }, [state.authenticationState, state.token, dispatch]);
 
   // Item 1: once the WS is actually open, start the mic automatically —
-  // reuses handleToggleMic()/MicStreamer unchanged, just calls it for the
-  // user instead of waiting for a click. This still runs inside the async
-  // continuation of the login button's own click (well within every
-  // browser's transient-activation window for getUserMedia), so the one
-  // permission prompt this can trigger is the same "first browser
-  // permission request" the spec accepts. If the browser denies/blocks it
-  // anyway, MicStreamer already reports "denied"/"unsupported" and
-  // Controls.jsx surfaces that honestly — no fake workaround. Runs once per
-  // login (guarded by the ref, reset on logout above); a manual mic stop
-  // afterward is respected — this never force-restarts it.
+  // via permissionManager.enable("microphone") rather than touching
+  // MicStreamer directly: if the browser already granted mic access
+  // (a returning user), this is a same-tick local enable with no new
+  // prompt; if not yet decided, this is what makes the real browser
+  // request, still inside the async continuation of the login button's
+  // own click (well within every browser's transient-activation window
+  // for getUserMedia), so the one permission prompt this can trigger is
+  // the same "first browser permission request" the spec accepts. If the
+  // browser denies/blocks it anyway, MicStreamer already reports
+  // "denied"/"unsupported" and Controls.jsx surfaces that honestly — no
+  // fake workaround. Runs once per login (guarded by the ref, reset on
+  // logout above); a manual mic stop afterward (via either the main
+  // button or Settings) is respected — this never force-restarts it.
   useEffect(() => {
     if (state.authenticationState !== "authenticated") return;
     if (state.connectionState !== "connected") return;
     if (micAutoStartedRef.current) return;
     micAutoStartedRef.current = true;
-    handleToggleMic();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    permissionManager.enable("microphone");
   }, [state.authenticationState, state.connectionState]);
 
   // Location foundation: request the browser's native one-shot location
@@ -433,29 +494,17 @@ export default function App() {
     }
   }
 
+  // The main mic button no longer decides on/off itself (it used to
+  // branch directly on the ref's own streaming flag) — it calls the exact same
+  // permissionManager.toggle() the Settings mic switch calls
+  // (PermissionsSettings.jsx), so both controls always agree: whichever
+  // one is clicked, permissionManager's single "microphone" entry is
+  // what actually changes, and the registered consumer above (this
+  // effect's onEnable/onDisable) is what turns that into a real
+  // MicStreamer start/stop. Neither this button nor Settings keeps an
+  // independent on/off boolean of its own.
   function handleToggleMic() {
-    if (!micRef.current) {
-      micRef.current = new MicStreamer(state.token, (s) => {
-        dispatch({ type: "MIC_STATE", value: s });
-        // Permissions foundation: a real getUserMedia attempt just
-        // observed the ACTUAL permission outcome directly — fold it into
-        // the shared permission cache (lib/permissions.js) so Settings
-        // and the backend both reflect it, even on a browser (e.g.
-        // Firefox) where the Permissions API itself can't be queried for
-        // "microphone" ahead of time. "streaming" means a real stream
-        // was actually obtained, i.e. the permission is granted.
-        if (s === "denied" || s === "unsupported") {
-          permissionManager.reportObserved("microphone", s);
-        } else if (s === "streaming") {
-          permissionManager.reportObserved("microphone", "granted");
-        }
-      });
-    }
-    if (micRef.current.active) {
-      micRef.current.stop();
-    } else {
-      micRef.current.start();
-    }
+    permissionManager.toggle("microphone");
   }
 
   useEffect(() => () => micRef.current?.stop(), []);

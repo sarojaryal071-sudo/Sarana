@@ -1,37 +1,62 @@
-// src/lib/permissions.js — centralized, extensible permission/capability
-// registry for SARANA Web. This is the ONE place browser/OS permission
-// state is ever read or requested from — every component queries this
-// module instead of calling navigator.permissions/getUserMedia/
-// getCurrentPosition directly, so there is exactly one source of truth
-// for "is capability X actually available right now".
+// src/lib/permissions.js — centralized, extensible capability coordinator
+// for SARANA Web. This is the ONE place browser/OS permission state is
+// ever read/requested from, AND the ONE place SARANA's own "am I
+// currently allowed to use this" decision lives — every component and
+// every capability consumer (MicStreamer, a future CameraStreamer, ...)
+// reads/drives that decision through here instead of keeping its own
+// independent on/off boolean.
 //
-// Real platform state only — never a fake/local-only toggle. Every state
-// this module reports comes from either:
-//   1. The browser's own Permissions API (navigator.permissions.query),
-//      when the browser supports querying that particular permission
-//      name, or
-//   2. The real, observed outcome of an actual permission-request
-//      attempt (getUserMedia / getCurrentPosition), when the Permissions
-//      API can't be queried ahead of time (e.g. Firefox has no queryable
-//      "microphone" permission name).
+// Two deliberately separate layers, per capability id:
 //
-// A permission that the browser has already granted can generally NOT be
-// programmatically revoked — there is no "disable" request here, only
-// "request" (idempotent: requesting an already-granted permission just
-// resolves granted again, no second OS prompt). A denied permission
-// usually can't be re-prompted either — request() still attempts it
-// honestly, but a browser that refuses to re-prompt will just report
-// "denied" again; the UI is responsible for telling the user to change it
-// in their browser/device settings in that case (see
-// PermissionsSettings.jsx), never for pretending a retry silently fixed it.
+//   browserState  — what the platform actually allows: "granted" |
+//                    "denied" | "prompt" | "unsupported". Sourced only
+//                    from real platform APIs (Permissions API query, or
+//                    the observed outcome of an actual getUserMedia/
+//                    getCurrentPosition attempt). SARANA can request it,
+//                    but can never fabricate or override it.
 //
-// Extensibility (see the permission-system spec, item 11): adding a
-// future capability (camera, contacts, files, bluetooth, ...) means
-// adding one entry to REGISTRY/PERMISSION_DEFS below — nothing else in
-// this module, or in the Settings UI that renders PERMISSION_DEFS,
-// needs to change.
+//   saranaEnabled — whether SARANA currently WANTS to use a capability
+//                    it's allowed to use. A purely application-level
+//                    preference, defaulting to true each fresh session
+//                    (see resetSession()) and living ONLY in memory here
+//                    — never localStorage/sessionStorage/a backend
+//                    database. Investigated against the existing,
+//                    working microphone button before adding this: that
+//                    button already re-decides "was the mic manually
+//                    stopped" fresh on every login (see App.jsx's
+//                    micAutoStartedRef), never remembers it across a
+//                    reload — this mirrors that exact, deliberate,
+//                    session-only precedent instead of introducing a new
+//                    persisted preference system.
+//
+// effectiveState — the ONE value everything else (UI, the backend, a
+// capability's own consumer) should ever act on:
+//   browserState !== "granted"            -> browserState  (denied/
+//                                             prompt/unsupported pass
+//                                             through unchanged --
+//                                             saranaEnabled can NEVER
+//                                             make an unavailable
+//                                             capability usable)
+//   browserState === "granted" && enabled  -> "granted"
+//   browserState === "granted" && !enabled -> "denied"       (browser-
+//                                             authorized, but SARANA
+//                                             must not use it -- to the
+//                                             rest of the app this reads
+//                                             exactly like an ordinary
+//                                             denial, which is honest:
+//                                             it genuinely isn't usable)
+//
+// A capability may optionally register a CONSUMER — the thing that
+// actually starts/stops using it (MicStreamer for microphone; location
+// is pull-on-demand and has none; a future camera would get its own).
+// The coordinator calls the consumer's onEnable()/onDisable() exactly
+// once per genuine effectiveState transition, from EITHER cause: the
+// user flipping saranaEnabled, OR the browser permission itself
+// changing (a live revocation must stop a consumer just as surely as
+// the user turning the switch off -- see registerConsumer()'s own note).
+// This is what makes "off" actually enforced, not just displayed.
 
-import { getCurrentLocation } from "./geolocation";
+import { getCurrentLocation } from "./geolocation.js";
 
 /**
  * @typedef {"granted"|"denied"|"prompt"|"unsupported"} PermissionState
@@ -57,7 +82,9 @@ const REGISTRY = {
         // Only ever used to trigger/observe the real permission prompt —
         // the stream is stopped immediately, never kept open. Actual
         // mic capture for voice input is MicStreamer's own job
-        // (lib/mic.js), reusing this same underlying browser permission.
+        // (lib/mic.js), started/stopped via this capability's registered
+        // consumer (see App.jsx), reusing this same underlying browser
+        // permission.
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         stream.getTracks().forEach((t) => t.stop());
         return "granted";
@@ -103,19 +130,39 @@ export const PERMISSION_DEFS = [
   },
 ];
 
+const VALID_STATES = new Set(["granted", "denied", "prompt", "unsupported"]);
+
 class PermissionManager {
   constructor() {
-    /** @type {Record<string, PermissionState>} */
+    /** @type {Record<string, PermissionState>} browser/OS permission, per id */
     this._state = {};
+    /** @type {Record<string, boolean>} SARANA's own enable preference, per
+     * id — absent means "default true" (see isEnabled()); never read from
+     * or written to any persistent store. */
+    this._enabled = {};
+    /** @type {Record<string, {onEnable?: Function, onDisable?: Function}>} */
+    this._consumers = {};
     /** @type {Record<string, Set<(state: PermissionState) => void>>} */
     this._listeners = {};
     /** @type {Record<string, PermissionStatus>} */
     this._statuses = {};
   }
 
-  /** Last known state without triggering any query/request — may be
-   * undefined if nothing has queried this capability yet this page load. */
+  // ── browser permission (unchanged mechanics from before) ──────────────
+
+  /** Last known EFFECTIVE state without triggering any query/request —
+   * may be undefined if nothing has queried this capability yet this
+   * page load. This is what UI should render from. */
   getCached(id) {
+    return this.getEffectiveState(id);
+  }
+
+  /** The raw platform permission, with no SARANA-preference gating
+   * applied — only needed by UI that has to explain WHY a capability is
+   * off (browser denial vs. the user's own choice — see
+   * PermissionsSettings.jsx). Everything else should use
+   * getEffectiveState()/getCached(). */
+  getBrowserState(id) {
     return this._state[id];
   }
 
@@ -133,42 +180,50 @@ class PermissionManager {
       // an actual request() attempt genuinely observed, or "prompt"
       // (honestly "not yet decided/known", never fabricated as granted)
       // if nothing has been observed yet.
-      return this._setState(id, this._state[id] || "prompt");
+      this._setState(id, this._state[id] || "prompt");
+      return this.getEffectiveState(id);
     }
 
     try {
       const status = await navigator.permissions.query({ name: def.permissionsApiName });
       this._wireLiveUpdates(id, status);
-      return this._setState(id, status.state);
+      this._setState(id, status.state);
     } catch {
       // Some browsers support the API but reject specific permission
       // names (e.g. Safari's partial support) — same honest fallback.
-      return this._setState(id, this._state[id] || "prompt");
+      this._setState(id, this._state[id] || "prompt");
     }
+    return this.getEffectiveState(id);
   }
 
   /** Invokes the REAL platform permission-request flow (the browser's own
-   * native prompt, if one is due) and resolves to the observed result.
-   * Only call this in direct response to the user enabling a capability
-   * in Settings, or a genuine in-conversation need for it — never
-   * automatically on page load (least privilege — see the permission-
-   * system spec). */
+   * native prompt, if one is due) and resolves to the observed BROWSER
+   * state (not the effective one — callers that care about SARANA's own
+   * preference should use enable()/toggle() below, which call this
+   * internally and then apply that preference). Only ever called from
+   * enable()/toggle() (a direct user action) or PermissionsSettings.jsx's
+   * "Try again" — never automatically on page load (least privilege). */
   async request(id) {
     const def = REGISTRY[id];
     if (!def) return "unsupported";
     const result = await def.request();
-    if (result) return this._setState(id, result);
+    if (result) {
+      this._setState(id, result);
+      return result;
+    }
     // Ambiguous outcome — re-query the real permission rather than guess.
-    return this.query(id);
+    await this.query(id);
+    return this._state[id];
   }
 
-  /** A capability's state was determined some other way this module
-   * doesn't itself observe (e.g. lib/mic.js's own live streaming attempt
-   * hit "denied" mid-conversation) — folds that real, already-observed
-   * outcome into the shared cache so Settings and every other reader
-   * stay honest, without pretending this module performed the check. */
+  /** A capability's BROWSER state was determined some other way this
+   * module doesn't itself observe (e.g. lib/mic.js's own live streaming
+   * attempt hit "denied" mid-conversation) — folds that real,
+   * already-observed outcome into the shared cache so Settings and every
+   * other reader stay honest, without pretending this module performed
+   * the check. */
   reportObserved(id, state) {
-    if (!["granted", "denied", "prompt", "unsupported"].includes(state)) return;
+    if (!VALID_STATES.has(state)) return;
     this._setState(id, state);
   }
 
@@ -178,25 +233,145 @@ class PermissionManager {
     status.onchange = () => this._setState(id, status.state);
   }
 
-  _setState(id, state) {
-    if (this._state[id] === state) return state;
-    this._state[id] = state;
-    this._listeners[id]?.forEach((fn) => fn(state));
-    return state;
+  // ── SARANA's own enable preference ─────────────────────────────────────
+
+  /** Defaults to true — a fresh session (or a capability nothing has ever
+   * touched) assumes SARANA MAY use whatever the browser allows, exactly
+   * matching the existing mic/location auto-request behavior this was
+   * modeled on. Only ever false once setEnabled(id, false) has actually
+   * been called THIS session. */
+  isEnabled(id) {
+    return this._enabled[id] !== false;
   }
 
-  /** Subscribes to live state changes for one capability. Immediately
-   * fires once with the cached state (if any) and kicks off a fresh
-   * query (never a request — no prompt). Returns an unsubscribe fn. */
+  /** The one thing a UI control (main mic button, Settings switch) is
+   * ever allowed to set directly. Never touches the browser permission.
+   * Fires the registered consumer's onEnable()/onDisable() — and notifies
+   * subscribers — only when this actually changes the EFFECTIVE state
+   * (e.g. setting enabled=false while the browser is denied is a no-op:
+   * the capability was already unusable). */
+  setEnabled(id, value) {
+    if (this.isEnabled(id) === value) return; // already effectively that value
+    const prevEffective = this.getEffectiveState(id);
+    this._enabled[id] = value;
+    this._recomputeAndNotify(id, prevEffective);
+  }
+
+  /** Registers the thing that actually starts/stops CONSUMING a
+   * capability once it becomes effectively granted/ungranted — e.g.
+   * MicStreamer for "microphone". Optional: a pull-on-demand capability
+   * like "location" has nothing to start/stop and registers nothing.
+   * Passing undefined clears a previous registration (see App.jsx's
+   * per-login re-registration with a fresh token-bound closure).
+   *
+   * This is the enforcement mechanism: onDisable() fires not only when
+   * the user flips the Settings/main-button switch off, but also if the
+   * BROWSER permission itself is revoked while the capability was in use
+   * — a live revocation must stop a consumer exactly as surely as the
+   * user's own choice does. */
+  registerConsumer(id, consumer) {
+    this._consumers[id] = consumer || {};
+  }
+
+  /** The single source of truth every reader (UI, backend sync, a
+   * consumer's own start/stop decision) should use. */
+  getEffectiveState(id) {
+    const browser = this._state[id];
+    if (browser === undefined) return undefined; // never queried/observed yet
+    if (browser !== "granted") return browser; // denied/prompt/unsupported: enabled can never override
+    return this.isEnabled(id) ? "granted" : "denied";
+  }
+
+  /** Turns a capability ON: if the browser has already granted it, this
+   * is purely a local preference flip (setEnabled — no browser call, no
+   * re-prompt, matches "ON -> click -> OFF -> click -> ON must be real
+   * state changes, not permission re-requests"). If the browser hasn't
+   * decided yet (or actively refuses), this is the one place that makes
+   * a REAL request — and only actually enables SARANA's own preference
+   * if that request comes back granted; a denial is never overridden. */
+  async enable(id) {
+    if (this._state[id] === "granted") {
+      this.setEnabled(id, true);
+      return this.getEffectiveState(id);
+    }
+    const result = await this.request(id);
+    if (result === "granted") this.setEnabled(id, true);
+    return this.getEffectiveState(id);
+  }
+
+  /** The single click-semantics both the main mic button and the
+   * Settings switch call. Granted+on -> turn off (local only, no browser
+   * call). Anything else -> enable() (which itself decides whether a
+   * real browser request is needed). */
+  async toggle(id) {
+    if (this.getEffectiveState(id) === "granted") {
+      this.setEnabled(id, false);
+      return this.getEffectiveState(id);
+    }
+    return this.enable(id);
+  }
+
+  /** Fired at the same point in the login/logout lifecycle App.jsx
+   * already resets micAutoStartedRef/locationRequestedRef (the /ws
+   * effect's cleanup) — forgets SARANA's own enable preference so the
+   * NEXT login starts fresh at the default (true), exactly mirroring
+   * that existing, deliberate "never remember across a reload/relogin"
+   * precedent. Deliberately does NOT touch _state/_statuses: the
+   * browser's own permission is a real platform fact that doesn't
+   * change just because SARANA logged out, and does NOT itself call any
+   * consumer — actually stopping an in-flight consumer (e.g. closing the
+   * current MicStreamer) is the teardown code's own direct
+   * responsibility (it's tied to the token/session being torn down, not
+   * to this preference), already handled at the same call site. */
+  resetSession() {
+    this._enabled = {};
+  }
+
+  _recomputeAndNotify(id, prevEffective) {
+    const nowEffective = this.getEffectiveState(id);
+    if (nowEffective !== prevEffective) {
+      const consumer = this._consumers[id];
+      if (nowEffective === "granted") consumer?.onEnable?.();
+      else consumer?.onDisable?.();
+    }
+    // Always notify listeners, even when the EFFECTIVE value itself
+    // didn't change — the browser state can still have changed
+    // underneath an unchanged effective value (e.g. the browser
+    // permission gets revoked while the user had already turned SARANA
+    // off), and PermissionsSettings.jsx's status copy needs a fresh
+    // getBrowserState() read to keep distinguishing "you turned this
+    // off" from "your browser is blocking this". React's own setState
+    // bails out on an identical value, so this costs nothing when
+    // truly nothing changed.
+    const effective = this.getEffectiveState(id);
+    this._listeners[id]?.forEach((fn) => fn(effective));
+  }
+
+  _setState(id, browserState) {
+    if (this._state[id] === browserState) return browserState;
+    const prevEffective = this.getEffectiveState(id);
+    this._state[id] = browserState;
+    this._recomputeAndNotify(id, prevEffective);
+    return browserState;
+  }
+
+  /** Subscribes to live EFFECTIVE state changes for one capability.
+   * Immediately fires once with the cached effective state (if any) and
+   * kicks off a fresh query (never a request — no prompt). Returns an
+   * unsubscribe fn. */
   subscribe(id, fn) {
     if (!this._listeners[id]) this._listeners[id] = new Set();
     this._listeners[id].add(fn);
-    if (this._state[id]) fn(this._state[id]);
+    const cached = this.getEffectiveState(id);
+    if (cached !== undefined) fn(cached);
     this.query(id);
     return () => this._listeners[id]?.delete(fn);
   }
 }
 
-/** Singleton — the one shared permission manager instance for the whole
- * app, per the "centralized, not scattered" requirement. */
+/** Singleton — the one shared permission/capability coordinator instance
+ * for the whole app, per the "centralized, not scattered" requirement.
+ * The main mic button (App.jsx) and the Settings mic switch
+ * (PermissionsSettings.jsx) both read/drive THIS object's "microphone"
+ * entry — neither keeps an independent on/off boolean of its own. */
 export const permissionManager = new PermissionManager();

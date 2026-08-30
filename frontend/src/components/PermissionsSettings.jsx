@@ -1,18 +1,23 @@
 // src/components/PermissionsSettings.jsx — the "Permissions" section of
 // Settings: a small control-panel module for SARANA's device access.
 //
-// This file is PRESENTATION ONLY. Every piece of state shown here still
-// comes from permissionManager (lib/permissions.js) exactly as before —
-// nothing about how permissions are queried/requested/stored changed, only
-// how that truth is drawn. Renders PERMISSION_DEFS generically, so a
-// future capability (camera, contacts, files, bluetooth, ...) only needs a
-// new registry entry + one icon below, never a new layout.
+// This file is PRESENTATION ONLY. All state ownership lives in
+// permissionManager (lib/permissions.js) — this component reads its
+// EFFECTIVE state (browser permission + SARANA's own enable preference,
+// combined) and, on click, calls the exact same permissionManager.toggle()
+// the main microphone button (App.jsx) calls. There is no second,
+// independent on/off boolean here — see permissionManager's own docstring
+// for why that matters. Renders PERMISSION_DEFS generically, so a future
+// capability (camera, contacts, files, bluetooth, ...) only needs a new
+// registry entry + one icon below, never a new layout.
 //
-// "Enable"/"Try again" still invoke the real browser permission-request
-// flow (permissionManager.request()); a granted permission still has no
-// "disable" control (browsers don't allow revoking it from a webpage), and
-// a denied permission is never rendered as a working switch — see the
-// switch's `disabled` logic below.
+// The switch is a REAL toggle now, not just a "(re-)request permission"
+// trigger: granted+on -> click turns SARANA's OWN use of the capability
+// off (no browser call at all); off (either reason) -> click turns it
+// back on, which only touches the browser if the browser hasn't already
+// decided. A TRUE browser denial is never rendered as a working switch —
+// "Try again" (same toggle() call) is the only honest retry, see the
+// `offByChoice` distinction below.
 import { useEffect, useState } from "react";
 import { PERMISSION_DEFS, permissionManager } from "../lib/permissions";
 
@@ -22,6 +27,12 @@ const STATE_TEXT = {
   prompt: "Not enabled",
   unsupported: "Not available",
 };
+// Shown instead of STATE_TEXT.denied specifically when the BROWSER has
+// granted the capability but SARANA's own preference is off — a
+// different situation from a real browser denial, and one where "change
+// your browser settings" guidance would be actively wrong (there's
+// nothing to change there; the switch itself is all that's needed).
+const TURNED_OFF_TEXT = "Turned off";
 
 // Small hand-drawn line icons — no icon library, just inline SVG, kept
 // deliberately minimal/technical to match the app's existing glyph-based
@@ -61,6 +72,10 @@ function GenericGlyph() {
 }
 
 function PermissionCard({ def }) {
+  // `state` here is the EFFECTIVE state (browser permission + SARANA's
+  // own enable preference already combined by permissionManager) —
+  // exactly what App.jsx's mic-auto-start/backend-sync code reads too.
+  // No separate "is this switch on" boolean is kept in this component.
   const [state, setState] = useState(permissionManager.getCached(def.id) || null);
   const [requesting, setRequesting] = useState(false);
 
@@ -86,7 +101,12 @@ function PermissionCard({ def }) {
     setRequesting(true);
     const startedAt = Date.now();
     try {
-      await permissionManager.request(def.id);
+      // The single click-semantics both this switch and the main mic
+      // button (App.jsx) call — granted+on turns SARANA's own use off
+      // (a local preference flip, no browser call); anything else tries
+      // to turn it on, which only touches the browser if it hasn't
+      // already decided. See permissionManager.toggle()'s own docstring.
+      await permissionManager.toggle(def.id);
     } finally {
       const elapsed = Date.now() - startedAt;
       if (elapsed < MIN_FEEDBACK_MS) {
@@ -97,14 +117,23 @@ function PermissionCard({ def }) {
   }
 
   const on = state === "granted";
-  // The switch itself is a real, working control only while it can
-  // actually DO something honest: turn a not-yet-decided permission on,
-  // or re-affirm an already-granted one (harmless — no second OS
-  // prompt). A denied/unsupported permission never becomes a fake
-  // switch that pretends to flip the OS/browser setting — it renders
-  // inert, and (when denied) a plain "Try again" button below does the
-  // actual honest retry instead.
-  const switchIsLive = state === "granted" || state === "prompt";
+  // Raw browser permission, read fresh on every render — only needed to
+  // tell apart the two different reasons a capability can show as "off":
+  // the browser genuinely refusing it, vs. SARANA's own preference being
+  // off while the browser would otherwise allow it. `state` (effective)
+  // alone can't distinguish these; permissionManager.getEffectiveState()
+  // collapses both to the same "denied"-shaped value on purpose (to the
+  // rest of the app, both really are "not usable right now").
+  const browserState = permissionManager.getBrowserState(def.id);
+  const offByChoice = browserState === "granted" && !on;
+  // The switch itself is a real, working control whenever it can
+  // actually DO something honest: turn SARANA's own use on/off while the
+  // browser already allows it (no browser call either direction), or
+  // attempt a not-yet-decided permission. A TRUE browser denial/
+  // unsupported never becomes a fake switch that pretends to flip the
+  // OS/browser setting — it renders inert, and (when genuinely denied)
+  // a plain "Try again" button below does the actual honest retry.
+  const switchIsLive = on || offByChoice || state === "prompt";
   const Glyph = GLYPHS[def.id] || GenericGlyph;
 
   return (
@@ -135,10 +164,10 @@ function PermissionCard({ def }) {
       <div className="perm-card-foot">
         <span className={`perm-status perm-status-${state || "checking"}`}>
           <span className="perm-status-led" />
-          {state ? STATE_TEXT[state] : "Reading…"}
+          {state ? (offByChoice ? TURNED_OFF_TEXT : STATE_TEXT[state]) : "Reading…"}
         </span>
 
-        {state === "denied" && (
+        {state === "denied" && !offByChoice && (
           <div className="perm-denied-actions">
             <p className="perm-card-help">
               You'll need to allow this in your browser or device settings, then try again.

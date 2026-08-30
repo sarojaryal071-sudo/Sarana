@@ -12,7 +12,7 @@ Run with:
     .venv/Scripts/python.exe -m tests.test_permissions
 """
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -343,6 +343,79 @@ def test_get_weather_does_not_hit_the_network_when_location_denied() -> None:
     print("test_get_weather_does_not_hit_the_network_when_location_denied: PASS")
 
 
+# ── capability coordinator: a stale cached fix must not outlive "off" ─────
+# (Settings toggle architecture, item 9/10: the effective location state
+# reported by the frontend -- browser permission AND SARANA's own enable
+# preference already combined into the same "granted"/"denied" vocabulary
+# -- must gate _get_current_location() itself, not just the wording of an
+# error message. A fix already sitting in self._session_location from
+# BEFORE the user switched Location off must never keep being returned.)
+
+def test_get_current_location_ignores_a_cached_fix_once_location_is_off() -> None:
+    """Item 9: Location OFF (denied, whether a real browser denial or the
+    user's own Settings choice -- both arrive as the same "denied" value)
+    must stop an ALREADY-CACHED fix from continuing to be used, not just
+    block new fetches."""
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.1699, 24.9384, 50.0)
+        assert jarvis._session_location is not None  # sanity: a fix really is cached
+
+        jarvis._set_session_capabilities(location="denied")
+        loc = await jarvis._get_current_location()
+        assert loc is None, "a cached fix must not be returned once location is off"
+    asyncio.run(_run())
+    print("test_get_current_location_ignores_a_cached_fix_once_location_is_off: PASS")
+
+
+def test_get_current_location_resumes_once_location_is_on_again() -> None:
+    """Item 10: turning Location back on (effective "granted") restores
+    normal behavior -- the existing cached fix (still within
+    LOCATION_MAX_AGE_S) is usable again, same as it always was."""
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.1699, 24.9384, 50.0)
+        jarvis._set_session_capabilities(location="denied")
+        assert await jarvis._get_current_location() is None
+
+        jarvis._set_session_capabilities(location="granted")
+        loc = await jarvis._get_current_location()
+        assert loc is not None
+        assert loc["latitude"] == 60.1699
+    asyncio.run(_run())
+    print("test_get_current_location_resumes_once_location_is_on_again: PASS")
+
+
+def test_get_current_location_untouched_when_permission_never_reported() -> None:
+    """No regression for the common case: a session that never reported
+    ANY capability state (desktop, or a web session before the frontend's
+    first /api/capabilities call lands) must behave exactly as before --
+    _session_permissions.get("location") is None, not "denied"."""
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.1699, 24.9384, 50.0)
+        loc = await jarvis._get_current_location()
+        assert loc is not None
+        assert loc["latitude"] == 60.1699
+    asyncio.run(_run())
+    print("test_get_current_location_untouched_when_permission_never_reported: PASS")
+
+
+def test_refresh_location_never_attempted_while_location_is_off() -> None:
+    """The require_fresh=True path (explicit "where am I right now") must
+    also honor "off" -- no browser refresh should even be attempted while
+    the capability is denied."""
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._dashboard = AsyncMock()
+        jarvis._set_session_capabilities(location="denied")
+        loc = await jarvis._get_current_location(require_fresh=True)
+        assert loc is None
+        jarvis._dashboard.broadcast_location_refresh_request.assert_not_called()
+    asyncio.run(_run())
+    print("test_refresh_location_never_attempted_while_location_is_off: PASS")
+
+
 if __name__ == "__main__":
     test_capabilities_rejected_without_authentication()
     test_capabilities_rejected_with_invalid_token()
@@ -372,4 +445,8 @@ if __name__ == "__main__":
     test_build_config_mic_not_denied_adds_no_extra_note()
     test_build_config_desktop_never_mentions_microphone_denial()
     test_get_weather_does_not_hit_the_network_when_location_denied()
+    test_get_current_location_ignores_a_cached_fix_once_location_is_off()
+    test_get_current_location_resumes_once_location_is_on_again()
+    test_get_current_location_untouched_when_permission_never_reported()
+    test_refresh_location_never_attempted_while_location_is_off()
     print("\nAll permissions-foundation tests passed.")
