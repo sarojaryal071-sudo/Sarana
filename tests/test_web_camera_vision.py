@@ -69,12 +69,18 @@ class _RecordingDashboard:
         self._vision_frame_queue = asyncio.Queue()
         self.requests = []   # (request_id, facing)
         self.stops = []      # request_id
+        self.sys_messages = []   # diagnostic "sys" broadcasts (see main.py's
+                                  # VISION_REQUESTED/VISION_FRAME_RECEIVED notes)
 
     async def broadcast_camera_vision_request(self, request_id, facing):
         self.requests.append((request_id, facing))
 
     async def broadcast_camera_vision_stop(self, request_id):
         self.stops.append(request_id)
+
+    async def broadcast(self, msg):
+        if msg.get("type") == "sys":
+            self.sys_messages.append(msg.get("text", ""))
 
 
 def _jarvis(auto_start=False) -> JarvisLive:
@@ -637,6 +643,112 @@ def test_ordinary_question_never_appears_in_web_camera_vision_triggers() -> None
     print("test_ordinary_question_never_appears_in_web_camera_vision_triggers: PASS")
 
 
+# ── production-safe diagnostics (VISION_REQUESTED / _RECEIVED / _ANALYZED) ─
+#
+# Added so a real-device report ("no camera preview appeared") can be
+# pinpointed to an exact stage from the Activity Log alone: if the
+# "Camera requested" line is MISSING, the tool was never called (a prompt
+# issue); if it's present but "Analyzing" never follows, frames never
+# reached the backend (a browser/permission issue) — see main.py's own
+# comments at each broadcast site. Never logs actual frame bytes.
+
+def test_opening_a_session_emits_a_camera_requested_diagnostic() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        await jarvis._execute_tool(_fc("web_camera_vision", text="what's in my hand"))
+        await asyncio.sleep(0.05)
+        assert any("Camera requested" in m for m in jarvis._dashboard.sys_messages)
+    asyncio.run(_run())
+    print("test_opening_a_session_emits_a_camera_requested_diagnostic: PASS")
+
+
+def test_burst_injection_emits_an_analyzing_diagnostic() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        fake_session = _FakeVisionSession()
+        jarvis.session = fake_session
+        req_id = "req-diag"
+        now = time.monotonic()
+        jarvis._web_vision_session = {
+            "request_id": req_id, "started": now, "deadline": now + 60,
+            "frames": [], "burst_armed_at": now - 100, "awaiting_burst": True,
+            "burst_token": 0, "text": "look", "last_answered_at": None,
+        }
+        await jarvis._dashboard._vision_frame_queue.put({
+            "request_id": req_id, "seq": 0,
+            "mime_type": "image/jpeg", "data": _real_jpeg_bytes(),
+        })
+        await _run_frames_tick(jarvis, iterations=20, delay=0.05)
+        assert any("Analyzing" in m for m in jarvis._dashboard.sys_messages)
+    asyncio.run(_run())
+    print("test_burst_injection_emits_an_analyzing_diagnostic: PASS")
+
+
+def test_no_frames_gives_up_emits_a_no_image_diagnostic() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        jarvis.session = _FakeVisionSession()
+        now = time.monotonic()
+        jarvis._web_vision_session = {
+            "request_id": "req-nodiag", "started": now - 10, "deadline": now + 60,
+            "frames": [], "burst_armed_at": now - 100, "awaiting_burst": True,
+            "burst_token": 0, "text": "look", "last_answered_at": None,
+        }
+        await _run_frames_tick(jarvis, iterations=20, delay=0.05)
+        assert any("No camera image arrived" in m for m in jarvis._dashboard.sys_messages)
+    asyncio.run(_run())
+    print("test_no_frames_gives_up_emits_a_no_image_diagnostic: PASS")
+
+
+def test_frame_processing_survives_an_unexpected_exception() -> None:
+    """Resilience: _process_web_vision_frames() is a process-lifetime task
+    created via a bare asyncio.create_task() (outside the per-connection
+    TaskGroup) — nothing else would ever restart it if an unexpected bug
+    raised out of one iteration. Proves one bad tick doesn't permanently
+    kill the loop for the rest of the process."""
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        fake_session = _FakeVisionSession()
+        jarvis.session = fake_session
+        now = time.monotonic()
+        # A session missing "deadline" -- something no real code path ever
+        # produces, but exactly the kind of unexpected bug this guards
+        # against -- would KeyError on `session["deadline"]` mid-iteration.
+        jarvis._web_vision_session = {
+            "request_id": "req-bad", "started": now,
+            "frames": [], "burst_armed_at": now, "awaiting_burst": True,
+            "burst_token": 0, "text": "look", "last_answered_at": None,
+        }
+
+        task = asyncio.create_task(jarvis._process_web_vision_frames())
+        try:
+            await asyncio.sleep(0.3)   # let the broken session's tick raise + get caught
+            assert not task.done(), "the task must survive an unexpected exception, not die"
+
+            # Now hand it a normal, well-formed session and prove it still
+            # works correctly afterward -- the loop genuinely recovered.
+            jarvis._web_vision_session = {
+                "request_id": "req-good", "started": time.monotonic(),
+                "deadline": time.monotonic() + 60, "frames": [],
+                "burst_armed_at": time.monotonic() - 100, "awaiting_burst": True,
+                "burst_token": 0, "text": "look", "last_answered_at": None,
+            }
+            await jarvis._dashboard._vision_frame_queue.put({
+                "request_id": "req-good", "seq": 0,
+                "mime_type": "image/jpeg", "data": _real_jpeg_bytes(),
+            })
+            for _ in range(30):
+                if fake_session.calls:
+                    break
+                await asyncio.sleep(0.05)
+            assert fake_session.calls, "the loop must keep processing normally after recovering from the earlier bad tick"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(_run())
+    print("test_frame_processing_survives_an_unexpected_exception: PASS")
+
+
 if __name__ == "__main__":
     test_web_camera_vision_is_web_only_and_never_desktop_only()
     test_web_camera_vision_blocked_on_desktop_with_screen_process_redirect()
@@ -668,4 +780,8 @@ if __name__ == "__main__":
     test_invalid_frame_is_rejected_before_ever_reaching_the_session()
     test_real_frame_does_reach_the_session_as_analyzable_content()
     test_ordinary_question_never_appears_in_web_camera_vision_triggers()
+    test_opening_a_session_emits_a_camera_requested_diagnostic()
+    test_burst_injection_emits_an_analyzing_diagnostic()
+    test_no_frames_gives_up_emits_a_no_image_diagnostic()
+    test_frame_processing_survives_an_unexpected_exception()
     print("\nAll web-camera-vision tests passed.")

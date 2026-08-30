@@ -2524,6 +2524,24 @@ class JarvisLive:
                             asyncio.create_task(
                                 self._dashboard.broadcast_camera_vision_request(request_id, facing)
                             )
+                            # Diagnostic-only (see the module-level note on
+                            # VISION_REQUESTED/VISION_FRAME_RECEIVED/
+                            # VISION_FRAME_ANALYZED distinguishability): a
+                            # plain, always-fires Activity Log entry the
+                            # MOMENT the tool is actually invoked, regardless
+                            # of what the browser does next. Its presence or
+                            # absence is itself diagnostic evidence — if a
+                            # future real-device report says "no camera
+                            # preview appeared" and this line is ALSO
+                            # missing from that session's Activity Log, the
+                            # tool was never called at all (a prompt-
+                            # adherence issue); if this line IS present but
+                            # no preview appeared, the failure is on the
+                            # browser side instead. Never logs image bytes.
+                            asyncio.create_task(self._dashboard.broadcast({
+                                "type": "sys",
+                                "text": "📷 Camera requested — waiting for your device…",
+                            }))
                         print(f"[WebVision] 📷 session opened ({request_id}), facing={facing}")
                         result = (
                             "[VISION_ACTIVE] Immediately say ONE short natural sentence "
@@ -4297,159 +4315,191 @@ class JarvisLive:
             # frames was handled would inject after just that one frame,
             # leaving the rest to trickle in one-per-tick after the burst
             # already closed.
-            items = [item] if item is not None else []
-            while True:
-                try:
-                    items.append(self._dashboard._vision_frame_queue.get_nowait())
-                except Exception:
-                    break
-
-            for one in items:
-                session = self._web_vision_session
-                if session is not None and one.get("request_id") == session["request_id"]:
-                    if one.get("control") == "stop":
-                        print(f"[WebVision] 🛑 client-requested stop ({session['request_id']}): {one.get('reason')!r}")
-                        self._web_vision_session = None
-                        if self._dashboard:
-                            asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
-                    elif "data" in one:
-                        if len(session["frames"]) >= WEB_VISION_BURST_MAX_FRAMES:
-                            # Burst already has enough — drop the excess
-                            # rather than growing past the cap; the client
-                            # keeps sampling and the NEXT burst starts
-                            # fresh once this one is injected/answered.
-                            continue
-                        try:
-                            mime_in = one.get("mime_type") or "image/jpeg"
-                            source_format = mime_in.split("/")[-1].upper() if "/" in mime_in else "JPEG"
-                            img_bytes, out_mime = _compress(one["data"], source_format)
-                            session["frames"].append((out_mime, img_bytes))
-                        except Exception as e:
-                            print(f"[WebVision] Frame compress failed: {e}")
-                else:
-                    # Stale/mismatched request_id (a previous session
-                    # already ended, or a frame arrived before the new one
-                    # was fully armed) — never let a late frame bleed into
-                    # a different conversation/"look".
-                    print(f"[WebVision] Dropping frame for stale/unknown request_id={one.get('request_id')!r}")
-
-            session = self._web_vision_session
-            now = time.monotonic()
-            if session is None:
-                continue
-
-            # Hard cap — regardless of state, one vision "conversation"
-            # can't run forever.
-            if now >= session["deadline"]:
-                print(f"[WebVision] ⏱ hard timeout ({session['request_id']})")
-                if session.get("awaiting_burst") and self.session:
+            try:
+                items = [item] if item is not None else []
+                while True:
                     try:
-                        await self.session.send_client_content(
-                            turns={"parts": [{"text": (
-                                "[VISION_TIMEOUT] The camera didn't provide a clear "
-                                "enough view in time. Tell the user honestly and "
-                                "briefly that you weren't able to get a good look "
-                                "just now, without inventing what you saw."
-                            )}]},
-                            turn_complete=True,
-                        )
-                    except Exception as e:
-                        print(f"[WebVision] Timeout notice send failed: {e}")
-                self._web_vision_session = None
-                if self._dashboard:
-                    asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
-                continue
+                        items.append(self._dashboard._vision_frame_queue.get_nowait())
+                    except Exception:
+                        break
 
-            if session.get("awaiting_burst"):
-                frames = session["frames"]
-                burst_ready = (
-                    len(frames) >= WEB_VISION_BURST_MAX_FRAMES
-                    or (now - session["burst_armed_at"]) >= WEB_VISION_BURST_WINDOW_S
-                )
-                if not burst_ready:
+                for one in items:
+                    session = self._web_vision_session
+                    if session is not None and one.get("request_id") == session["request_id"]:
+                        if one.get("control") == "stop":
+                            print(f"[WebVision] 🛑 client-requested stop ({session['request_id']}): {one.get('reason')!r}")
+                            self._web_vision_session = None
+                            if self._dashboard:
+                                asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
+                        elif "data" in one:
+                            if len(session["frames"]) >= WEB_VISION_BURST_MAX_FRAMES:
+                                # Burst already has enough — drop the excess
+                                # rather than growing past the cap; the client
+                                # keeps sampling and the NEXT burst starts
+                                # fresh once this one is injected/answered.
+                                continue
+                            try:
+                                mime_in = one.get("mime_type") or "image/jpeg"
+                                source_format = mime_in.split("/")[-1].upper() if "/" in mime_in else "JPEG"
+                                img_bytes, out_mime = _compress(one["data"], source_format)
+                                session["frames"].append((out_mime, img_bytes))
+                            except Exception as e:
+                                print(f"[WebVision] Frame compress failed: {e}")
+                    else:
+                        # Stale/mismatched request_id (a previous session
+                        # already ended, or a frame arrived before the new one
+                        # was fully armed) — never let a late frame bleed into
+                        # a different conversation/"look".
+                        print(f"[WebVision] Dropping frame for stale/unknown request_id={one.get('request_id')!r}")
+
+                session = self._web_vision_session
+                now = time.monotonic()
+                if session is None:
                     continue
 
-                if not frames:
-                    # Nothing arrived at all this burst yet. Give a slow
-                    # first permission prompt a little more time before
-                    # treating it as a real failure.
-                    if now - session["started"] < 6.0:
-                        session["burst_armed_at"] = now
-                        continue
-                    print(f"[WebVision] No frames received ({session['request_id']}) — giving up")
-                    if self.session:
+                # Hard cap — regardless of state, one vision "conversation"
+                # can't run forever.
+                if now >= session["deadline"]:
+                    print(f"[WebVision] ⏱ hard timeout ({session['request_id']})")
+                    if session.get("awaiting_burst") and self.session:
                         try:
                             await self.session.send_client_content(
                                 turns={"parts": [{"text": (
-                                    "[VISION_UNAVAILABLE] No camera images arrived at "
-                                    "all — the user's camera may be unavailable, busy, "
-                                    "or they didn't grant permission. Tell them "
-                                    "honestly and briefly that you couldn't access "
-                                    "their camera right now. Do NOT guess or invent "
-                                    "what they might be showing you — you have seen "
-                                    "nothing."
+                                    "[VISION_TIMEOUT] The camera didn't provide a clear "
+                                    "enough view in time. Tell the user honestly and "
+                                    "briefly that you weren't able to get a good look "
+                                    "just now, without inventing what you saw."
                                 )}]},
                                 turn_complete=True,
                             )
                         except Exception as e:
-                            print(f"[WebVision] Unavailable notice send failed: {e}")
+                            print(f"[WebVision] Timeout notice send failed: {e}")
                     self._web_vision_session = None
                     if self._dashboard:
                         asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
                     continue
 
-                if not self.session:
-                    continue   # retry next tick once the Gemini session is back
+                if session.get("awaiting_burst"):
+                    frames = session["frames"]
+                    burst_ready = (
+                        len(frames) >= WEB_VISION_BURST_MAX_FRAMES
+                        or (now - session["burst_armed_at"]) >= WEB_VISION_BURST_WINDOW_S
+                    )
+                    if not burst_ready:
+                        continue
 
-                parts = [
-                    {"inline_data": {"mime_type": mime_t, "data": _b64.b64encode(img_b).decode("ascii")}}
-                    for mime_t, img_b in frames
-                ]
-                n = len(parts)
-                parts.append({"text": (
-                    f"[VISION_OBSERVATION] Here {'is' if n == 1 else 'are'} {n} fresh "
-                    f"view{'s' if n != 1 else ''} from the user's own camera, sampled "
-                    f"moments apart, about: \"{session['text']}\". If you can clearly "
-                    f"identify or answer this, answer now naturally — do NOT call "
-                    f"web_camera_vision again. If it's not clear enough (too blurry, "
-                    f"too dark, too far away, partly out of frame, glare, or blocked), "
-                    f"briefly and naturally tell the user what to adjust — hold "
-                    f"steady, move closer, find better light, center it, move what's "
-                    f"blocking it — THEN call web_camera_vision again so you can see "
-                    f"another look once they've adjusted. Never confidently describe "
-                    f"something you genuinely can't make out."
-                )})
-                # Captured before the await below — see this dict's own
-                # "burst_token" comment. If web_camera_vision is somehow
-                # called again (re-arming a NEW burst) while THIS burst's
-                # send_client_content() is still in flight, the post-send
-                # bookkeeping below must not clobber that newer burst's
-                # state — checked by comparing tokens once the await
-                # returns, instead of assuming nothing changed underneath.
-                req_id, burst_token = session["request_id"], session.get("burst_token")
-                try:
-                    print(f"[WebVision] 📤 {n} frame(s) → main session ({req_id})")
-                    await self.session.send_client_content(turns={"parts": parts}, turn_complete=True)
-                    current = self._web_vision_session
-                    if (current is not None and current["request_id"] == req_id
-                            and current.get("burst_token") == burst_token):
-                        current["frames"]           = []
-                        current["awaiting_burst"]   = False
-                        current["last_answered_at"] = time.monotonic()
-                    else:
-                        print(f"[WebVision] Burst for {req_id} answered after a newer burst was already armed — not overwriting it")
-                except Exception as e:
-                    print(f"[WebVision] Burst send failed: {e}")
-            else:
-                # Already answered this burst — waiting to see if Gemini
-                # asks for another look (a fresh web_camera_vision call
-                # re-arms awaiting_burst above). No re-call within the
-                # grace window means the vision request is genuinely done.
-                if (now - (session.get("last_answered_at") or now)) >= WEB_VISION_GRACE_S:
-                    print(f"[WebVision] ✅ session finished, no further look requested ({session['request_id']})")
-                    self._web_vision_session = None
-                    if self._dashboard:
-                        asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
+                    if not frames:
+                        # Nothing arrived at all this burst yet. Give a slow
+                        # first permission prompt a little more time before
+                        # treating it as a real failure.
+                        if now - session["started"] < 6.0:
+                            session["burst_armed_at"] = now
+                            continue
+                        print(f"[WebVision] No frames received ({session['request_id']}) — giving up")
+                        if self._dashboard:
+                            # Diagnostic-only, same reasoning as the
+                            # "camera requested" marker above — proves the
+                            # request WAS broadcast but no real frame ever
+                            # came back (distinguishes a browser/permission
+                            # failure from the tool never being called at all).
+                            asyncio.create_task(self._dashboard.broadcast({
+                                "type": "sys",
+                                "text": "⚠️ No camera image arrived — camera may be unavailable or permission wasn't granted.",
+                            }))
+                        if self.session:
+                            try:
+                                await self.session.send_client_content(
+                                    turns={"parts": [{"text": (
+                                        "[VISION_UNAVAILABLE] No camera images arrived at "
+                                        "all — the user's camera may be unavailable, busy, "
+                                        "or they didn't grant permission. Tell them "
+                                        "honestly and briefly that you couldn't access "
+                                        "their camera right now. Do NOT guess or invent "
+                                        "what they might be showing you — you have seen "
+                                        "nothing."
+                                    )}]},
+                                    turn_complete=True,
+                                )
+                            except Exception as e:
+                                print(f"[WebVision] Unavailable notice send failed: {e}")
+                        self._web_vision_session = None
+                        if self._dashboard:
+                            asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
+                        continue
+
+                    if not self.session:
+                        continue   # retry next tick once the Gemini session is back
+
+                    parts = [
+                        {"inline_data": {"mime_type": mime_t, "data": _b64.b64encode(img_b).decode("ascii")}}
+                        for mime_t, img_b in frames
+                    ]
+                    n = len(parts)
+                    parts.append({"text": (
+                        f"[VISION_OBSERVATION] Here {'is' if n == 1 else 'are'} {n} fresh "
+                        f"view{'s' if n != 1 else ''} from the user's own camera, sampled "
+                        f"moments apart, about: \"{session['text']}\". If you can clearly "
+                        f"identify or answer this, answer now naturally — do NOT call "
+                        f"web_camera_vision again. If it's not clear enough (too blurry, "
+                        f"too dark, too far away, partly out of frame, glare, or blocked), "
+                        f"briefly and naturally tell the user what to adjust — hold "
+                        f"steady, move closer, find better light, center it, move what's "
+                        f"blocking it — THEN call web_camera_vision again so you can see "
+                        f"another look once they've adjusted. Never confidently describe "
+                        f"something you genuinely can't make out."
+                    )})
+                    # Captured before the await below — see this dict's own
+                    # "burst_token" comment. If web_camera_vision is somehow
+                    # called again (re-arming a NEW burst) while THIS burst's
+                    # send_client_content() is still in flight, the post-send
+                    # bookkeeping below must not clobber that newer burst's
+                    # state — checked by comparing tokens once the await
+                    # returns, instead of assuming nothing changed underneath.
+                    req_id, burst_token = session["request_id"], session.get("burst_token")
+                    try:
+                        print(f"[WebVision] 📤 {n} frame(s) → main session ({req_id})")
+                        if self._dashboard:
+                            # Diagnostic-only — proves REAL frame bytes actually
+                            # reached this session and were handed to Gemini
+                            # (never the frame content itself, only a count).
+                            asyncio.create_task(self._dashboard.broadcast({
+                                "type": "sys",
+                                "text": f"👁 Analyzing {n} camera view{'s' if n != 1 else ''}…",
+                            }))
+                        await self.session.send_client_content(turns={"parts": parts}, turn_complete=True)
+                        current = self._web_vision_session
+                        if (current is not None and current["request_id"] == req_id
+                                and current.get("burst_token") == burst_token):
+                            current["frames"]           = []
+                            current["awaiting_burst"]   = False
+                            current["last_answered_at"] = time.monotonic()
+                        else:
+                            print(f"[WebVision] Burst for {req_id} answered after a newer burst was already armed — not overwriting it")
+                    except Exception as e:
+                        print(f"[WebVision] Burst send failed: {e}")
+                else:
+                    # Already answered this burst — waiting to see if Gemini
+                    # asks for another look (a fresh web_camera_vision call
+                    # re-arms awaiting_burst above). No re-call within the
+                    # grace window means the vision request is genuinely done.
+                    if (now - (session.get("last_answered_at") or now)) >= WEB_VISION_GRACE_S:
+                        print(f"[WebVision] ✅ session finished, no further look requested ({session['request_id']})")
+                        self._web_vision_session = None
+                        if self._dashboard:
+                            asyncio.create_task(self._dashboard.broadcast_camera_vision_stop(session["request_id"]))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # Resilience: an unexpected bug here must never silently
+                # kill this process-lifetime task forever (it is created
+                # via a bare asyncio.create_task() in run(), OUTSIDE the
+                # per-connection TaskGroup, so nothing would ever restart
+                # it — unlike _process_tool_calls(), which deliberately
+                # re-raises to let its own TaskGroup reconnect). Same
+                # "log and keep going" precedent as
+                # _process_dashboard_image_commands()'s own outer catch.
+                print(f"[WebVision] Unexpected error in frame processing: {e}")
+                traceback.print_exc()
 
     # ── main loop ───────────────────────────────────────────────────────────
 
