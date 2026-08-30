@@ -257,7 +257,12 @@ def test_greeting_prompt_personalized_identically_across_interfaces() -> None:
             web_prompt = web.session.sent[0]
             desktop_prompt = desktop.session.sent[0]
             assert "Saroj" in web_prompt and "Saroj" in desktop_prompt
-            assert "Subha Prabhat" in web_prompt and "Subha Prabhat" in desktop_prompt
+            # Same natural-language greeting guidance either way (not tied
+            # to a specific banned phrase — see LANGUAGE clause in main.py).
+            assert (
+                "generated fresh for this exact moment" in web_prompt
+                and "generated fresh for this exact moment" in desktop_prompt
+            )
             assert ("never as 'sir' or 'efendim'" in web_prompt) == (
                 "never as 'sir' or 'efendim'" in desktop_prompt
             )

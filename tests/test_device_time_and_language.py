@@ -7,8 +7,10 @@ tests/test_device_time_and_language.py — focused tests for two fixes:
      real zoneinfo database) for every user-facing/Gemini-facing time
      context — never the backend server's own clock/timezone, and never a
      hardcoded zone or offset.
-  2. Natural Nepali-default language + a non-Sanskritized morning greeting
-     (no more "Subha Prabhat").
+  2. Natural Nepali-default language, taught as a generation PRINCIPLE
+     (formulate directly in Nepali, don't translate English word-for-word,
+     adapt register to context) rather than a growing blacklist of banned
+     phrases like the old "no more Subha Prabhat" rule.
 
 Run with:
     .venv/Scripts/python.exe -m tests.test_device_time_and_language
@@ -174,7 +176,7 @@ def test_login_username_works_unchanged_without_timezone_field() -> None:
     print("test_login_username_works_unchanged_without_timezone_field: PASS")
 
 
-# ── natural Nepali-default language + non-Sanskritized greeting ──────────
+# ── natural Nepali-default language, taught as a principle ───────────────
 
 def test_identity_language_line_sets_natural_nepali_default() -> None:
     """Nepali is the ultimate fallback only when nothing else (an explicit
@@ -193,23 +195,40 @@ def test_identity_language_line_sets_natural_nepali_default() -> None:
     print("test_identity_language_line_sets_natural_nepali_default: PASS")
 
 
-def test_identity_language_line_forbids_subha_prabhat() -> None:
+def test_identity_language_line_teaches_direct_formulation_not_a_phrase_ban() -> None:
+    """The Nepali clause must teach the underlying GENERATION PRINCIPLE
+    (compose directly in Nepali, don't translate an English sentence
+    word-for-word — that's what produces stiff/textbook Nepali) and
+    contextual register, rather than banning one specific hardcoded
+    phrase — that principle generalizes to sentences no example covers,
+    a blacklist entry never would."""
     jarvis = JarvisLive(HeadlessSurface())
     with patch("main.load_memory", return_value={}):
         config = jarvis._build_config()
-    assert "Subha Prabhat" in config.system_instruction  # named explicitly as what NOT to do
-    print("test_identity_language_line_forbids_subha_prabhat: PASS")
+    instr = config.system_instruction
+    # direct formulation, not literal translation
+    assert "Formulate the thought directly in Nepali" in instr
+    assert "word-for-word" in instr
+    # contextual register, not one fixed formality level
+    assert "register shift with context" in instr
+    assert "relaxed for casual talk" in instr
+    print("test_identity_language_line_teaches_direct_formulation_not_a_phrase_ban: PASS")
 
 
-def test_startup_briefing_prompt_discourages_subha_prabhat() -> None:
+def test_startup_briefing_prompt_follows_natural_language_principle() -> None:
+    """The greeting prompt must point Gemini at generating something
+    genuinely fresh for the moment (per the LANGUAGE principle above),
+    not enumerate a specific banned greeting phrase."""
     async def _run():
         jarvis = JarvisLive(HeadlessSurface())
         jarvis.session = _FakeSession()
         with patch("main.pop_last_session", return_value=None):
             await jarvis._send_startup_briefing()
         prompt = jarvis.session.sent[0]
-        assert "Subha Prabhat" in prompt
-        print("test_startup_briefing_prompt_discourages_subha_prabhat: PASS")
+        assert "see LANGUAGE above" in prompt
+        assert "generated fresh for this exact moment" in prompt
+        assert "never a fixed or ceremonial stock phrase" in prompt
+        print("test_startup_briefing_prompt_follows_natural_language_principle: PASS")
 
     asyncio.run(_run())
 
@@ -226,6 +245,6 @@ if __name__ == "__main__":
     test_login_username_ignores_malformed_timezone_without_failing_login()
     test_login_username_works_unchanged_without_timezone_field()
     test_identity_language_line_sets_natural_nepali_default()
-    test_identity_language_line_forbids_subha_prabhat()
-    test_startup_briefing_prompt_discourages_subha_prabhat()
+    test_identity_language_line_teaches_direct_formulation_not_a_phrase_ban()
+    test_startup_briefing_prompt_follows_natural_language_principle()
     print("\nAll device-time/language tests passed.")
