@@ -32,6 +32,25 @@ WSS /ws  (existing route, extended, fully backward compatible)
                                   commands(), which injects it into the
                                   SAME live Gemini session desktop's
                                   screen_process tool already uses
+        "vision_frame"          — web LIVE camera vision: one sampled
+                                  browser camera frame ({"request_id",
+                                  "seq", "mime_type", "data": <base64>}),
+                                  validated here exactly like
+                                  "image_command" and queued to
+                                  self._vision_frame_queue; see main.py's
+                                  web_camera_vision tool /
+                                  _process_web_vision_frames(), which
+                                  batches several frames into short
+                                  "observation bursts" before injecting
+                                  them into the same Gemini session
+        "vision_control"        — web live camera vision: a client-side
+                                  lifecycle signal for an active vision
+                                  request ({"request_id", "action": "stop",
+                                  "reason"}) — e.g. the user pressed Stop,
+                                  or the browser's camera failed. Queued to
+                                  self._vision_frame_queue alongside actual
+                                  frames (main.py's consumer distinguishes
+                                  them by the presence of "control")
         "device_action_result" — protocol shape reserved for Phase 6
                                   (Desktop Device Agent); recognized so it
                                   doesn't fall through as noise, but nothing
@@ -47,6 +66,25 @@ WSS /ws  (existing route, extended, fully backward compatible)
                                    too large, or not a real image) — sent
                                    directly back to the requesting socket,
                                    not broadcast
+        "vision_error"           — a rejected "vision_frame" — sent
+                                   directly back to the requesting socket,
+                                   not broadcast, same shape as
+                                   "image_error"
+        "camera_vision_request"  — web live camera vision: server asks the
+                                   browser to open its camera and start
+                                   streaming sampled frames for a given
+                                   request_id (see
+                                   broadcast_camera_vision_request()) — a
+                                   live, one-off signal, never replayed
+                                   from history to a client that connects
+                                   later, same treatment as
+                                   "location_refresh_request"
+        "camera_vision_stop"     — web live camera vision: server tells
+                                   the browser to stop its camera stream
+                                   for a given request_id (see
+                                   broadcast_camera_vision_stop()) — same
+                                   non-history treatment as
+                                   "camera_vision_request"
         "device_action"         — protocol shape reserved for Phase 6;
                                    nothing sends this yet
 
@@ -689,6 +727,13 @@ class DashboardServer:
         # _process_dashboard_commands() one-for-one but injects an
         # inline_data image part alongside the text.
         self._image_command_queue         = asyncio.Queue()
+        # Web LIVE camera vision: a third, separate queue — never mixed
+        # into _command_queue or _image_command_queue. Carries validated
+        # sampled camera frames AND lifecycle "vision_control" signals
+        # (e.g. client-side stop) — see main.py's
+        # _process_web_vision_frames(), which batches frames into short
+        # observation bursts before injecting them into the Gemini session.
+        self._vision_frame_queue          = asyncio.Queue()
         self._wake_callback               = None
         self._connect_callback            = None
         self._username_callback           = None   # Phase 8: fires on a successful /login/username
@@ -972,6 +1017,32 @@ class DashboardServer:
         conversation content worth replaying to a client that connects
         later."""
         await self._send_to_clients({"type": "location_refresh_request"})
+
+    async def broadcast_camera_vision_request(self, request_id: str, facing: str) -> None:
+        """Web live camera vision: server -> client signal asking the
+        browser to open its camera and start streaming sampled frames for
+        the given request_id (see main.py's web_camera_vision tool /
+        _process_web_vision_frames()). Same "live, one-off signal, not
+        conversation content" reasoning as
+        broadcast_location_refresh_request() above -- never routed through
+        broadcast()/self._history, so a client that connects later never
+        receives a stale "open your camera" replay."""
+        await self._send_to_clients({
+            "type": "camera_vision_request",
+            "request_id": request_id,
+            "facing": facing,
+        })
+
+    async def broadcast_camera_vision_stop(self, request_id: str) -> None:
+        """Web live camera vision: server -> client signal telling the
+        browser to stop its camera stream for the given request_id --
+        fired once the backend's own observation session ends (answered,
+        timed out, or explicitly stopped). Same non-history reasoning as
+        broadcast_camera_vision_request() above."""
+        await self._send_to_clients({
+            "type": "camera_vision_stop",
+            "request_id": request_id,
+        })
 
     async def broadcast_content(self, title: str, text: str) -> None:
         """Server→client "content" message — mirrors JarvisUI.show_content's
@@ -2036,6 +2107,80 @@ class DashboardServer:
                                 })
                                 if self._wake_callback:
                                     self._wake_callback()
+
+                    elif msg_type == "vision_frame":
+                        # Web LIVE camera vision — one sampled browser
+                        # camera frame for an already-open request (see
+                        # main.py's web_camera_vision tool, which is what
+                        # actually opens a request_id). Validation is
+                        # identical to "image_command" above (same untrusted-
+                        # input boundary); request_id relevance (does this
+                        # frame belong to the CURRENTLY active vision
+                        # session?) is decided in main.py's
+                        # _process_web_vision_frames(), not here — this
+                        # handler only knows about bytes, not conversation
+                        # state. Never queued to disk.
+                        request_id = str(data.get("request_id") or "").strip()
+                        mime       = (data.get("mime_type") or "").strip().lower()
+                        b64        = data.get("data") or ""
+
+                        if not request_id:
+                            await websocket.send_json({
+                                "type": "vision_error",
+                                "error": "Missing request_id.",
+                            })
+                        elif mime not in ALLOWED_IMAGE_MIME_TYPES:
+                            await websocket.send_json({
+                                "type": "vision_error", "request_id": request_id,
+                                "error": "That image type isn't supported. Try a JPEG, PNG, or WebP.",
+                            })
+                        elif not b64 or len(b64) > MAX_IMAGE_B64_CHARS:
+                            await websocket.send_json({
+                                "type": "vision_error", "request_id": request_id,
+                                "error": "That camera frame is too large to send.",
+                            })
+                        else:
+                            try:
+                                raw = base64.b64decode(b64, validate=True)
+                            except Exception:
+                                raw = None
+                            if raw is None or len(raw) > MAX_IMAGE_BYTES:
+                                await websocket.send_json({
+                                    "type": "vision_error", "request_id": request_id,
+                                    "error": "That camera frame couldn't be read.",
+                                })
+                            elif _PIL_OK and not _looks_like_a_real_image(raw):
+                                await websocket.send_json({
+                                    "type": "vision_error", "request_id": request_id,
+                                    "error": "That doesn't look like a valid camera frame.",
+                                })
+                            else:
+                                await self._vision_frame_queue.put({
+                                    "request_id": request_id,
+                                    "seq": data.get("seq"),
+                                    "mime_type": mime,
+                                    "data": raw,
+                                })
+                                # No _wake_callback() here — a vision_frame only
+                                # ever arrives for an ALREADY-open request_id
+                                # (opened by the web_camera_vision tool call
+                                # itself, which already has a live session).
+
+                    elif msg_type == "vision_control":
+                        # Web live camera vision — a client-side lifecycle
+                        # signal for an active request, e.g. the user
+                        # pressed Stop, or getUserMedia failed after the
+                        # camera was already streaming. Queued alongside
+                        # real frames (main.py's consumer tells them apart
+                        # by the presence of "control").
+                        request_id = str(data.get("request_id") or "").strip()
+                        action     = str(data.get("action") or "").strip().lower()
+                        if request_id and action == "stop":
+                            await self._vision_frame_queue.put({
+                                "request_id": request_id,
+                                "control": "stop",
+                                "reason": str(data.get("reason") or "")[:200],
+                            })
 
                     elif msg_type == "device_action_result":
                         # Protocol shape reserved for Phase 6 (Desktop Device

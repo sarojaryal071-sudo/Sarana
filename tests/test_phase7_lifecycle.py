@@ -55,6 +55,7 @@ class _FakeDashboard:
         self._capabilities_fn = None   # Permissions foundation
         self._command_queue = asyncio.Queue()
         self._image_command_queue = asyncio.Queue()  # web visual intelligence
+        self._vision_frame_queue = asyncio.Queue()  # web live camera vision
         self._phone_audio_queue = asyncio.Queue()  # touched by _relay_phone_audio
 
     def set_connect_callback(self, fn):

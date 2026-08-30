@@ -9,6 +9,16 @@
 //                        photo, injected into the SAME live Gemini session
 //                        as the desktop screen_process tool already uses
 //                        (see main.py's _process_dashboard_image_commands()).
+//                      {"type": "vision_frame", "request_id", "seq",
+//                        "mime_type", "data": <base64>}  — web LIVE camera
+//                        vision: one sampled camera frame for an ALREADY-
+//                        open request (see main.py's web_camera_vision
+//                        tool / lib/cameraVision.js). Never sent unless a
+//                        "camera_vision_request" was received first.
+//                      {"type": "vision_control", "request_id",
+//                        "action": "stop", "reason"}  — client-side
+//                        lifecycle signal for an active vision request
+//                        (user pressed Stop, camera failed mid-stream)
 //                      {"type": "device_action_result", ...}  (not sent by
 //                        this frontend — that's a Phase 6 desktop-agent
 //                        message, reserved but not implemented anywhere yet)
@@ -22,6 +32,15 @@
 //                      {"type": "image_error", "error"}  — a rejected
 //                        image_command (bad type/too large/not a real
 //                        image); forwarded to onMessage like any other type
+//                      {"type": "vision_error", "request_id", "error"}  — a
+//                        rejected vision_frame, same treatment as image_error
+//                      {"type": "camera_vision_request", "request_id",
+//                        "facing"}  — web live camera vision: the backend
+//                        wants the browser to open its camera (see
+//                        components/CameraVisionPanel.jsx)
+//                      {"type": "camera_vision_stop", "request_id"}  — the
+//                        backend's own observation session ended; stop the
+//                        camera for this request_id
 //                      {"type": "device_action", ...}  (reserved, unsent today)
 //                      {"type": "pong", "t": <the ping's own timestamp>}
 //                        (handled internally, never forwarded to onMessage)
@@ -189,6 +208,33 @@ export class JarvisSocket {
     if (this._ws?.readyState === WebSocket.OPEN) {
       this._ws.send(JSON.stringify({
         type: "image_command", data: base64, mime_type: mimeType, text,
+      }));
+      return true;
+    }
+    return false;
+  }
+
+  /** Send one sampled live-camera frame for an ALREADY-open vision
+   * request (see components/CameraVisionPanel.jsx / lib/cameraVision.js).
+   * `base64` must NOT include the "data:image/...;base64," prefix. */
+  sendVisionFrame(requestId, base64, mimeType, seq) {
+    if (this._ws?.readyState === WebSocket.OPEN) {
+      this._ws.send(JSON.stringify({
+        type: "vision_frame", request_id: requestId, seq,
+        mime_type: mimeType, data: base64,
+      }));
+      return true;
+    }
+    return false;
+  }
+
+  /** Client-side lifecycle signal for an active vision request — e.g. the
+   * user pressed Stop, or the camera failed mid-stream. */
+  sendVisionControl(requestId, action, reason) {
+    if (!requestId) return false;
+    if (this._ws?.readyState === WebSocket.OPEN) {
+      this._ws.send(JSON.stringify({
+        type: "vision_control", request_id: requestId, action, reason,
       }));
       return true;
     }

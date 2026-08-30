@@ -193,6 +193,57 @@ test("toggle() on a not-yet-decided (prompt) capability attempts a real request"
   }
 });
 
+// ── web live camera vision: the "camera" registry entry ─────────────────
+
+test("PERMISSION_DEFS includes camera alongside microphone/location", async () => {
+  const { PERMISSION_DEFS } = await import("./permissions.js");
+  const ids = PERMISSION_DEFS.map((d) => d.id);
+  assert.ok(ids.includes("camera"), "camera must be a listed capability, same as microphone/location");
+});
+
+test("camera request() resolves granted via getUserMedia({video: {facingMode: {ideal: \"environment\"}}})", async () => {
+  let lastConstraints = null;
+  mockNavigator.mediaDevices.getUserMedia = async (constraints) => {
+    lastConstraints = constraints;
+    return { getTracks: () => [{ stop: () => {} }] };
+  };
+  try {
+    const result = await permissionManager.request("camera");
+    assert.equal(result, "granted");
+    assert.equal(lastConstraints.video.facingMode.ideal, "environment");
+    assert.ok(!("exact" in lastConstraints.video.facingMode), "must never hard-require exact:\"environment\"");
+  } finally {
+    permissionManager.reportObserved("camera", "prompt"); // leave clean for other tests
+  }
+});
+
+test("camera request() resolves denied on NotAllowedError, never silently granted", async () => {
+  mockNavigator.mediaDevices.getUserMedia = async () => {
+    const err = new Error("mock denial");
+    err.name = "NotAllowedError";
+    throw err;
+  };
+  try {
+    const result = await permissionManager.request("camera");
+    assert.equal(result, "denied");
+  } finally {
+    permissionManager.reportObserved("camera", "prompt");
+  }
+});
+
+test("App.jsx never auto-enables camera the way it auto-starts microphone", () => {
+  // No consumer/auto-enable effect exists for "camera" the way the mic
+  // auto-start effect exists for "microphone" (see App.jsx's own
+  // permissionManager.enable("microphone") effect) — starting the camera
+  // is always driven directly by CameraVisionPanel.jsx in response to a
+  // real backend "camera_vision_request", never proactively on login.
+  const appSrc = fs.readFileSync(path.join(__dirname, "..", "App.jsx"), "utf8");
+  assert.doesNotMatch(
+    appSrc, /permissionManager\.enable\(\s*"camera"\s*\)/,
+    "App.jsx must never proactively request camera access on login",
+  );
+});
+
 // ── item 11: session reset preserves the existing lifecycle behavior ────
 
 test("resetSession() forgets the enable preference but never the browser permission", () => {

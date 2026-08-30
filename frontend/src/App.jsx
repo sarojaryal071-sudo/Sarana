@@ -11,6 +11,7 @@ import { permissionManager } from "./lib/permissions";
 import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
 import { MicStreamer } from "./lib/mic";
+import { stopCameraVision } from "./lib/cameraVision";
 import LoginScreen, { readStoredSession, clearStoredToken } from "./components/LoginScreen";
 import Header from "./components/Header";
 import Orb from "./components/Orb";
@@ -19,6 +20,7 @@ import ContentPanel from "./components/ContentPanel";
 import Controls from "./components/Controls";
 import ConnectionBanner from "./components/ConnectionBanner";
 import ToolsRail from "./components/ToolsRail";
+import CameraVisionPanel from "./components/CameraVisionPanel";
 
 const SESSION_RETRY_MS = 4000;
 
@@ -67,6 +69,12 @@ export default function App() {
   const micRef = useRef(null);
   const micAutoStartedRef = useRef(false); // item 1: auto-start mic once per login, not per utterance
   const locationRequestedRef = useRef(false); // location foundation: one browser location attempt per login
+  // Web live camera vision: {requestId, facing} | null — mirrors the
+  // backend's own self._web_vision_session (main.py), set by the
+  // "camera_vision_request" WS message and cleared by "camera_vision_stop"
+  // or the panel's own Stop button. Deliberately separate state from
+  // `pendingImage` (Controls.jsx) — an entirely different feature.
+  const [visionRequest, setVisionRequest] = useState(null);
 
   // ── GET /api/session — unauthenticated, works before any login ─────────
   const loadSession = useCallback(async () => {
@@ -221,6 +229,30 @@ export default function App() {
             // existing SYS_MESSAGE display, no new UI needed.
             dispatch({ type: "SYS_MESSAGE", text: msg.error || "That image couldn't be sent.", ts: null });
             break;
+          case "vision_error":
+            // Web live camera vision: dashboard/server.py rejected a
+            // "vision_frame" — same treatment as image_error. A single
+            // rejected sampled frame isn't fatal to the session (more
+            // frames follow every ~900ms — see lib/cameraVision.js), so
+            // this is surfaced but doesn't itself stop the camera.
+            dispatch({ type: "SYS_MESSAGE", text: msg.error || "A camera frame couldn't be sent.", ts: null });
+            break;
+          case "camera_vision_request":
+            // Backend (main.py's web_camera_vision tool) wants to look
+            // through the browser's camera — mounts CameraVisionPanel,
+            // which owns the actual getUserMedia lifecycle (see
+            // lib/cameraVision.js). A second request while one is already
+            // active (Gemini asking for "another look") just replaces the
+            // facing/requestId — the panel's own effect re-arms sampling.
+            setVisionRequest({ requestId: msg.request_id, facing: msg.facing || "environment" });
+            break;
+          case "camera_vision_stop":
+            // The backend's own observation session ended (answered,
+            // timed out, or nothing arrived) — stop and unmount, but only
+            // if this is actually the CURRENTLY active request (never let
+            // a stale stop for an old request tear down a newer one).
+            setVisionRequest((cur) => (cur && cur.requestId === msg.request_id ? null : cur));
+            break;
           case "device_action":
             // Reserved for Phase 6's desktop-agent dispatch — nothing sends
             // this yet (see dashboard/server.py). Logged, not acted on.
@@ -310,6 +342,14 @@ export default function App() {
       // permissionManager.resetSession()'s own docstring for why that
       // precedent, not localStorage, is what this was modeled on).
       permissionManager.resetSession();
+      // Web live camera vision: a session ending (logout/token change)
+      // must never leave a camera running unattended — stop it directly
+      // (CameraVisionPanel's own unmount effect would also catch this,
+      // but the panel only unmounts on the NEXT render; this is immediate)
+      // and clear the request so the panel doesn't try to reuse a stale
+      // requestId if a new login starts.
+      stopCameraVision();
+      setVisionRequest(null);
     };
   }, [state.authenticationState, state.token, dispatch]);
 
@@ -536,6 +576,29 @@ export default function App() {
     }
   }
 
+  // Web live camera vision: forwards one sampled frame from
+  // CameraVisionPanel (lib/cameraVision.js) over the same authenticated
+  // WS as everything else — see websocket.js's sendVisionFrame() / main.py's
+  // _process_web_vision_frames(). Deliberately no dispatch/log entry per
+  // frame (several arrive per second-ish; that would flood the Activity
+  // Log) — the conversation itself is what SARANA says once it evaluates
+  // a batch, which arrives as an ordinary "log" message like any other.
+  function handleVisionFrame(base64, mimeType, seq) {
+    if (!visionRequest) return;
+    socketRef.current?.sendVisionFrame(visionRequest.requestId, base64, mimeType, seq);
+  }
+
+  // Fired when the user presses Stop in the panel, or the camera itself
+  // fails mid-stream — tells the backend so it can end
+  // self._web_vision_session immediately instead of waiting out its own
+  // grace/timeout window, then clears local state.
+  function handleVisionStopped(reason) {
+    if (visionRequest) {
+      socketRef.current?.sendVisionControl(visionRequest.requestId, "stop", reason);
+    }
+    setVisionRequest(null);
+  }
+
   // The main mic button no longer decides on/off itself (it used to
   // branch directly on the ref's own streaming flag) — it calls the exact same
   // permissionManager.toggle() the Settings mic switch calls
@@ -629,6 +692,14 @@ export default function App() {
           assistantName={state.assistantName}
           onAuthenticated={handleAuthenticated}
           error={state.authError}
+        />
+      )}
+      {authenticated && visionRequest && (
+        <CameraVisionPanel
+          requestId={visionRequest.requestId}
+          facing={visionRequest.facing}
+          onFrame={handleVisionFrame}
+          onStopped={handleVisionStopped}
         />
       )}
     </div>

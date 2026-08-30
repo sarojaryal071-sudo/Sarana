@@ -110,6 +110,32 @@ const REGISTRY = {
       }
     },
   },
+  // Web live camera vision: unlike microphone/location above, nothing
+  // proactively calls enable("camera") on login — a real getUserMedia
+  // request only ever happens in direct response to a backend
+  // "camera_vision_request" (see lib/cameraVision.js/
+  // components/CameraVisionPanel.jsx), and even then only automatically
+  // when the browser already granted it; the FIRST time, it waits for an
+  // explicit "Allow Camera" tap so the request stays inside a real user
+  // gesture (required by iOS Safari, and good practice everywhere). This
+  // registry entry exists so that flow shares the exact same "never
+  // fabricate/override a browser denial" state model as everything else,
+  // and so Settings can show real camera status.
+  camera: {
+    permissionsApiName: "camera",
+    async request() {
+      if (!navigator.mediaDevices?.getUserMedia) return "unsupported";
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" } },
+        });
+        stream.getTracks().forEach((t) => t.stop());
+        return "granted";
+      } catch (e) {
+        return e?.name === "NotAllowedError" ? "denied" : "unsupported";
+      }
+    },
+  },
 };
 
 /** Static, UI-facing metadata — id/name/description only. Deliberately
@@ -127,6 +153,12 @@ export const PERMISSION_DEFS = [
     name: "Location",
     description:
       "Allows SARANA to provide nearby places, weather, directions, and location-aware assistance.",
+  },
+  {
+    id: "camera",
+    name: "Camera",
+    description:
+      "Lets SARANA briefly look through your camera when it needs to see something you're showing it.",
   },
 ];
 

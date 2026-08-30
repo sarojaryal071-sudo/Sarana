@@ -460,6 +460,101 @@ input {
   padding: 4px 10px;
 }
 
+/* ── web live camera vision ─────────────────────────────────────────── */
+/* Small floating card, never fullscreen (see CameraVisionPanel.jsx) —
+   fixed to a corner so its position in the component tree doesn't
+   matter, and mobile/portrait-friendly (wide enough to read, never wider
+   than the viewport). Deliberately separate from .image-preview-* above —
+   a different feature, styled to match the same dark-cyan HUD language. */
+.vision-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 88px; /* clears the docked Controls bar so it never overlaps typing */
+  width: min(260px, calc(100vw - 24px));
+  background: var(--panel);
+  border: 1px solid var(--border-b);
+  border-radius: 6px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+  z-index: 40;
+  overflow: hidden;
+}
+
+.vision-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.vision-panel-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vision-panel-min {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-a);
+  color: var(--pri);
+  border-radius: 4px;
+  min-width: 26px;
+  min-height: 26px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+.vision-panel-min:hover {
+  background: var(--pri-ghost);
+}
+
+.vision-panel-body {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.vision-panel-video {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border-a);
+  background: #000;
+}
+
+.vision-panel-permission p,
+.vision-panel-error {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.vision-panel-error {
+  color: var(--muted-c);
+}
+
+.vision-panel-stop {
+  min-height: 34px;
+  padding: 6px 10px;
+}
+
+/* Minimized: header only, body hidden entirely (see the component's own
+   conditional render) — the camera keeps sampling in the background
+   (lib/cameraVision.js has no idea the UI is minimized), only the
+   preview/controls are hidden. */
+.vision-panel-minimized {
+  width: auto;
+}
+
 /* ── login overlay ──────────────────────────────────────────────────── */
 /* Phase 9: an overlay on top of the always-rendered main shell (see
    App.jsx) rather than a full-screen replacement — mirrors ui.py's own
