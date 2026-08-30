@@ -90,7 +90,7 @@ from actions import calendar_store, calendar_auth
 from actions.send_message      import send_message
 from actions.reminder          import reminder
 from actions.computer_settings import computer_settings
-from actions.screen_processor  import _capture_camera, _capture_screen
+from actions.screen_processor  import _capture_camera, _capture_screen, _compress
 from actions.youtube_video     import youtube_video
 from actions.desktop           import desktop_control
 from actions.browser_control   import browser_control
@@ -3923,6 +3923,68 @@ class JarvisLive:
                 print(f"[Dashboard] Command error: {e}")
                 await asyncio.sleep(0.5)
 
+    async def _process_dashboard_image_commands(self) -> None:
+        """Web visual intelligence — browser-submitted image ingress.
+        Mirrors _process_dashboard_commands() above one-for-one (same
+        queue-drain shape, same session-ready wait, same drop-if-no-session
+        behavior), except the turn also carries an inline_data image part.
+
+        Deliberately NOT a new vision subsystem: this reuses the exact same
+        pieces the desktop screen_process tool already uses —
+        actions/screen_processor.py's _compress() for resize/re-encode, and
+        the identical {"inline_data": ..., "text": ...} turn shape sent to
+        THIS SAME self.session (see the "Vision injection" comment further
+        down in this file, near turn_complete handling). The image becomes
+        a real turn in the ongoing conversation, so a later "read the
+        bottom part" / "translate that" follow-up has it in context exactly
+        like any other prior turn would.
+
+        screen_process/close_camera themselves are untouched by this method
+        and are never called from it — a browser-submitted image already
+        HAS its bytes; there is no local screen/camera left to "capture",
+        and DESKTOP_ONLY_TOOLS' gating of those two tools for web sessions
+        is correct and unrelated to this path.
+
+        Validation (auth, MIME type, size, real-image decode) already
+        happened in dashboard/server.py's /ws handler before an item ever
+        reaches self._dashboard._image_command_queue — this method trusts
+        its queue the same way _process_dashboard_commands() trusts its
+        own."""
+        import base64 as _b64
+        while True:
+            try:
+                item = await asyncio.wait_for(
+                    self._dashboard._image_command_queue.get(), timeout=0.5
+                )
+                raw_bytes = item["data"]
+                mime      = item["mime_type"]
+                text      = item["text"]
+                # Wait up to 8s for session to become ready after a wake —
+                # identical pattern to _process_dashboard_commands().
+                for _ in range(80):
+                    if self.session:
+                        break
+                    await asyncio.sleep(0.1)
+                if self.session:
+                    source_format = mime.split("/")[-1].upper() if "/" in mime else "JPEG"
+                    img_bytes, out_mime = _compress(raw_bytes, source_format)
+                    b64 = _b64.b64encode(img_bytes).decode("ascii")
+                    await self.session.send_client_content(
+                        turns={"parts": [
+                            {"inline_data": {"mime_type": out_mime, "data": b64}},
+                            {"text": text},
+                        ]},
+                        turn_complete=True,
+                    )
+                    self.ui.write_log(f"[Web image]: {text}")
+                else:
+                    print(f"[Dashboard] Dropped image command (no session): {text!r}")
+            except asyncio.TimeoutError:
+                pass
+            except Exception as e:
+                print(f"[Dashboard] Image command error: {e}")
+                await asyncio.sleep(0.5)
+
     # ── main loop ───────────────────────────────────────────────────────────
 
     async def run(self):
@@ -3994,6 +4056,10 @@ class JarvisLive:
             asyncio.create_task(self._dashboard.serve())
             # Runs for the whole lifetime, not just inside an active session
             asyncio.create_task(self._process_dashboard_commands())
+            # Web visual intelligence: same lifetime/pattern as the text
+            # command relay above, one queue each so an image never blocks
+            # behind a text command or vice versa.
+            asyncio.create_task(self._process_dashboard_image_commands())
         except Exception as e:
             print(f"[Dashboard] Disabled: {e}")
             self._dashboard = None

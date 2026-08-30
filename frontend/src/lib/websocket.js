@@ -3,6 +3,12 @@
 // Protocol is NOT invented here — it's exactly dashboard/server.py's /ws
 // route (Phase 3), the same one dashboard/static/app.html already speaks:
 //   client -> server: {"type": "command", "text": "..."}
+//                      {"type": "image_command", "data": <base64, no data:
+//                        URI prefix>, "mime_type": "image/jpeg", "text": "..."}
+//                        — web visual intelligence: a browser-submitted
+//                        photo, injected into the SAME live Gemini session
+//                        as the desktop screen_process tool already uses
+//                        (see main.py's _process_dashboard_image_commands()).
 //                      {"type": "device_action_result", ...}  (not sent by
 //                        this frontend — that's a Phase 6 desktop-agent
 //                        message, reserved but not implemented anywhere yet)
@@ -13,6 +19,9 @@
 //                      {"type": "sys", "text"}
 //                      {"type": "file_received", ...}
 //                      {"type": "content", "title", "text"}
+//                      {"type": "image_error", "error"}  — a rejected
+//                        image_command (bad type/too large/not a real
+//                        image); forwarded to onMessage like any other type
 //                      {"type": "device_action", ...}  (reserved, unsent today)
 //                      {"type": "pong", "t": <the ping's own timestamp>}
 //                        (handled internally, never forwarded to onMessage)
@@ -166,6 +175,21 @@ export class JarvisSocket {
   sendCommand(text) {
     if (this._ws?.readyState === WebSocket.OPEN) {
       this._ws.send(JSON.stringify({ type: "command", text }));
+      return true;
+    }
+    return false;
+  }
+
+  /** Send a browser-submitted image into the SAME live conversation —
+   * the server injects it into the existing Gemini Live session as an
+   * inline_data part alongside `text` (see main.py's
+   * _process_dashboard_image_commands()). `base64` must NOT include the
+   * "data:image/...;base64," prefix — strip it before calling this. */
+  sendImage(base64, mimeType, text) {
+    if (this._ws?.readyState === WebSocket.OPEN) {
+      this._ws.send(JSON.stringify({
+        type: "image_command", data: base64, mime_type: mimeType, text,
+      }));
       return true;
     }
     return false;

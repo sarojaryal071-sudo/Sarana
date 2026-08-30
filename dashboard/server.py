@@ -24,6 +24,14 @@ WSS /ws  (existing route, extended, fully backward compatible)
     logic depends on it yet.
     Message types, client → server:
         "command"              — existing, unchanged behavior
+        "image_command"        — web visual intelligence: a browser-
+                                  submitted image ({"data": <base64>,
+                                  "mime_type", "text"}), validated here and
+                                  queued to self._image_command_queue; see
+                                  main.py's _process_dashboard_image_
+                                  commands(), which injects it into the
+                                  SAME live Gemini session desktop's
+                                  screen_process tool already uses
         "device_action_result" — protocol shape reserved for Phase 6
                                   (Desktop Device Agent); recognized so it
                                   doesn't fall through as noise, but nothing
@@ -35,6 +43,10 @@ WSS /ws  (existing route, extended, fully backward compatible)
     Message types, server → client (via broadcast()):
         "log", "status", "sys", "file_received" — existing, unchanged
         "content"               — new, see broadcast_content() below
+        "image_error"           — a rejected "image_command" (bad type,
+                                   too large, or not a real image) — sent
+                                   directly back to the requesting socket,
+                                   not broadcast
         "device_action"         — protocol shape reserved for Phase 6;
                                    nothing sends this yet
 
@@ -146,6 +158,7 @@ it; see main.py for the actual (session-only, never-persisted) storage.
 import asyncio
 import base64
 import hashlib
+import io
 import math
 import os
 import re
@@ -185,6 +198,45 @@ STATIC_DIR  = Path(__file__).parent / "static"
 # local/desktop development, where PORT is normally unset.
 PORT        = int(os.environ.get("PORT", 8000))
 MAX_UPLOAD_MB = 500
+
+# Web visual intelligence (browser-submitted image -> existing Gemini Live
+# session): validation constants only. The actual compression/injection
+# reuses actions/screen_processor.py's own _compress() and main.py's own
+# session.send_client_content() — see main.py's
+# _process_dashboard_image_commands(). This is deliberately a SEPARATE,
+# smaller cap than MAX_UPLOAD_MB above — that one guards the unrelated
+# phone->desktop file-sharing feature (/api/upload, arbitrary files up to
+# 500MB saved to disk); an image headed into one JSON WebSocket message is
+# capped far tighter, and is never written to disk at all.
+ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_IMAGE_BYTES       = 15 * 1024 * 1024   # 15 MB raw, pre-compression
+MAX_IMAGE_B64_CHARS   = (MAX_IMAGE_BYTES // 3 + 1) * 4 + 256   # base64 expands ~4/3; +slack
+
+# Guarded like _UPLOAD_OK above — Pillow is already a dependency elsewhere
+# in this project (actions/screen_processor.py, actions/file_processor.py)
+# but is imported defensively here too, since this module must still import
+# cleanly (headless/Render) even if it were ever missing.
+_PIL_OK = False
+try:
+    from PIL import Image as _PILImage
+    _PIL_OK = True
+except ImportError:
+    pass
+
+
+def _looks_like_a_real_image(raw: bytes) -> bool:
+    """Hard reject for malformed/non-image payloads pretending to have an
+    image MIME type — Image.verify() raises on anything it can't actually
+    decode. Deliberately stricter than actions/screen_processor.py's own
+    _compress(), which silently falls back to the original bytes on a
+    decode failure (fine for a trusted local OS capture, not fine for
+    untrusted browser input) — this check runs BEFORE _compress() ever
+    sees the bytes. Only called when _PIL_OK is True."""
+    try:
+        _PILImage.open(io.BytesIO(raw)).verify()
+        return True
+    except Exception:
+        return False
 
 # Resource-cleanup fix: a passive safety net for tokens no explicit
 # POST /api/logout ever cleaned up (browser closed/crashed, network died
@@ -631,6 +683,12 @@ class DashboardServer:
         self._audio_out_dropped: int = 0   # instrumentation — same pattern as _phone_audio_dropped below
         self._history: list[dict]         = []
         self._command_queue               = asyncio.Queue()
+        # Web visual intelligence: a second, separate queue (never mixed
+        # into _command_queue's plain-text items) — see main.py's
+        # _process_dashboard_image_commands(), which mirrors
+        # _process_dashboard_commands() one-for-one but injects an
+        # inline_data image part alongside the text.
+        self._image_command_queue         = asyncio.Queue()
         self._wake_callback               = None
         self._connect_callback            = None
         self._username_callback           = None   # Phase 8: fires on a successful /login/username
@@ -1931,6 +1989,53 @@ class DashboardServer:
                             await self._command_queue.put(t)
                             if self._wake_callback:
                                 self._wake_callback()
+
+                    elif msg_type == "image_command":
+                        # Web visual intelligence — browser-submitted image
+                        # ingress. Validation happens HERE, at the untrusted-
+                        # input boundary (auth already enforced by /ws's own
+                        # token check above); compression + the actual
+                        # Gemini injection happen in main.py's
+                        # _process_dashboard_image_commands(), reusing
+                        # actions/screen_processor.py's _compress() exactly
+                        # like the desktop screen_process tool already does.
+                        # Never queued to disk, never written to a file —
+                        # bytes live only in memory for the one queue hop.
+                        mime = (data.get("mime_type") or "").strip().lower()
+                        b64  = data.get("data") or ""
+                        text = (data.get("text") or "What's in this image?").strip()
+
+                        if mime not in ALLOWED_IMAGE_MIME_TYPES:
+                            await websocket.send_json({
+                                "type": "image_error",
+                                "error": "That image type isn't supported. Try a JPEG, PNG, or WebP.",
+                            })
+                        elif not b64 or len(b64) > MAX_IMAGE_B64_CHARS:
+                            await websocket.send_json({
+                                "type": "image_error",
+                                "error": "That image is too large to send.",
+                            })
+                        else:
+                            try:
+                                raw = base64.b64decode(b64, validate=True)
+                            except Exception:
+                                raw = None
+                            if raw is None or len(raw) > MAX_IMAGE_BYTES:
+                                await websocket.send_json({
+                                    "type": "image_error",
+                                    "error": "That image couldn't be read.",
+                                })
+                            elif _PIL_OK and not _looks_like_a_real_image(raw):
+                                await websocket.send_json({
+                                    "type": "image_error",
+                                    "error": "That doesn't look like a valid image.",
+                                })
+                            else:
+                                await self._image_command_queue.put({
+                                    "data": raw, "mime_type": mime, "text": text,
+                                })
+                                if self._wake_callback:
+                                    self._wake_callback()
 
                     elif msg_type == "device_action_result":
                         # Protocol shape reserved for Phase 6 (Desktop Device

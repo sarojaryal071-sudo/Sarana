@@ -6,6 +6,7 @@ import {
   sendCapabilities,
 } from "./lib/api";
 import { getCurrentLocation } from "./lib/geolocation";
+import { prepareImageForUpload, readFileAsBase64 } from "./lib/image";
 import { permissionManager } from "./lib/permissions";
 import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
@@ -212,6 +213,13 @@ export default function App() {
             break;
           case "file_received":
             dispatch({ type: "SYS_MESSAGE", text: `File received: ${msg.name}`, ts: null });
+            break;
+          case "image_error":
+            // Web visual intelligence: dashboard/server.py rejected a
+            // "image_command" (bad type/too large/not a real image) —
+            // sent directly back to this socket, not broadcast. Reuses the
+            // existing SYS_MESSAGE display, no new UI needed.
+            dispatch({ type: "SYS_MESSAGE", text: msg.error || "That image couldn't be sent.", ts: null });
             break;
           case "device_action":
             // Reserved for Phase 6's desktop-agent dispatch — nothing sends
@@ -494,6 +502,40 @@ export default function App() {
     }
   }
 
+  // Web visual intelligence: reuses the SAME authenticated WS connection
+  // and the SAME live Gemini session as ordinary text commands — see
+  // websocket.js's sendImage() / main.py's
+  // _process_dashboard_image_commands(). Client-side downscale
+  // (prepareImageForUpload) is an optimization only; the backend's own
+  // compression is authoritative either way, so a decode failure here
+  // falls back to the file's raw bytes rather than blocking the send.
+  // Unlike handleSend() above, there is deliberately no HTTP fallback —
+  // /api/command's plaintext fallback predates this feature and exists
+  // for a different reason (text still working across a dropped socket);
+  // an image is large enough, and a live WS connection routine enough
+  // here, that adding a parallel HTTP upload path isn't worth the
+  // duplication for this milestone.
+  async function handleSendImage(file, text) {
+    const caption = text?.trim() || "What's in this image?";
+    dispatch({ type: "LOG_MESSAGE", speaker: "user", text: caption, ts: new Date().toISOString() });
+
+    let base64, mimeType;
+    try {
+      ({ base64, mimeType } = await prepareImageForUpload(file));
+    } catch {
+      try {
+        ({ base64, mimeType } = await readFileAsBase64(file));
+      } catch {
+        dispatch({ type: "SYS_MESSAGE", text: "Could not read that image.", ts: null });
+        return;
+      }
+    }
+
+    if (!socketRef.current?.sendImage(base64, mimeType, caption)) {
+      dispatch({ type: "SYS_MESSAGE", text: "Image failed to send — check your connection.", ts: null });
+    }
+  }
+
   // The main mic button no longer decides on/off itself (it used to
   // branch directly on the ref's own streaming flag) — it calls the exact same
   // permissionManager.toggle() the Settings mic switch calls
@@ -565,6 +607,7 @@ export default function App() {
           <ContentPanel content={state.content} onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })} />
           <Controls
             onSend={handleSend}
+            onSendImage={handleSendImage}
             micState={state.microphoneState}
             onToggleMic={handleToggleMic}
             disabled={disabled}
