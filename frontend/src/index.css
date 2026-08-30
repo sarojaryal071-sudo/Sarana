@@ -448,6 +448,12 @@ input {
   color: var(--text-dim);
 }
 
+.image-preview-retake {
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: 4px 10px;
+}
+
 .image-preview-remove {
   flex-shrink: 0;
   min-height: 32px;

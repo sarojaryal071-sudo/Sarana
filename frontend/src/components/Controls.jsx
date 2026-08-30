@@ -30,18 +30,21 @@ export default function Controls({
   onInterrupt,
 }) {
   const [text, setText] = useState("");
-  // { file, previewUrl } | null — a picked-but-not-yet-sent image. Plain
-  // component state, not a new global/context: it never outlives this one
-  // pending message, same lifetime as `text` above.
+  // { file, previewUrl, source: "camera" | "file" } | null — a picked-but-
+  // not-yet-sent image. Plain component state, not a new global/context:
+  // it never outlives this one pending message, same lifetime as `text`
+  // above. `source` only drives which buttons the preview row shows
+  // (Retake only makes sense for a camera shot) — it never reaches
+  // onSendImage/the backend, which only ever sees the File itself.
   const [pendingImage, setPendingImage] = useState(null);
   const fileInputRef   = useRef(null);
   const cameraInputRef = useRef(null);
 
-  function pickImage(file) {
+  function pickImage(file, source) {
     if (!file) return;
     setPendingImage((prev) => {
       if (prev?.previewUrl) URL.revokeObjectURL(prev.previewUrl);
-      return { file, previewUrl: URL.createObjectURL(file) };
+      return { file, previewUrl: URL.createObjectURL(file), source };
     });
   }
 
@@ -50,6 +53,15 @@ export default function Controls({
       if (prev?.previewUrl) URL.revokeObjectURL(prev.previewUrl);
       return null;
     });
+  }
+
+  // Retake: same idea as picking a fresh camera photo, just one tap
+  // instead of Remove-then-📷. Only offered for a camera-sourced image —
+  // re-opens the SAME cameraInputRef input, no new/duplicate camera
+  // mechanism.
+  function retakePhoto() {
+    clearImage();
+    cameraInputRef.current?.click();
   }
 
   function submit(e) {
@@ -73,6 +85,17 @@ export default function Controls({
         <div className="image-preview-row">
           <img className="image-preview-thumb" src={pendingImage.previewUrl} alt="" />
           <span className="image-preview-hint">Ask about this image, or just send it as-is.</span>
+          {pendingImage.source === "camera" && (
+            <button
+              type="button"
+              className="btn image-preview-retake"
+              onClick={retakePhoto}
+              disabled={disabled}
+              title="Retake photo"
+            >
+              ↻
+            </button>
+          )}
           <button
             type="button"
             className="btn danger image-preview-remove"
@@ -93,17 +116,25 @@ export default function Controls({
           accept="image/*"
           ref={fileInputRef}
           className="visually-hidden-file-input"
-          onChange={(e) => { pickImage(e.target.files?.[0]); e.target.value = ""; }}
+          onChange={(e) => { pickImage(e.target.files?.[0], "file"); e.target.value = ""; }}
         />
-        {/* Camera: capture="environment" skips straight to the native
-            camera on iOS/Android instead of the picker sheet. */}
+        {/* Camera: capture="environment" is the standards-based hint that
+            asks the browser to skip the picker and go straight to the
+            native rear camera. It's a HINT, not a guarantee (WHATWG HTML
+            explicitly allows a user agent to ignore it) — Android Chrome
+            honors it reliably; iOS Safari's support is real but
+            version-dependent and sometimes still shows its own action
+            sheet (with "Take Photo" as an option) instead of jumping
+            straight to the viewfinder. That's a platform limitation, not
+            something fixable from here without a live in-page camera
+            preview mechanism, which this feature deliberately avoids. */}
         <input
           type="file"
           accept="image/*"
           capture="environment"
           ref={cameraInputRef}
           className="visually-hidden-file-input"
-          onChange={(e) => { pickImage(e.target.files?.[0]); e.target.value = ""; }}
+          onChange={(e) => { pickImage(e.target.files?.[0], "camera"); e.target.value = ""; }}
         />
         <button
           type="button"
