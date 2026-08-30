@@ -3,8 +3,10 @@ import { useAssistantDispatch, useAssistantState } from "./state/AssistantContex
 import {
   fetchSession, sendCommand, sendInterrupt, sendLocation, logout, ApiError,
   googleCalendarConnectUrl, fetchCalendarStatus, disconnectCalendar,
+  sendCapabilities,
 } from "./lib/api";
 import { getCurrentLocation } from "./lib/geolocation";
+import { permissionManager } from "./lib/permissions";
 import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
 import { MicStreamer } from "./lib/mic";
@@ -30,9 +32,22 @@ const SESSION_RETRY_MS = 4000;
 // decides its own retry policy, if any).
 function requestAndSendLocation(token) {
   return getCurrentLocation()
-    .then((fix) => sendLocation(token, fix))
-    .catch(() => {
-      /* denied / unavailable / timeout / unsupported — nothing to send */
+    .then((fix) => {
+      // Permissions foundation: a fix was actually obtained, so the real
+      // permission is granted — fold that observation into the shared
+      // cache (see handleToggleMic's identical reasoning for microphone).
+      permissionManager.reportObserved("location", "granted");
+      return sendLocation(token, fix);
+    })
+    .catch((e) => {
+      // "denied"/"unsupported" are genuine permission-outcome
+      // observations; "unavailable"/"timeout" are not (the permission
+      // itself may still be granted — a fix just didn't come back), so
+      // those are left for permissionManager's own query() to determine
+      // honestly rather than guessed at here.
+      if (e?.code === "denied" || e?.code === "unsupported") {
+        permissionManager.reportObserved("location", e.code);
+      }
     });
 }
 
@@ -293,6 +308,32 @@ export default function App() {
     return () => { cancelled = true; };
   }, [state.authenticationState, state.token]);
 
+  // Permissions foundation: mirrors the calendar-status effect above —
+  // once authenticated, subscribe to the centralized permission manager
+  // (lib/permissions.js) for microphone/location and forward whatever it
+  // reports to the backend (POST /api/capabilities), so main.py can
+  // explain honestly (not generically) when a permission is the actual
+  // reason something isn't working — see main.py's [LOCATION]/
+  // [CAPABILITIES] context. subscribe() itself only ever QUERIES the
+  // real permission (never prompts) — least privilege, no permission is
+  // requested just because the app opened.
+  useEffect(() => {
+    if (state.authenticationState !== "authenticated" || !state.token) return;
+    const token = state.token;
+    const unsubMic = permissionManager.subscribe("microphone", (value) => {
+      sendCapabilities(token, { microphone: value }).catch(() => {
+        /* best-effort — the backend just keeps its previous known state */
+      });
+    });
+    const unsubLoc = permissionManager.subscribe("location", (value) => {
+      sendCapabilities(token, { location: value }).catch(() => {});
+    });
+    return () => {
+      unsubMic();
+      unsubLoc();
+    };
+  }, [state.authenticationState, state.token]);
+
   // "Connect Google Calendar": a real full-page navigation to our own
   // backend (GET /auth/google), which itself redirects to Google's
   // consent screen — never a fetch, never handles a Google token
@@ -394,9 +435,21 @@ export default function App() {
 
   function handleToggleMic() {
     if (!micRef.current) {
-      micRef.current = new MicStreamer(state.token, (s) =>
-        dispatch({ type: "MIC_STATE", value: s })
-      );
+      micRef.current = new MicStreamer(state.token, (s) => {
+        dispatch({ type: "MIC_STATE", value: s });
+        // Permissions foundation: a real getUserMedia attempt just
+        // observed the ACTUAL permission outcome directly — fold it into
+        // the shared permission cache (lib/permissions.js) so Settings
+        // and the backend both reflect it, even on a browser (e.g.
+        // Firefox) where the Permissions API itself can't be queried for
+        // "microphone" ahead of time. "streaming" means a real stream
+        // was actually obtained, i.e. the permission is granted.
+        if (s === "denied" || s === "unsupported") {
+          permissionManager.reportObserved("microphone", s);
+        } else if (s === "streaming") {
+          permissionManager.reportObserved("microphone", "granted");
+        }
+      });
     }
     if (micRef.current.active) {
       micRef.current.stop();

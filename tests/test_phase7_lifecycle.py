@@ -52,6 +52,7 @@ class _FakeDashboard:
         self._profile_fn = None
         self._logout_fn = None   # PostgreSQL memory migration
         self._location_fn = None   # Location foundation
+        self._capabilities_fn = None   # Permissions foundation
         self._command_queue = asyncio.Queue()
         self._phone_audio_queue = asyncio.Queue()  # touched by _relay_phone_audio
 
@@ -78,6 +79,9 @@ class _FakeDashboard:
 
     def set_location_callback(self, fn):
         self._location_fn = fn
+
+    def set_capabilities_callback(self, fn):
+        self._capabilities_fn = fn
 
     async def serve(self):
         await asyncio.Event().wait()  # never returns — mimics a live server

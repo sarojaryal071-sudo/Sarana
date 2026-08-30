@@ -984,6 +984,31 @@ LOCATION_UNAVAILABLE_RESULT = (
     "currently have their location -- you can ask them to allow location access "
     "or tell you the place they mean. Never guess or invent a location."
 )
+# Permissions foundation: a more specific honest message for the one case
+# where the real reason is actually known and actionable -- the browser's
+# location PERMISSION is actively denied for this session (see
+# self._session_permissions/_set_session_capabilities()), not merely "not
+# granted yet"/unsupported. Keeps the exact same [LOCATION_UNAVAILABLE] tag
+# prefix every existing test/prompt rule already expects (see the CALENDAR
+# section's identical "connect it from Settings" convention in
+# core/prompt.txt) -- only the natural-language guidance differs, pointing
+# the user at the one place that can actually fix it: Settings.
+LOCATION_DENIED_RESULT = (
+    "[LOCATION_UNAVAILABLE] The user's location access is currently OFF for "
+    "this session -- they denied or turned off location permission. Tell "
+    "them honestly and briefly, in your own natural words, that you need "
+    "their location for that and it's currently off, and that they can turn "
+    "it on from Settings and then try again. Never guess or invent a "
+    "location, and never claim you can see it anyway."
+)
+
+# Permissions foundation: the Permissions API's own vocabulary -- the only
+# values _set_session_capabilities() ever installs into
+# self._session_permissions. Anything else reported (a malformed/unknown
+# string) is silently dropped rather than trusted, same "never trust a
+# single layer alone" precedent dashboard/server.py's own validation at
+# POST /api/capabilities already applies.
+VALID_PERMISSION_STATES = frozenset({"granted", "denied", "prompt", "unsupported"})
 
 # A location fix older than this is considered stale for an ordinary
 # location-aware request (weather/nearby-places/directions don't need
@@ -1078,6 +1103,20 @@ class JarvisLive:
         # No place name/city/address is ever resolved here — reverse
         # geocoding is explicitly a later phase; this is coordinates only.
         self._session_location: dict | None = None
+        # Permissions foundation: the CURRENT session's last-known REAL
+        # browser/OS permission state for capabilities the client can
+        # observe directly (see dashboard/server.py's POST /api/
+        # capabilities -> set_capabilities_callback() ->
+        # _set_session_capabilities()). Values are exactly "granted" |
+        # "denied" | "prompt" | "unsupported" -- the browser's own
+        # Permissions API vocabulary (see frontend/src/lib/
+        # permissions.js) -- never guessed or defaulted to "granted".
+        # A missing key means "not yet reported this session", handled
+        # identically to "prompt"/unknown by every reader below. RAM-
+        # only, cleared on logout/every new login for the same identity-
+        # isolation reason self._session_location is (see
+        # _clear_memory_session()/_set_user_profile()).
+        self._session_permissions: dict[str, str] = {}
         # Location capabilities: waiters an in-flight tool call can await
         # while a browser location refresh is requested (see
         # _get_current_location()) -- set (each independently) the moment
@@ -1643,6 +1682,23 @@ class JarvisLive:
                 "general web search, and background topic monitoring — don't "
                 "undersell those either.\n\n"
             )
+            # Permissions foundation: microphone access is entirely a
+            # client-side (browser) fact with no tool call of its own — so
+            # unlike location, the only way to speak honestly about it is
+            # this front-loaded note. Only added when actually known to be
+            # denied (see self._session_permissions/_set_session_
+            # capabilities()) — silence otherwise, since "granted"/
+            # "prompt"/"unsupported"/unknown all already behave correctly
+            # with no special instruction needed.
+            if self._session_permissions.get("microphone") == "denied":
+                _capabilities_ctx += (
+                    "The user's microphone access is currently OFF (denied) "
+                    "in this web session. If they ask you to listen, talk "
+                    "out loud, use voice, or \"call\" them, explain honestly "
+                    "and briefly that microphone access is off and they can "
+                    "turn it on from Settings — never claim you're listening "
+                    "or that voice is working.\n\n"
+                )
 
         # Location foundation: boolean-only context — never raw
         # coordinates (see self._session_location's own privacy
@@ -1682,6 +1738,23 @@ class JarvisLive:
                 "here. Always call the relevant tool rather than declining — "
                 "never mention tool names or implementation details to the "
                 "user.\n\n"
+            )
+        elif self._session_permissions.get("location") == "denied":
+            # Permissions foundation: the one case where the real reason
+            # is actually known and actionable — the user turned location
+            # off in Settings, so the honest, helpful thing to say names
+            # the one place that can actually fix it (same convention as
+            # CALENDAR's "connect it from Settings" phrasing in
+            # core/prompt.txt) — instead of the generic "never granted,
+            # denied, or not yet provided" hedge below.
+            _location_ctx = (
+                "[LOCATION]\nThe user's location access is currently OFF for "
+                "this session — they denied or turned off location "
+                "permission. Never claim or guess where the user is or "
+                "what's near them. If asked about their location or "
+                "anything nearby, say honestly that location access is off "
+                "right now, and that they can turn it on from Settings and "
+                "then try again.\n\n"
             )
         else:
             _location_ctx = (
@@ -1903,7 +1976,7 @@ class JarvisLive:
                 else:
                     loc = await self._get_current_location()
                     if not loc:
-                        result = LOCATION_UNAVAILABLE_RESULT
+                        result = self._location_unavailable_result()
                     else:
                         result = await loop.run_in_executor(
                             None, lambda: get_weather_text(loc["latitude"], loc["longitude"])
@@ -1912,7 +1985,7 @@ class JarvisLive:
             elif name == "get_current_place":
                 loc = await self._get_current_location()
                 if not loc:
-                    result = LOCATION_UNAVAILABLE_RESULT
+                    result = self._location_unavailable_result()
                 else:
                     # Cache key: rounded to ~1.1 km so ordinary GPS jitter
                     # keeps reusing the same resolved place instead of
@@ -1941,7 +2014,7 @@ class JarvisLive:
                 else:
                     loc = await self._get_current_location()
                     if not loc:
-                        result = LOCATION_UNAVAILABLE_RESULT
+                        result = self._location_unavailable_result()
                     else:
                         radius_arg = args.get("radius_m")
                         rounded = (round(loc["latitude"], 3), round(loc["longitude"], 3))
@@ -1974,7 +2047,7 @@ class JarvisLive:
                 else:
                     loc = await self._get_current_location()
                     if not loc:
-                        result = LOCATION_UNAVAILABLE_RESULT
+                        result = self._location_unavailable_result()
                     else:
                         dest_geo = await loop.run_in_executor(None, lambda: geocode_place(destination))
                         if dest_geo is None:
@@ -3348,6 +3421,9 @@ class JarvisLive:
         # previous session had -- must not linger past logout either.
         self._place_cache = None
         self._nearby_cache = {}
+        # Permissions foundation: same reasoning -- a previous identity's
+        # reported permission state must not describe the next login.
+        self._session_permissions = {}
 
     def _set_user_profile(self, profile: dict) -> None:
         """The canonical profile setter — the ONE place _user_profile is
@@ -3402,6 +3478,12 @@ class JarvisLive:
         # a specific identity's location and must never carry over.
         self._place_cache = None
         self._nearby_cache = {}
+        # Permissions foundation: every new login also starts with no
+        # known permission state until the browser reports it fresh (the
+        # frontend re-queries on every authenticated mount anyway — see
+        # frontend/src/lib/permissions.js) -- same "no benefit to keeping
+        # a previous fix, only ambiguity risk" reasoning as location's own.
+        self._session_permissions = {}
         # PostgreSQL memory migration: load THIS user's personal memories +
         # the shared set into RAM right now, at login — not lazily on the
         # first load_memory() call — so _build_config() (which runs right
@@ -3570,6 +3652,57 @@ class JarvisLive:
         # hasn't started yet.
         for _waiter in self._location_refresh_waiters:
             _waiter.set()
+
+    def _set_session_capabilities(
+        self, *, microphone: str | None = None, location: str | None = None,
+        requester_owner: str = "",
+    ) -> None:
+        """Permissions foundation: fired by dashboard/server.py's
+        POST /api/capabilities via set_capabilities_callback(), given the
+        browser's own REAL permission state for a capability it can
+        observe directly (see frontend/src/lib/permissions.js) — never a
+        fabricated client-only toggle. Mirrors _set_session_location()'s
+        shape and identity protection exactly: stored purely as in-RAM
+        session state (never persisted — see self._session_permissions'
+        own docstring), and an unrecognized/malformed value just leaves
+        whatever state already existed for that capability untouched
+        rather than corrupting it.
+
+        `requester_owner` is the REQUESTING login's own canonical
+        username (see dashboard/server.py's self._session_canonical_owner)
+        — same stale-update protection _set_session_location() already
+        applies: if it no longer matches the CURRENTLY active identity,
+        the whole update is dropped rather than letting a delayed report
+        from a login that's no longer active describe the wrong user's
+        permissions. An empty requester_owner (a Remote Access/PIN token)
+        is always accepted, same reasoning as that method's own.
+
+        Either `microphone` or `location` may be left None — a report
+        only ever describes what the browser actually just determined,
+        never guesses at the other capability's state."""
+        current_owner = (self._user_profile or {}).get("username", "")
+        if requester_owner and requester_owner != current_owner:
+            self.ui.write_log("SYS: Ignored a stale capability update from a previous login.")
+            return
+        if microphone in VALID_PERMISSION_STATES:
+            self._session_permissions["microphone"] = microphone
+        if location in VALID_PERMISSION_STATES:
+            self._session_permissions["location"] = location
+        self.ui.write_log("SYS: Capability permission state updated for this session.")
+
+    def _location_unavailable_result(self) -> str:
+        """Permissions foundation: the honest message a location-
+        dependent tool (get_weather/get_current_place/find_nearby_places/
+        get_directions) should return when no current fix is available —
+        distinguishing "permission actively denied" (the user can fix
+        this immediately, from Settings) from every other reason (never
+        decided yet, browser doesn't support it, or a fix simply hasn't
+        arrived yet). Both branches keep the exact same
+        [LOCATION_UNAVAILABLE] tag prefix every existing test/prompt rule
+        already expects — see LOCATION_DENIED_RESULT's own docstring."""
+        if self._session_permissions.get("location") == "denied":
+            return LOCATION_DENIED_RESULT
+        return LOCATION_UNAVAILABLE_RESULT
 
     async def _get_current_location(
         self, *, require_fresh: bool = False,
@@ -3818,6 +3951,10 @@ class JarvisLive:
             # reaches JarvisLive the same wiring way as timezone/interrupt
             # already do — see _set_session_location().
             self._dashboard.set_location_callback(self._set_session_location)
+            # Permissions foundation: browser Permissions-API/permission-
+            # request state reaches JarvisLive the same wiring way as
+            # location itself does — see _set_session_capabilities().
+            self._dashboard.set_capabilities_callback(self._set_session_capabilities)
             # Phase 7: reuses the dashboard's existing (previously unwired)
             # wake mechanism — /api/wake, /api/command, and /ws "command"
             # already all call _wake_callback() today. No new route, no new

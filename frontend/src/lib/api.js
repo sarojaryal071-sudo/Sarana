@@ -141,6 +141,29 @@ export async function sendLocation(token, { latitude, longitude, accuracy, times
   return asJson(resp);
 }
 
+/** POST /api/capabilities — reports the browser's REAL, currently-known
+ * permission state for capabilities SARANA might use (see
+ * lib/permissions.js) — never raw device access, never a fabricated
+ * client-only flag. Either field may be omitted; only send what actually
+ * changed. This is what lets the backend explain honestly (instead of
+ * generically) when a permission is the reason something isn't working
+ * — see main.py's [LOCATION]/[CAPABILITIES] context. Auth required. */
+export async function sendCapabilities(token, { microphone, location } = {}) {
+  const body = {};
+  if (microphone) body.microphone = microphone;
+  if (location) body.location = location;
+  if (!Object.keys(body).length) return { ok: true };
+  const resp = await fetch(`${BACKEND_URL}/api/capabilities`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(body),
+  });
+  return asJson(resp);
+}
+
 /** Builds the URL to navigate the browser to for GET /auth/google — a
  * full-page redirect (window.location.href = ...), never a fetch: the
  * whole point is for the browser to leave SARANA, go through Google's own

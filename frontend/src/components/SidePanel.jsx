@@ -8,6 +8,7 @@
 // existing `messages` state unchanged — no second conversation store.
 import { useEffect, useState } from "react";
 import LogPanel from "./LogPanel";
+import PermissionsSettings from "./PermissionsSettings";
 
 const VIEW_TITLES = {
   activity: "Activity Log",
@@ -67,7 +68,7 @@ export default function SidePanel({
           {view === "activity" && <LogPanel messages={messages} />}
           {view === "settings" && (
             <div className="settings-placeholder">
-              <p>Settings will be configured here in a future update.</p>
+              <PermissionsSettings />
               <div className="settings-calendar">
                 <p className="settings-calendar-label">Google Calendar</p>
                 {calendarStatus?.connected ? (

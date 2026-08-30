@@ -639,6 +639,7 @@ class DashboardServer:
         self._profile_callback            = None   # fires with the full users/user_db.py profile dict
         self._logout_callback             = None   # fires on /api/logout of a username session (memory cache reset)
         self._location_callback           = None   # fires on a successful POST /api/location
+        self._capabilities_callback       = None   # fires on a successful POST /api/capabilities
         self._session_timezones: dict[str, str] = {}   # token → IANA timezone (username logins only)
         # Location foundation: the token's own canonical username (e.g.
         # "sana", NOT the display name "Saanaa" already tracked in
@@ -795,6 +796,22 @@ class DashboardServer:
         (epoch ms, None if the client didn't send one) — see
         location_ep()'s own docstring for why."""
         self._location_callback = fn
+
+    def set_capabilities_callback(self, fn) -> None:
+        """fn(microphone: str | None, location: str | None, requester_owner: str)
+        is called on a successful POST /api/capabilities — the browser's
+        own REAL permission state for a capability it can observe
+        directly (Permissions API query/request outcome, or an actual
+        getUserMedia/getCurrentPosition attempt's own result — see
+        frontend/src/lib/permissions.js), never a fabricated client-only
+        toggle. Each value is one of "granted" | "denied" | "prompt" |
+        "unsupported", or None if that particular capability wasn't part
+        of this update. `requester_owner` mirrors set_location_callback()'s
+        own `owner` — the REQUESTING token's own canonical username,
+        resolved here server-side from the token alone, so main.py's
+        _set_session_capabilities() can apply the exact same stale-update
+        protection _set_session_location() already does."""
+        self._capabilities_callback = fn
 
     # ── token/session cleanup ────────────────────────────────────────────
 
@@ -1423,6 +1440,50 @@ class DashboardServer:
             owner = self._session_canonical_owner.get(tok, "")
             if self._location_callback:
                 self._location_callback(latitude, longitude, accuracy, owner, fix_timestamp)
+            return JSONResponse({"ok": True})
+
+        @app.post("/api/capabilities")
+        async def capabilities_ep(req: Request):
+            """Permissions foundation: the browser's own REAL permission
+            state for a capability it can observe directly (Permissions
+            API / an actual permission-request attempt's own outcome —
+            see frontend/src/lib/permissions.js), never a fabricated
+            client-only toggle. Same Bearer-token auth and identity-
+            binding as /api/location (owner resolved from the token
+            alone — see self._session_canonical_owner — never from
+            anything the body claims).
+
+            Body: {"microphone"?: str, "location"?: str}, each one of
+            "granted" | "denied" | "prompt" | "unsupported" — the
+            Permissions API's own vocabulary. Either key may be omitted
+            (only report what actually changed); at least one must be
+            present. Least privilege: this only ever carries the
+            capability STATE the browser already determined on its own —
+            never a coordinate, never a media stream, never any other
+            device information."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid request body"}, status_code=400)
+
+            valid_states = {"granted", "denied", "prompt", "unsupported"}
+            microphone = body.get("microphone")
+            location = body.get("location")
+            if microphone is not None and microphone not in valid_states:
+                return JSONResponse({"error": "Invalid microphone state"}, status_code=400)
+            if location is not None and location not in valid_states:
+                return JSONResponse({"error": "Invalid location state"}, status_code=400)
+            if microphone is None and location is None:
+                return JSONResponse({"error": "No capability state provided"}, status_code=400)
+
+            tok = req.headers.get("authorization", "").removeprefix("Bearer ").strip()
+            owner = self._session_canonical_owner.get(tok, "")
+            if self._capabilities_callback:
+                self._capabilities_callback(
+                    microphone=microphone, location=location, requester_owner=owner
+                )
             return JSONResponse({"ok": True})
 
         # ── Google Calendar OAuth ────────────────────────────────────────
