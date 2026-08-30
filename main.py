@@ -557,6 +557,12 @@ TOOL_DECLARATIONS = [
             "a live look right now, e.g. 'what's in my hand', 'what am I "
             "holding', 'what am I looking at', 'can you identify this', "
             "'what does this sign say', 'describe what you see'. "
+            "MANDATORY: you must call this tool and actually receive real "
+            "camera views back before answering ANY question about what you "
+            "currently see or what the user is physically holding/showing — "
+            "never answer such a question from imagination just because "
+            "calling this takes a few seconds; guessing here is a serious "
+            "failure. "
             "This is DIFFERENT from a photo the user has already attached or "
             "sent — that arrives directly in the conversation and you can "
             "already see it without calling this; only call this when you "
@@ -1804,6 +1810,20 @@ class JarvisLive:
                 "use it deliberately, only when a question actually needs a "
                 "live look (see that tool's own description), never for "
                 "ordinary questions. Don't undersell any of this either.\n\n"
+                "CRITICAL — never invent what you have not actually seen: "
+                "you have NO knowledge of what the user is currently holding, "
+                "wearing, or what is physically around them right now UNLESS "
+                "either (a) they already attached/sent you a photo in this "
+                "conversation, or (b) you called web_camera_vision AND a "
+                "later message in this same conversation is tagged "
+                "[VISION_OBSERVATION] with real camera views. If asked what "
+                "you currently see, what's in their hand, or anything else "
+                "about their live physical surroundings, and NEITHER of "
+                "those has actually happened yet, you MUST call "
+                "web_camera_vision and wait — never guess or describe a "
+                "color, object, or shape you have not genuinely been shown. "
+                "Answering from imagination here is a serious failure, worse "
+                "than saying you need a moment to look.\n\n"
             )
             # Permissions foundation: microphone access is entirely a
             # client-side (browser) fact with no tool call of its own — so
@@ -4365,7 +4385,9 @@ class JarvisLive:
                                     "all — the user's camera may be unavailable, busy, "
                                     "or they didn't grant permission. Tell them "
                                     "honestly and briefly that you couldn't access "
-                                    "their camera right now."
+                                    "their camera right now. Do NOT guess or invent "
+                                    "what they might be showing you — you have seen "
+                                    "nothing."
                                 )}]},
                                 turn_complete=True,
                             )

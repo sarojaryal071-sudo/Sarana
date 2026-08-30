@@ -523,6 +523,120 @@ def test_web_vision_frame_processing_never_writes_a_file() -> None:
     print("test_web_vision_frame_processing_never_writes_a_file: PASS")
 
 
+# ── hallucination-prevention regression (real iPhone finding) ────────────
+#
+# Real-device finding: on an actual deployed iPhone session, asking "What's
+# in my hand?" produced a confident, specific false claim ("तपाईंको हातमा
+# एउटा रातो गोलो वस्तु देखिन्छ" — "I see a red round object in your hand")
+# while the floating camera preview never even appeared — meaning
+# web_camera_vision was never actually called and no real frame was ever
+# received. This is a PROMPT-adherence failure (the model answering from
+# imagination), not a transport/backend bug — the same class of defect as
+# the earlier-fixed "stale screen_process description" bug, just the
+# opposite direction (false confidence instead of false denial). The fix
+# is a forceful, explicit "never claim live visual knowledge without a
+# real look" rule in both the web [CAPABILITIES] text and the tool's own
+# description — these tests are a regression guard for that specific text,
+# not a guarantee the model can never disobey it (an LLM's own adherence to
+# a system instruction cannot be proven by a unit test — see the
+# implementation report's own "remaining limitations").
+
+def test_web_capabilities_text_forbids_answering_without_a_real_look() -> None:
+    jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+    text = jarvis._build_config().system_instruction
+    assert "you have NO knowledge of what the user is currently holding" in text
+    assert "VISION_OBSERVATION" in text
+    assert "you MUST call web_camera_vision and wait" in text
+    print("test_web_capabilities_text_forbids_answering_without_a_real_look: PASS")
+
+
+def test_web_camera_vision_declaration_mandates_a_real_look_first() -> None:
+    decl = next(t for t in TOOL_DECLARATIONS if t["name"] == "web_camera_vision")
+    desc = decl["description"]
+    assert "MANDATORY" in desc
+    assert "before answering ANY question about what you" in desc
+    print("test_web_camera_vision_declaration_mandates_a_real_look_first: PASS")
+
+
+def test_vision_unavailable_notice_explicitly_forbids_guessing() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        fake_session = _FakeVisionSession()
+        jarvis.session = fake_session
+        now = time.monotonic()
+        jarvis._web_vision_session = {
+            "request_id": "req-noguess", "started": now - 10, "deadline": now + 60,
+            "frames": [], "burst_armed_at": now - 100, "awaiting_burst": True,
+            "text": "look", "last_answered_at": None,
+        }
+        await _run_frames_tick(jarvis, iterations=20, delay=0.05)
+        assert len(fake_session.calls) == 1
+        text = fake_session.calls[0]["turns"]["parts"][0]["text"]
+        assert "Do NOT guess or invent" in text
+    asyncio.run(_run())
+    print("test_vision_unavailable_notice_explicitly_forbids_guessing: PASS")
+
+
+def test_invalid_frame_is_rejected_before_ever_reaching_the_session() -> None:
+    """Case 2 from the hallucination-prevention requirement: a corrupt/
+    invalid frame must never be silently counted as a real look — it's
+    rejected at the WS boundary (dashboard/server.py), never even reaching
+    main.py's queue, so it can never masquerade as real visual evidence."""
+    token  = "test-token-vf-invalid-case2"
+    server = _server_with_token(token)
+    client = TestClient(server.app)
+    junk_b64 = base64.b64encode(b"not a real image at all").decode("ascii")
+
+    with client.websocket_connect(f"/ws?token={token}") as ws:
+        ws.send_json({
+            "type": "vision_frame", "request_id": "req-x",
+            "mime_type": "image/jpeg", "data": junk_b64,
+        })
+        reply = ws.receive_json()
+
+    assert reply["type"] == "vision_error"
+    assert server._vision_frame_queue.empty(), "an invalid frame must never reach the vision session's frame count"
+    print("test_invalid_frame_is_rejected_before_ever_reaching_the_session: PASS")
+
+
+def test_real_frame_does_reach_the_session_as_analyzable_content() -> None:
+    """Case 3: contrast with the above — a genuinely valid frame DOES reach
+    Gemini as real inline_data, so a correct answer remains possible."""
+    async def _run():
+        jarvis = _jarvis(auto_start=False)
+        fake_session = _FakeVisionSession()
+        jarvis.session = fake_session
+        req_id = "req-real"
+        now = time.monotonic()
+        jarvis._web_vision_session = {
+            "request_id": req_id, "started": now, "deadline": now + 60,
+            "frames": [], "burst_armed_at": now - 100, "awaiting_burst": True,
+            "text": "what color is this", "last_answered_at": None,
+        }
+        await jarvis._dashboard._vision_frame_queue.put({
+            "request_id": req_id, "seq": 0,
+            "mime_type": "image/jpeg", "data": _real_jpeg_bytes(),
+        })
+        await _run_frames_tick(jarvis, iterations=20, delay=0.05)
+        assert len(fake_session.calls) == 1
+        image_parts = [p for p in fake_session.calls[0]["turns"]["parts"] if "inline_data" in p]
+        assert len(image_parts) == 1
+        assert len(image_parts[0]["inline_data"]["data"]) > 0
+    asyncio.run(_run())
+    print("test_real_frame_does_reach_the_session_as_analyzable_content: PASS")
+
+
+def test_ordinary_question_never_appears_in_web_camera_vision_triggers() -> None:
+    """Case 4: an ordinary knowledge question has no visual-need cues at
+    all — this is a static guard that the tool description itself scopes
+    activation to genuinely visual requests, not a behavioral guarantee
+    (see the module-level note on LLM adherence)."""
+    decl = next(t for t in TOOL_DECLARATIONS if t["name"] == "web_camera_vision")
+    desc = decl["description"]
+    assert "Do NOT call this for ordinary questions" in desc
+    print("test_ordinary_question_never_appears_in_web_camera_vision_triggers: PASS")
+
+
 if __name__ == "__main__":
     test_web_camera_vision_is_web_only_and_never_desktop_only()
     test_web_camera_vision_blocked_on_desktop_with_screen_process_redirect()
@@ -548,4 +662,10 @@ if __name__ == "__main__":
     test_screen_process_and_close_camera_still_desktop_only()
     test_desktop_vision_handler_source_unchanged_by_web_camera_vision()
     test_web_vision_frame_processing_never_writes_a_file()
+    test_web_capabilities_text_forbids_answering_without_a_real_look()
+    test_web_camera_vision_declaration_mandates_a_real_look_first()
+    test_vision_unavailable_notice_explicitly_forbids_guessing()
+    test_invalid_frame_is_rejected_before_ever_reaching_the_session()
+    test_real_frame_does_reach_the_session_as_analyzable_content()
+    test_ordinary_question_never_appears_in_web_camera_vision_triggers()
     print("\nAll web-camera-vision tests passed.")
