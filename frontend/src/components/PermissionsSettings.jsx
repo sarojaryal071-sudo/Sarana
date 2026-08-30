@@ -66,12 +66,32 @@ function PermissionCard({ def }) {
 
   useEffect(() => permissionManager.subscribe(def.id, setState), [def.id]);
 
+  // Interaction fix: a permission that's already been decided (granted,
+  // or — most commonly — already auto-requested elsewhere in the app,
+  // e.g. the mic starting on connect / location requesting on login,
+  // both well before Settings is ever opened) resolves permissionManager
+  // .request() almost instantly, with no real OS dialog in between and
+  // no resulting state CHANGE for _setState() to notify — so the click
+  // was real and handled correctly, but produced nothing perceptible.
+  // That reads as "the switch doesn't respond." Holding the busy/pressed
+  // visual for a minimum stretch (matching this design's own ~260ms
+  // transition timing, not invented) makes every click acknowledge
+  // itself, without inventing a fake state change of any kind — the
+  // eventual on/off/status shown afterward is still exactly whatever
+  // permissionManager actually reports.
+  const MIN_FEEDBACK_MS = 260;
+
   async function invokeRequest() {
     if (requesting) return;
     setRequesting(true);
+    const startedAt = Date.now();
     try {
       await permissionManager.request(def.id);
     } finally {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < MIN_FEEDBACK_MS) {
+        await new Promise((resolve) => setTimeout(resolve, MIN_FEEDBACK_MS - elapsed));
+      }
       setRequesting(false);
     }
   }
