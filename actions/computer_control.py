@@ -539,13 +539,161 @@ def _new_window_note(before: set[str], after: set[str]) -> str:
     )
 
 
+# ── JARVIS Mode: automatic local click/type verification ─────────────────
+#
+# Upgrades ui_click/ui_type from "perform the input event, hope for the
+# best" to "perform it, then automatically check — using only cheap LOCAL
+# signals — whether it actually had an effect." This never calls Gemini
+# itself (that would mean a vision round trip on every single click,
+# explicitly ruled out by the project brief) — it only produces one of
+# four honest verdicts (tags below) that main.py's computer_control
+# branch can optionally escalate ONCE to the EXISTING observe/verify
+# same-session vision mechanism when local evidence is inconclusive.
+#
+# Verification tiers, cheapest/most-certain first (see
+# _classify_click_result / _classify_type_result):
+#   1. UI Automation state of the clicked/typed control itself
+#   2. active-window title change (+ existing dialog/new-window detection)
+#   3. accessibility-tree-adjacent control state (toggle/selection/staleness)
+#   4. a small in-memory screenshot diff, last resort before giving up
+#      locally — never written to disk, discarded immediately after use.
+
+VERIFY_TAG_SUCCESS   = "[CLICK_VERIFIED_SUCCESS]"
+VERIFY_TAG_FAILURE   = "[CLICK_VERIFIED_FAILURE]"
+VERIFY_TAG_AMBIGUOUS = "[CLICK_AMBIGUOUS]"
+VERIFY_TAG_NO_CHANGE = "[CLICK_NO_OBSERVABLE_CHANGE]"
+
+TYPE_TAG_SUCCESS   = "[TYPE_VERIFIED_SUCCESS]"
+TYPE_TAG_FAILURE   = "[TYPE_VERIFIED_FAILURE]"
+TYPE_TAG_AMBIGUOUS = "[TYPE_AMBIGUOUS]"
+
+# Tags that mean "local verification could not tell" — main.py escalates
+# these (and only these) to the existing observe/verify vision mechanism,
+# bounded by that mechanism's own cooldown/busy guard. Exported so main.py
+# never has to hardcode the literal tag strings itself.
+INCONCLUSIVE_TAGS = frozenset({
+    VERIFY_TAG_AMBIGUOUS, VERIFY_TAG_NO_CHANGE, TYPE_TAG_AMBIGUOUS, TYPE_TAG_FAILURE,
+})
+
+
+def _control_signature(ctrl) -> dict:
+    """Cheap, best-effort snapshot of ONE control's own UI Automation
+    state. Never walks the tree, never raises. Tier-1 signal: the exact
+    element that was clicked visibly changing is the strongest, cheapest
+    evidence available."""
+    sig = {"alive": True, "toggle": None, "selected": None}
+    try:
+        ctrl.window_text()
+    except Exception:
+        sig["alive"] = False
+        return sig
+    try:
+        sig["toggle"] = ctrl.get_toggle_state()
+    except Exception:
+        pass
+    try:
+        sig["selected"] = ctrl.is_selected()
+    except Exception:
+        pass
+    return sig
+
+
+def _screen_signature():
+    """Small, in-memory-only, grayscale-downsampled screenshot signature —
+    NEVER written to disk, held only long enough for one before/after
+    comparison and then discarded by the caller. Tier-4, last-resort local
+    signal: far cheaper and less invasive than a Gemini vision call."""
+    if not _PYAUTOGUI:
+        return None
+    try:
+        img = pyautogui.screenshot().convert("L").resize((24, 16))
+        return tuple(img.getdata())
+    except Exception:
+        return None
+
+
+def _screen_changed(before, after, threshold: int = 12) -> bool | None:
+    """None means "couldn't tell" (missing/mismatched signatures) — the
+    caller treats that the same as "no signal", never as a false positive
+    or negative."""
+    if before is None or after is None or len(before) != len(after):
+        return None
+    diff = sum(1 for a, b in zip(before, after) if abs(a - b) > 20)
+    return diff > threshold
+
+
+def _snapshot(ctrl) -> dict:
+    """All-local, no-Gemini snapshot taken before AND after a click/type,
+    then diffed by _classify_click_result. Every piece is inexpensive: one
+    ctypes call, one shallow window enumeration, one control's own state,
+    one small downsampled screenshot."""
+    return {
+        "active_title": get_active_window_title(),
+        "top_level":    _top_level_window_titles(),
+        "ctrl":         _control_signature(ctrl),
+        "screen":       _screen_signature(),
+    }
+
+
+def _classify_click_result(description: str, before: dict, after: dict) -> tuple[str, str]:
+    """Pure classifier — no live UI calls, fully unit-testable with plain
+    dicts shaped like _snapshot()'s output (see tests/test_computer_control.py).
+    Returns (tag, human-readable reason). Never returns VERIFY_TAG_FAILURE
+    itself (a click that raised an exception already returns early in the
+    caller, before this is reached) — "nothing seemed to happen" is
+    reported as NO_OBSERVABLE_CHANGE, not a false FAILURE claim, since a
+    control that's genuinely inert-looking after a correct click is still
+    possible (e.g. a click that opens something off-screen)."""
+    needle = (description or "").strip().lower()
+
+    dialog_note = _new_window_note(before["top_level"], after["top_level"])
+    if dialog_note:
+        return VERIFY_TAG_AMBIGUOUS, (
+            "a new top-level window appeared right after the click." + dialog_note
+        )
+
+    if before["active_title"] != after["active_title"]:
+        if needle and needle in (after["active_title"] or "").lower():
+            return VERIFY_TAG_SUCCESS, (
+                f"the active window changed to '{after['active_title']}', "
+                f"matching the intended target"
+            )
+        return VERIFY_TAG_AMBIGUOUS, (
+            f"the active window changed (now '{after['active_title']}') but "
+            f"that could not be confirmed to match the intended target"
+        )
+
+    cb, ca = before["ctrl"], after["ctrl"]
+    if cb["alive"] and not ca["alive"]:
+        return VERIFY_TAG_SUCCESS, (
+            "the clicked element is no longer present in the accessibility "
+            "tree, consistent with the UI having moved on"
+        )
+    if cb.get("toggle") is not None and cb.get("toggle") != ca.get("toggle"):
+        return VERIFY_TAG_SUCCESS, "the control's toggle state changed"
+    if cb.get("selected") is not None and cb.get("selected") != ca.get("selected"):
+        return VERIFY_TAG_SUCCESS, "the control's selection state changed"
+
+    changed = _screen_changed(before.get("screen"), after.get("screen"))
+    if changed is True:
+        return VERIFY_TAG_AMBIGUOUS, (
+            "the screen's pixels changed after the click, but no window- "
+            "or control-level signal confirmed what changed"
+        )
+    return VERIFY_TAG_NO_CHANGE, (
+        "no window title, dialog, control state, or visible pixel change "
+        "was detected after the click"
+    )
+
+
 def _ui_click_by_description(description: str) -> str:
     if not _PYWINAUTO or _get_os() != "windows":
         return "UI Automation is only available on Windows here — use screen_click instead."
     ctrl = _ui_find(description)
     if ctrl is None:
         return f"UI element not found via accessibility tree: '{description}' — try screen_click instead."
-    before = _top_level_window_titles()
+
+    before = _snapshot(ctrl)
     try:
         ctrl.click_input()
     except Exception as e:
@@ -555,13 +703,83 @@ def _ui_click_by_description(description: str) -> str:
     # matches this file's existing convention for post-action pauses
     # (_focus_window() etc.), not a new pattern.
     time.sleep(0.3)
-    note = _new_window_note(before, _top_level_window_titles())
+    after = _snapshot(ctrl)
+    tag, reason = _classify_click_result(description, before, after)
+
+    # Exactly ONE bounded, automatic retry — ONLY for the "genuinely
+    # nothing happened" case (never when a dialog appeared, never after a
+    # raised exception): the UI may simply still have been loading. This
+    # is a hard cap, never a loop — see the project brief's own retry
+    # rules ("never repeatedly click a potentially dangerous control").
+    retried = False
+    if tag == VERIFY_TAG_NO_CHANGE:
+        time.sleep(0.5)
+        retry_ctrl = _ui_find(description) or ctrl
+        try:
+            retry_ctrl.click_input()
+            retried = True
+        except Exception:
+            pass
+        if retried:
+            time.sleep(0.3)
+            after = _snapshot(retry_ctrl)
+            tag, reason = _classify_click_result(description, before, after)
+
+    retry_note = ""
+    if retried:
+        retry_note = (
+            " (confirmed after one automatic retry)"
+            if tag != VERIFY_TAG_NO_CHANGE
+            else " (retried once automatically — still no observable change)"
+        )
     return (
-        f"Clicked (UI Automation): '{description}'. This confirms the "
-        f"click was physically performed at the right target — it does "
-        f"NOT by itself confirm the expected result happened. Call "
-        f"action='verify' to actually confirm it before telling the "
-        f"user it worked.{note}"
+        f"Clicked (UI Automation): '{description}'. {tag} — {reason}{retry_note}. "
+        f"For anything consequential, call action='verify' for a closer look."
+    )
+
+
+def _read_control_value(ctrl) -> str | None:
+    """Best-effort read-back of an editable control's current text via UI
+    Automation — tries the exact ValuePattern path first, falls back to
+    window_text() (many Edit-style controls surface their content there
+    too). Returns None if nothing could be read (e.g. a masked password
+    field, or a control exposing no readable value) — the caller treats
+    that as AMBIGUOUS, never as a false FAILURE."""
+    try:
+        val = ctrl.get_value()
+        if val is not None:
+            return str(val)
+    except Exception:
+        pass
+    try:
+        txt = ctrl.window_text()
+        if txt:
+            return str(txt)
+    except Exception:
+        pass
+    return None
+
+
+def _classify_type_result(expected: str, before_val, after_val) -> tuple[str, str]:
+    """Pure classifier, unit-testable with plain strings/None — never
+    includes the actual typed/read content in its reason text (privacy:
+    typed content must never become logged/remembered activity, see this
+    module's own docstring)."""
+    if after_val is None:
+        return TYPE_TAG_AMBIGUOUS, (
+            "the field's content could not be read back locally (it may "
+            "be masked, e.g. a password field, or not expose its value "
+            "via UI Automation)"
+        )
+    expected_norm = (expected or "").strip()
+    if not expected_norm:
+        return TYPE_TAG_SUCCESS, "no specific text was expected to verify"
+    if expected_norm in after_val:
+        return TYPE_TAG_SUCCESS, "the field now contains the typed text"
+    if after_val == before_val:
+        return TYPE_TAG_FAILURE, "the field's content did not change at all after typing"
+    return TYPE_TAG_AMBIGUOUS, (
+        "the field's content changed but does not appear to contain the expected text"
     )
 
 
@@ -572,6 +790,7 @@ def _ui_type_by_description(description: str, text: str) -> str:
     if ctrl is None:
         return f"UI input not found via accessibility tree: '{description}' — try smart_type instead."
     before = _top_level_window_titles()
+    before_val = _read_control_value(ctrl)
     try:
         ctrl.click_input()
         time.sleep(0.1)
@@ -584,8 +803,17 @@ def _ui_type_by_description(description: str, text: str) -> str:
         return f"Found '{description}' but type failed: {e}"
     time.sleep(0.2)
     note = _new_window_note(before, _top_level_window_titles())
+    after_val = _read_control_value(ctrl)
+    tag, reason = _classify_type_result(text, before_val, after_val)
+    # Discard the read-back values now that the comparison is done — never
+    # persisted, never logged, never echoed verbatim below (privacy: typed
+    # content must never become remembered activity history).
+    before_val = after_val = None
     preview = text[:60] + ("…" if len(text) > 60 else "")
-    return f"Typed (UI Automation) into '{description}': {preview}{note}"
+    return (
+        f"Typed (UI Automation) into '{description}': {preview}. "
+        f"{tag} — {reason}{note}"
+    )
 
 
 def _screen_find(description: str) -> tuple[int, int] | None:
@@ -687,10 +915,23 @@ def computer_control(
       get_active_window_title — title of the currently foreground window
       ui_find       — find a control by name in the ACTIVE window's UI
                        Automation tree (Windows only; semantic, not pixels)
-      ui_click      — ui_find + click via UI Automation
+      ui_click      — ui_find + click via UI Automation. Automatically
+                       verifies the result using cheap LOCAL signals only
+                       (no Gemini call) and reports one of four honest
+                       verdicts in the returned text: [CLICK_VERIFIED_
+                       SUCCESS], [CLICK_VERIFIED_FAILURE] (click itself
+                       raised), [CLICK_AMBIGUOUS], or [CLICK_NO_
+                       OBSERVABLE_CHANGE] — the latter two trigger exactly
+                       one bounded automatic retry when safe (see
+                       _ui_click_by_description), and main.py may escalate
+                       them ONCE to the existing observe/verify vision
+                       mechanism if still inconclusive.
       ui_type       — ui_find + type via UI Automation (falls back to
                        pyautogui typing if the control has no direct
-                       set_text)
+                       set_text). Automatically reads the field back and
+                       reports [TYPE_VERIFIED_SUCCESS]/[TYPE_VERIFIED_
+                       FAILURE]/[TYPE_AMBIGUOUS] — never persists or logs
+                       the typed/read-back content itself.
       (observe/verify are NOT dispatched here — they need main.py's own
       async self._pending_vision injection, see that module's
       computer_control branch)

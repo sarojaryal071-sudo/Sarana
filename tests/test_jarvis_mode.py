@@ -23,6 +23,9 @@ from unittest.mock import patch
 from core.headless_surface import HeadlessSurface
 from main import JarvisLive, DESKTOP_ONLY_TOOLS, WEB_ONLY_TOOLS, TOOL_DECLARATIONS
 import main as main_module
+from actions.computer_control import (
+    VERIFY_TAG_SUCCESS, VERIFY_TAG_AMBIGUOUS, VERIFY_TAG_NO_CHANGE, TYPE_TAG_FAILURE,
+)
 
 
 class _RecordingDashboard:
@@ -282,6 +285,127 @@ def test_computer_control_observe_shares_busy_guard_with_screen_process() -> Non
     print("test_computer_control_observe_shares_busy_guard_with_screen_process: PASS")
 
 
+# ── ui_click/ui_type: automatic local verification + bounded vision ───────
+#   escalation (see actions/computer_control.py's _classify_click_result/
+#   _classify_type_result for the LOCAL classification tested there;
+#   these tests cover only main.py's escalation wiring — does an
+#   inconclusive local verdict trigger exactly one _pending_vision
+#   injection, reusing observe/verify's own mechanism/cooldown, and never
+#   for a conclusive (success) verdict).
+
+def test_ui_click_verified_success_does_not_escalate_to_vision() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        jarvis._jarvis_mode = True
+        fake_result = f"Clicked (UI Automation): 'Saroj Thursday'. {VERIFY_TAG_SUCCESS} — matched."
+        with patch.object(main_module, "computer_control", lambda **kw: fake_result):
+            fr = await jarvis._execute_tool(
+                _fc("computer_control", action="ui_click", description="Saroj Thursday")
+            )
+        assert fr.response["result"] == fake_result
+        assert jarvis._pending_vision is None
+        assert jarvis._vision_busy is False
+    asyncio.run(_run())
+    print("test_ui_click_verified_success_does_not_escalate_to_vision: PASS")
+
+
+def test_ui_click_ambiguous_escalates_to_vision_exactly_once() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        jarvis._jarvis_mode = True
+        fake_result = f"Clicked (UI Automation): 'Connect'. {VERIFY_TAG_AMBIGUOUS} — unclear."
+        with patch.object(main_module, "computer_control", lambda **kw: fake_result), \
+             patch.object(main_module, "_capture_screen", _fake_capture_screen), \
+             patch.object(main_module, "get_active_window_title", lambda: "Bluetooth Settings"):
+            fr = await jarvis._execute_tool(
+                _fc("computer_control", action="ui_click", description="Connect")
+            )
+        result = fr.response["result"]
+        assert fake_result in result
+        assert "[VISION_ACTIVE]" in result
+        assert jarvis._vision_busy is True
+        assert jarvis._pending_vision is not None
+        img_b, mime_t, question, angle = jarvis._pending_vision
+        assert angle == "screen"
+        assert "[JARVIS_VERIFY]" in question
+        assert "Connect" in question
+        assert "Bluetooth Settings" in question
+    asyncio.run(_run())
+    print("test_ui_click_ambiguous_escalates_to_vision_exactly_once: PASS")
+
+
+def test_ui_click_no_observable_change_also_escalates() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        jarvis._jarvis_mode = True
+        fake_result = f"Clicked (UI Automation): 'Something'. {VERIFY_TAG_NO_CHANGE} — nothing happened."
+        with patch.object(main_module, "computer_control", lambda **kw: fake_result), \
+             patch.object(main_module, "_capture_screen", _fake_capture_screen), \
+             patch.object(main_module, "get_active_window_title", lambda: "App"):
+            fr = await jarvis._execute_tool(
+                _fc("computer_control", action="ui_click", description="Something")
+            )
+        assert "[VISION_ACTIVE]" in fr.response["result"]
+        assert jarvis._pending_vision is not None
+    asyncio.run(_run())
+    print("test_ui_click_no_observable_change_also_escalates: PASS")
+
+
+def test_ui_type_failure_escalates_to_vision() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        jarvis._jarvis_mode = True
+        fake_result = f"Typed (UI Automation) into 'Search': hi. {TYPE_TAG_FAILURE} — unchanged."
+        with patch.object(main_module, "computer_control", lambda **kw: fake_result), \
+             patch.object(main_module, "_capture_screen", _fake_capture_screen), \
+             patch.object(main_module, "get_active_window_title", lambda: "App"):
+            fr = await jarvis._execute_tool(
+                _fc("computer_control", action="ui_type", description="Search", text="hi")
+            )
+        assert "[VISION_ACTIVE]" in fr.response["result"]
+        assert jarvis._pending_vision is not None
+    asyncio.run(_run())
+    print("test_ui_type_failure_escalates_to_vision: PASS")
+
+
+def test_ui_click_escalation_respects_shared_vision_busy_guard() -> None:
+    # If a screen observation is already in flight (from screen_process,
+    # observe, or a previous escalation), an inconclusive local verdict
+    # must NOT stack a second one — the local result is reported as-is.
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        jarvis._jarvis_mode = True
+        jarvis._vision_busy = True
+        fake_result = f"Clicked (UI Automation): 'X'. {VERIFY_TAG_AMBIGUOUS} — unclear."
+        with patch.object(main_module, "computer_control", lambda **kw: fake_result), \
+             patch.object(main_module, "_capture_screen", _fake_capture_screen), \
+             patch.object(main_module, "get_active_window_title", lambda: "App"):
+            fr = await jarvis._execute_tool(
+                _fc("computer_control", action="ui_click", description="X")
+            )
+        result = fr.response["result"]
+        assert result == fake_result  # no [VISION_ACTIVE] appended — nothing was stacked
+        assert "[VISION_ACTIVE]" not in result
+    asyncio.run(_run())
+    print("test_ui_click_escalation_respects_shared_vision_busy_guard: PASS")
+
+
+def test_ui_click_success_never_reads_computer_control_args_as_desktop_only_block() -> None:
+    # ui_click/ui_type are already in _cc_jarvis_only, so this also proves
+    # the JARVIS-mode gate still applies to them before any of the above
+    # escalation logic ever runs.
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        assert jarvis._jarvis_mode is False
+        fr = await jarvis._execute_tool(
+            _fc("computer_control", action="ui_click", description="Anything")
+        )
+        assert "[JARVIS_MODE_REQUIRED]" in fr.response["result"]
+        assert jarvis._pending_vision is None
+    asyncio.run(_run())
+    print("test_ui_click_success_never_reads_computer_control_args_as_desktop_only_block: PASS")
+
+
 # ── reconnect reset (source-level — a full reconnect isn't easily driven
 # in a unit test; the reset block itself is a fixed, reviewable statement) ─
 
@@ -309,5 +433,11 @@ if __name__ == "__main__":
     test_computer_control_verify_uses_verify_wording_not_observe_wording()
     test_computer_control_observe_cooldown_blocks_rapid_repeat()
     test_computer_control_observe_shares_busy_guard_with_screen_process()
+    test_ui_click_verified_success_does_not_escalate_to_vision()
+    test_ui_click_ambiguous_escalates_to_vision_exactly_once()
+    test_ui_click_no_observable_change_also_escalates()
+    test_ui_type_failure_escalates_to_vision()
+    test_ui_click_escalation_respects_shared_vision_busy_guard()
+    test_ui_click_success_never_reads_computer_control_args_as_desktop_only_block()
     test_reconnect_reset_block_resets_jarvis_mode()
     print("\nAll JARVIS mode tests passed.")

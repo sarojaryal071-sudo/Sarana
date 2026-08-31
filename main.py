@@ -100,6 +100,7 @@ from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control, get_active_window_title
+from actions.computer_control  import INCONCLUSIVE_TAGS as _cc_INCONCLUSIVE_TAGS
 from actions.game_updater      import game_updater
 from actions.system_monitor    import SystemMonitor, get_system_status
 from actions.proactive         import ProactiveEngine
@@ -809,8 +810,11 @@ TOOL_DECLARATIONS = [
             "guess what you'll see. ui_find/ui_click/ui_type use the OS accessibility tree (not raw pixel "
             "coordinates) to locate a described element by name — prefer these over screen_find/screen_click/raw "
             "x,y clicks for native desktop apps whenever JARVIS mode is on; fall back to screen_find only if the "
-            "accessibility tree can't find the element. Never claim an action worked without an observe/verify "
-            "call actually confirming it."
+            "accessibility tree can't find the element. ui_click/ui_type automatically verify their own result "
+            "locally (a tag in the returned text tells you: verified success, verified failure, ambiguous, or no "
+            "observable change — read it honestly) and escalate to a real screen look automatically when that "
+            "local check is inconclusive; you never need to remember to call verify after every click, but you "
+            "still can for anything consequential. Never claim an action worked when the result says otherwise."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -2106,9 +2110,10 @@ class JarvisLive:
                 "observe/verify/ui_find/ui_click/ui_type and "
                 "get_active_window_title actions, and lean more directly "
                 "on browser_control — but the same honesty standard you "
-                "always hold never relaxes: never claim an action "
-                "succeeded without an observe/verify call actually "
-                "confirming it, never guess an ambiguous UI target with "
+                "always hold never relaxes: ui_click/ui_type verify "
+                "themselves automatically now, but never override what "
+                "that verification says, never claim success it didn't "
+                "confirm, never guess an ambiguous UI target with "
                 "false confidence (ask instead), and always get an "
                 "explicit yes before sending a message, deleting "
                 "anything, or any purchase/financial/security-changing "
@@ -2681,9 +2686,11 @@ class JarvisLive:
                             "You now also have real computer-control "
                             "ability on this desktop (computer_control's "
                             "observe/verify/ui_find/ui_click/ui_type, plus "
-                            "browser_control) — never claim an action "
-                            "succeeded without observing the result, and "
-                            "always ask for explicit confirmation before "
+                            "browser_control) — ui_click/ui_type verify "
+                            "themselves automatically, so trust and report "
+                            "what that verification actually says rather "
+                            "than assuming success, and always ask for "
+                            "explicit confirmation before "
                             "sending a message, deleting anything, or any "
                             "purchase/financial/security-changing action."
                             if self._auto_start else
@@ -3033,6 +3040,51 @@ class JarvisLive:
                             "wait — the actual view arrives in the next "
                             "message. Do NOT guess what you'll see."
                         )
+                elif _cc_action in ("ui_click", "ui_type"):
+                    # These already self-verify LOCALLY (no Gemini call) —
+                    # see actions/computer_control.py's _classify_click_
+                    # result/_classify_type_result. Only when that local
+                    # check comes back genuinely inconclusive
+                    # (computer_control.INCONCLUSIVE_TAGS) do we escalate,
+                    # and only ONCE, by reusing the EXACT same observe/
+                    # verify _pending_vision mechanism above — never a
+                    # second Gemini session, never on every click (that
+                    # would be slow/expensive — see the project brief).
+                    # Still gated by the same cooldown/busy guard as
+                    # observe/verify so this can't stack into a loop.
+                    r = await loop.run_in_executor(None, lambda: computer_control(parameters=args, player=self.ui))
+                    result = r or "Done."
+                    _inconclusive = any(tag in result for tag in _cc_INCONCLUSIVE_TAGS)
+                    if _inconclusive:
+                        _now = time.monotonic()
+                        _cooldown = 3.0
+                        if not self._vision_busy and (_now - self._vision_last_time) >= _cooldown:
+                            self._vision_busy      = True
+                            self._vision_last_time = _now
+                            desc  = (args.get("description") or "").strip()
+                            title = await loop.run_in_executor(None, get_active_window_title)
+                            img_b, mime_t = await loop.run_in_executor(None, _capture_screen)
+                            question = (
+                                f"[JARVIS_VERIFY] Currently focused window: "
+                                f"'{title or 'unknown'}'. Local verification "
+                                f"of the last action was inconclusive "
+                                f"({result}). Look at the screen and say "
+                                f"plainly whether "
+                                f"'{desc or 'the intended action'}' actually "
+                                f"happened — confirmed, not confirmed, or "
+                                f"unclear. Never assume."
+                            )
+                            self._pending_vision = (img_b, mime_t, question, "screen")
+                            result = (
+                                result + " [VISION_ACTIVE] Local verification "
+                                "was inconclusive, so a closer look is being "
+                                "taken automatically — acknowledge that "
+                                "briefly in ONE short line, then wait for the "
+                                "real view in the next message."
+                            )
+                        # else: a vision check is already in flight/cooling
+                        # down — report the local (inconclusive) result
+                        # honestly rather than silently stacking a second one.
                 else:
                     r = await loop.run_in_executor(None, lambda: computer_control(parameters=args, player=self.ui))
                     result = r or "Done."

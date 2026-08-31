@@ -27,7 +27,13 @@ docstrings for the live evidence these fixes are based on.
 Run with:
     .venv/Scripts/python.exe -m tests.test_computer_control
 """
-from actions.computer_control import _pick_best_match, _new_window_note
+from actions.computer_control import (
+    _pick_best_match, _new_window_note,
+    _classify_click_result, _classify_type_result, _screen_changed,
+    VERIFY_TAG_SUCCESS, VERIFY_TAG_AMBIGUOUS, VERIFY_TAG_NO_CHANGE,
+    TYPE_TAG_SUCCESS, TYPE_TAG_FAILURE, TYPE_TAG_AMBIGUOUS,
+    INCONCLUSIVE_TAGS,
+)
 
 
 class _FakeCtrl:
@@ -160,6 +166,154 @@ def test_new_window_note_lists_multiple_new_windows() -> None:
     print("test_new_window_note_lists_multiple_new_windows: PASS")
 
 
+# ── _classify_click_result / _classify_type_result: automatic local ─────
+#   click/type verification (see actions/computer_control.py's own module
+#   docstring for the four-tier design this implements). Pure functions,
+#   tested with plain dicts shaped like _snapshot()'s real output — no
+#   live UI needed.
+
+def _snap(active_title="App", top_level=None, alive=True, toggle=None, selected=None, screen=None):
+    return {
+        "active_title": active_title,
+        "top_level": top_level if top_level is not None else {"App"},
+        "ctrl": {"alive": alive, "toggle": toggle, "selected": selected},
+        "screen": screen,
+    }
+
+
+def test_click_new_dialog_is_ambiguous_not_silently_success_or_failure() -> None:
+    before = _snap(top_level={"App"})
+    after = _snap(top_level={"App", "Error — file not found"})
+    tag, reason = _classify_click_result("Connect", before, after)
+    assert tag == VERIFY_TAG_AMBIGUOUS
+    assert "new" in reason.lower() or "window" in reason.lower()
+    print("test_click_new_dialog_is_ambiguous_not_silently_success_or_failure: PASS")
+
+
+def test_click_active_window_change_matching_target_is_success() -> None:
+    before = _snap(active_title="WhatsApp")
+    after = _snap(active_title="Saroj Thursday - WhatsApp")
+    tag, reason = _classify_click_result("Saroj Thursday", before, after)
+    assert tag == VERIFY_TAG_SUCCESS
+    print("test_click_active_window_change_matching_target_is_success: PASS")
+
+
+def test_click_active_window_change_not_matching_target_is_ambiguous() -> None:
+    before = _snap(active_title="WhatsApp")
+    after = _snap(active_title="Some Other Chat - WhatsApp")
+    tag, _ = _classify_click_result("Saroj Thursday", before, after)
+    assert tag == VERIFY_TAG_AMBIGUOUS
+    print("test_click_active_window_change_not_matching_target_is_ambiguous: PASS")
+
+
+def test_click_target_control_going_stale_is_success() -> None:
+    # The clicked list-item control itself vanishing from the tree — a
+    # real pattern for list-navigation UIs (WhatsApp's conversation list)
+    # where the click causes the surrounding view to rebuild.
+    before = _snap(alive=True)
+    after = _snap(alive=False)
+    tag, _ = _classify_click_result("Saroj Thursday", before, after)
+    assert tag == VERIFY_TAG_SUCCESS
+    print("test_click_target_control_going_stale_is_success: PASS")
+
+
+def test_click_toggle_state_change_is_success() -> None:
+    before = _snap(toggle="off")
+    after = _snap(toggle="on")
+    tag, _ = _classify_click_result("Bluetooth", before, after)
+    assert tag == VERIFY_TAG_SUCCESS
+    print("test_click_toggle_state_change_is_success: PASS")
+
+
+def test_click_selection_state_change_is_success() -> None:
+    before = _snap(selected=False)
+    after = _snap(selected=True)
+    tag, _ = _classify_click_result("My Headphones", before, after)
+    assert tag == VERIFY_TAG_SUCCESS
+    print("test_click_selection_state_change_is_success: PASS")
+
+
+def test_click_nothing_detectable_is_no_observable_change() -> None:
+    before = _snap()
+    after = _snap()
+    tag, _ = _classify_click_result("Something", before, after)
+    assert tag == VERIFY_TAG_NO_CHANGE
+    print("test_click_nothing_detectable_is_no_observable_change: PASS")
+
+
+def test_click_screen_pixels_changed_alone_is_ambiguous() -> None:
+    before = _snap(screen=tuple([0] * 384))
+    after = _snap(screen=tuple([255] * 384))
+    tag, _ = _classify_click_result("Something", before, after)
+    assert tag == VERIFY_TAG_AMBIGUOUS
+    print("test_click_screen_pixels_changed_alone_is_ambiguous: PASS")
+
+
+def test_screen_changed_detects_real_difference() -> None:
+    before = tuple([0] * 384)
+    after = tuple([255] * 384)
+    assert _screen_changed(before, after) is True
+    print("test_screen_changed_detects_real_difference: PASS")
+
+
+def test_screen_changed_ignores_tiny_noise() -> None:
+    before = tuple([100] * 384)
+    after = tuple([101] * 384)  # within the abs(a-b) > 20 per-pixel threshold
+    assert _screen_changed(before, after) is False
+    print("test_screen_changed_ignores_tiny_noise: PASS")
+
+
+def test_screen_changed_returns_none_when_uncomparable() -> None:
+    assert _screen_changed(None, (1, 2, 3)) is None
+    assert _screen_changed((1, 2), (1, 2, 3)) is None
+    print("test_screen_changed_returns_none_when_uncomparable: PASS")
+
+
+def test_type_matching_text_is_success() -> None:
+    tag, _ = _classify_type_result("hello world", "", "hello world")
+    assert tag == TYPE_TAG_SUCCESS
+    print("test_type_matching_text_is_success: PASS")
+
+
+def test_type_unreadable_field_is_ambiguous_not_failure() -> None:
+    # e.g. a masked password field — must NOT be reported as a false FAILURE.
+    tag, _ = _classify_type_result("hunter2", None, None)
+    assert tag == TYPE_TAG_AMBIGUOUS
+    print("test_type_unreadable_field_is_ambiguous_not_failure: PASS")
+
+
+def test_type_unchanged_field_is_failure() -> None:
+    tag, _ = _classify_type_result("hello", "", "")
+    assert tag == TYPE_TAG_FAILURE
+    print("test_type_unchanged_field_is_failure: PASS")
+
+
+def test_type_changed_but_not_matching_is_ambiguous() -> None:
+    tag, _ = _classify_type_result("hello", "", "xyz")
+    assert tag == TYPE_TAG_AMBIGUOUS
+    print("test_type_changed_but_not_matching_is_ambiguous: PASS")
+
+
+def test_type_reason_never_echoes_typed_or_readback_content() -> None:
+    # Privacy: the classifier's reason text must never leak the actual
+    # typed/read-back content, even truncated.
+    secret = "super-secret-token-xyz123"
+    for before_v, after_v in [("", secret), (None, None), ("", "")]:
+        _, reason = _classify_type_result(secret, before_v, after_v)
+        assert secret not in reason
+    print("test_type_reason_never_echoes_typed_or_readback_content: PASS")
+
+
+def test_inconclusive_tags_cover_ambiguous_and_no_change_and_type_failure() -> None:
+    assert VERIFY_TAG_AMBIGUOUS in INCONCLUSIVE_TAGS
+    assert VERIFY_TAG_NO_CHANGE in INCONCLUSIVE_TAGS
+    assert TYPE_TAG_AMBIGUOUS in INCONCLUSIVE_TAGS
+    assert TYPE_TAG_FAILURE in INCONCLUSIVE_TAGS
+    assert VERIFY_TAG_SUCCESS not in INCONCLUSIVE_TAGS
+    assert TYPE_TAG_SUCCESS not in INCONCLUSIVE_TAGS
+    print("test_inconclusive_tags_cover_ambiguous_and_no_change_and_type_failure: PASS")
+
+
 if __name__ == "__main__":
     test_startswith_match_wins_over_earlier_incidental_substring_match()
     test_exact_match_wins_immediately_regardless_of_order()
@@ -174,4 +328,21 @@ if __name__ == "__main__":
     test_new_window_note_is_empty_when_nothing_changed()
     test_new_window_note_ignores_blank_titles()
     test_new_window_note_lists_multiple_new_windows()
+    test_click_new_dialog_is_ambiguous_not_silently_success_or_failure()
+    test_click_active_window_change_matching_target_is_success()
+    test_click_active_window_change_not_matching_target_is_ambiguous()
+    test_click_target_control_going_stale_is_success()
+    test_click_toggle_state_change_is_success()
+    test_click_selection_state_change_is_success()
+    test_click_nothing_detectable_is_no_observable_change()
+    test_click_screen_pixels_changed_alone_is_ambiguous()
+    test_screen_changed_detects_real_difference()
+    test_screen_changed_ignores_tiny_noise()
+    test_screen_changed_returns_none_when_uncomparable()
+    test_type_matching_text_is_success()
+    test_type_unreadable_field_is_ambiguous_not_failure()
+    test_type_unchanged_field_is_failure()
+    test_type_changed_but_not_matching_is_ambiguous()
+    test_type_reason_never_echoes_typed_or_readback_content()
+    test_inconclusive_tags_cover_ambiguous_and_no_change_and_type_failure()
     print("\nAll computer_control tests passed.")
