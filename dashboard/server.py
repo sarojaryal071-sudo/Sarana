@@ -1082,6 +1082,19 @@ class DashboardServer:
             "request_id": request_id,
         })
 
+    async def broadcast_jarvis_mode(self, active: bool) -> None:
+        """JARVIS Mode: server -> client signal that self._jarvis_mode just
+        changed (see main.py's jarvis_mode tool) -- the backend owns the
+        authoritative mode state, this is purely a notification so the web
+        frontend can render the right visual mode (Orb vs SaranaFace --
+        see App.jsx). Same non-history reasoning as broadcast_state()/
+        broadcast_camera_vision_request() above: a client that connects
+        later gets no replay of this (JARVIS mode is session-scoped and
+        already resets to off on a fresh connection either way -- see
+        self._jarvis_mode's own docstring -- so a freshly-connected client
+        defaulting to "off" until told otherwise is correct, not a gap)."""
+        await self._send_to_clients({"type": "jarvis_mode_changed", "active": bool(active)})
+
     async def broadcast_content(self, title: str, text: str) -> None:
         """Server→client "content" message — mirrors JarvisUI.show_content's
         shape for a future web client. Nothing calls this yet (main.py is

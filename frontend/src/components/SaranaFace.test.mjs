@@ -131,11 +131,35 @@ test("Orb.jsx itself is left completely untouched and still exported as a compon
 
 // ── App.jsx integration ────────────────────────────────────────────────────
 
-test("App.jsx renders SaranaFace (not Orb) in the normal-mode branch of the orb-stage conditional", () => {
+test("App.jsx renders SaranaFace in the normal-mode branch of the orb-stage conditional", () => {
   assert.match(appSrc, /import SaranaFace from ["']\.\/components\/SaranaFace["']/);
-  assert.doesNotMatch(appSrc, /import Orb from/, "Orb should no longer be imported/rendered directly by App.jsx");
   const usages = appSrc.match(/<SaranaFace\b/g) || [];
   assert.equal(usages.length, 1, "SaranaFace must be rendered from exactly one place in App.jsx");
+});
+
+// ── JARVIS Mode: Orb is reinstated as the JARVIS-mode branch ──────────────
+
+test("App.jsx imports and renders Orb exactly once, as the JARVIS-mode branch (not alongside SaranaFace)", () => {
+  assert.match(appSrc, /import Orb from ["']\.\/components\/Orb["']/);
+  const usages = appSrc.match(/<Orb\b/g) || [];
+  assert.equal(usages.length, 1, "Orb must be rendered from exactly one place in App.jsx");
+});
+
+test("the orb-stage conditional is a single three-way chain: VisionStage, then Orb (JARVIS), then SaranaFace (normal) — never two mounted at once", () => {
+  assert.match(
+    appSrc,
+    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,400}state\.jarvisMode\s*\?\s*\(\s*<Orb[\s\S]{0,300}<SaranaFace/,
+    "VisionStage, Orb, and SaranaFace must be the three branches of the SAME conditional",
+  );
+});
+
+test("Orb is gated on state.jarvisMode, which the frontend only ever sets FROM the backend's jarvis_mode_changed message — never toggled locally", () => {
+  assert.match(appSrc, /case "jarvis_mode_changed":/);
+  assert.match(appSrc, /dispatch\(\{\s*type:\s*"JARVIS_MODE"\s*,\s*value:\s*msg\.active\s*\}\)/);
+  // No local mic/interrupt/click handler should dispatch JARVIS_MODE —
+  // the ONLY dispatch of it in the whole file must be the WS case above.
+  const dispatches = appSrc.match(/dispatch\(\{\s*type:\s*"JARVIS_MODE"/g) || [];
+  assert.equal(dispatches.length, 1, "JARVIS_MODE must be dispatched from exactly one place — the WS message handler");
 });
 
 test("VisionStage (camera/screen) still replaces the face in-place — never renders alongside it as a second element", () => {

@@ -52,6 +52,12 @@
 //                        "camera_vision_request" exactly, no "facing"
 //                      {"type": "screen_vision_stop", "request_id"}  —
 //                        mirrors "camera_vision_stop" exactly
+//                      {"type": "jarvis_mode_changed", "active": bool}  —
+//                        JARVIS Mode: the backend's self._jarvis_mode just
+//                        changed (see main.py's jarvis_mode tool /
+//                        App.jsx's render, which shows Orb instead of
+//                        SaranaFace while active) — backend-authoritative,
+//                        this frontend never toggles the mode itself
 //                      {"type": "device_action", ...}  (reserved, unsent today)
 //                      {"type": "pong", "t": <the ping's own timestamp>}
 //                        (handled internally, never forwarded to onMessage)

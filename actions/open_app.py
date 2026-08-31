@@ -52,6 +52,17 @@ _APP_ALIASES: dict[str, dict[str, str]] = {
     "finder":             {"Windows": "explorer.exe",            "Darwin": "Finder",               "Linux": "nautilus"},
     "task manager":       {"Windows": "taskmgr.exe",             "Darwin": "Activity Monitor",     "Linux": "gnome-system-monitor"},
     "settings":           {"Windows": "ms-settings:",            "Darwin": "System Preferences",   "Linux": "gnome-control-center"},
+    # JARVIS Mode — direct OS deep links: deterministic, zero UI
+    # automation needed just to REACH the right settings pane (see the
+    # Bluetooth/Wi-Fi example in this project's own computer-control
+    # investigation). No API key, no screen-scraping — connecting to a
+    # SPECIFIC already-listed device still needs computer_control's
+    # ui_find/ui_click once the pane is open.
+    "bluetooth":          {"Windows": "ms-settings:bluetooth",   "Darwin": "System Preferences",   "Linux": "gnome-control-center bluetooth"},
+    "bluetooth settings": {"Windows": "ms-settings:bluetooth",   "Darwin": "System Preferences",   "Linux": "gnome-control-center bluetooth"},
+    "wifi":               {"Windows": "ms-settings:network-wifi","Darwin": "System Preferences",   "Linux": "gnome-control-center wifi"},
+    "wi-fi":              {"Windows": "ms-settings:network-wifi","Darwin": "System Preferences",   "Linux": "gnome-control-center wifi"},
+    "wifi settings":      {"Windows": "ms-settings:network-wifi","Darwin": "System Preferences",   "Linux": "gnome-control-center wifi"},
     "calculator":         {"Windows": "calc.exe",                "Darwin": "Calculator",           "Linux": "gnome-calculator"},
     "paint":              {"Windows": "mspaint.exe",             "Darwin": "Preview",              "Linux": "gimp"},
     "instagram":          {"Windows": "Instagram",               "Darwin": "Instagram",            "Linux": "firefox"},

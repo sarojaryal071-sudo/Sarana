@@ -99,7 +99,7 @@ from actions.file_controller   import file_controller
 from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
-from actions.computer_control  import computer_control
+from actions.computer_control  import computer_control, get_active_window_title
 from actions.game_updater      import game_updater
 from actions.system_monitor    import SystemMonitor, get_system_status
 from actions.proactive         import ProactiveEngine
@@ -777,12 +777,45 @@ TOOL_DECLARATIONS = [
         }
     },
     {
-        "name": "computer_control",
-        "description": "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen.",
+        "name": "jarvis_mode",
+        "description": (
+            "Switches between normal SARANA and JARVIS mode for THIS "
+            "session only — never persists, always resets to off on "
+            "reconnect. Call action='on' ONLY when the user explicitly "
+            "asks to turn on/activate JARVIS mode (e.g. 'turn on JARVIS "
+            "mode', 'activate JARVIS'). NEVER call this just because the "
+            "user asked for a computer action — normal tools already "
+            "handle that. Call action='off' when they explicitly ask to "
+            "turn it off or go back to normal. The reply you get back "
+            "tells you exactly how to speak and behave from that point on "
+            "— actually adopt it starting with your very next reply."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data"},
+                "action": {"type": "STRING", "description": "'on' to activate JARVIS mode, 'off' to deactivate."},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "computer_control",
+        "description": (
+            "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen. "
+            "The observe/verify/ui_find/ui_click/ui_type/get_active_window_title actions are JARVIS-mode-only "
+            "(desktop) — they need jarvis_mode='on' first, and return [JARVIS_MODE_REQUIRED] otherwise. observe/"
+            "verify capture the CURRENT screen and send it back to you as a later message in this same "
+            "conversation (same [VISION_ACTIVE] pattern as screen_process) — say one short line, then wait, never "
+            "guess what you'll see. ui_find/ui_click/ui_type use the OS accessibility tree (not raw pixel "
+            "coordinates) to locate a described element by name — prefer these over screen_find/screen_click/raw "
+            "x,y clicks for native desktop apps whenever JARVIS mode is on; fall back to screen_find only if the "
+            "accessibility tree can't find the element. Never claim an action worked without an observe/verify "
+            "call actually confirming it."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data | observe | verify | ui_find | ui_click | ui_type | get_active_window_title"},
                 "text":        {"type": "STRING", "description": "Text to type or paste"},
                 "x":           {"type": "INTEGER", "description": "X coordinate"},
                 "y":           {"type": "INTEGER", "description": "Y coordinate"},
@@ -792,7 +825,7 @@ TOOL_DECLARATIONS = [
                 "amount":      {"type": "INTEGER", "description": "Scroll amount (default: 3)"},
                 "seconds":     {"type": "NUMBER",  "description": "Seconds to wait"},
                 "title":       {"type": "STRING",  "description": "Window title for focus_window"},
-                "description": {"type": "STRING",  "description": "Element description for screen_find/screen_click"},
+                "description": {"type": "STRING",  "description": "Element description for screen_find/screen_click/ui_find/ui_click/ui_type, or what to look for/verify for observe/verify"},
                 "type":        {"type": "STRING",  "description": "Data type for random_data"},
                 "field":       {"type": "STRING",  "description": "Field for user_data: name|email|city"},
                 "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
@@ -1060,7 +1093,12 @@ TOOL_DECLARATIONS = [
 # Universal (genuinely work identically either way, not listed here):
 # save_memory (pure memory operation), web_search (a network API call,
 # runs on the server either way — that's *correct* for both surfaces),
-# manage_monitor (background_monitor.py's own server-side state).
+# manage_monitor (background_monitor.py's own server-side state), and
+# jarvis_mode (JARVIS Mode itself — the persona/behavioral contract is
+# cross-platform by design; see self._jarvis_mode. Only the DESKTOP-only
+# tools it unlocks, like computer_control's observe/ui_find/etc, stay
+# gated by THIS SAME frozenset below — web JARVIS still can't touch the
+# OS, it just gets the JARVIS tone plus whatever web tools already exist).
 DESKTOP_ONLY_TOOLS = frozenset({
     "open_app", "browser_control", "file_controller", "send_message",
     "reminder", "youtube_video", "screen_process", "close_camera",
@@ -1453,6 +1491,21 @@ class JarvisLive:
         # disk or persisted anywhere.
         self._web_vision_session: dict | None = None
         self._web_vision_last_call = 0.0   # cooldown guard — separate from desktop's _vision_last_time
+        # JARVIS Mode — cross-platform (desktop AND web), session-scoped
+        # alternate persona/capability toggle (see the jarvis_mode tool /
+        # _execute_tool()'s jarvis_mode branch). Off by default; only an
+        # explicit user request flips it, and it is reset to False on
+        # every fresh connection (see run()'s reconnect-reset block) —
+        # deliberately never persisted anywhere, mirroring how
+        # self._web_vision_session/self._pending_vision already reset the
+        # same way for the same reason (a stale elevated state must never
+        # silently survive a dropped connection). Read by: _build_config()
+        # (the static [JARVIS_MODE] context block), _execute_tool()'s
+        # computer_control branch (gates the NEW observe/verify/ui_find/
+        # ui_click/ui_type/get_active_window_title actions only — the
+        # tool's existing raw actions stay available exactly as before
+        # regardless of this flag).
+        self._jarvis_mode: bool = False
         self._interrupted          = False   # True while draining audio after user interrupt
         # Tool execution / receive-loop decoupling: a dedicated background
         # consumer (see _process_tool_calls()) drains this queue so the
@@ -2025,7 +2078,53 @@ class JarvisLive:
                 "area instead.\n\n"
             )
 
-        parts = [time_ctx, identity_ctx, _capabilities_ctx, _location_ctx]
+        # JARVIS Mode — static baseline description (see self._jarvis_mode's
+        # own docstring). system_instruction is fixed for the life of this
+        # connection (same constraint every other context block here
+        # already lives with — see this file's other "system_instruction
+        # is fixed" notes), so this describes the mode's RULES once,
+        # persistently, rather than relying solely on the one-off
+        # [JARVIS_MODE_ON]/[JARVIS_MODE_OFF] turn-message (_execute_tool()'s
+        # jarvis_mode branch) to carry that meaning deep into a long
+        # conversation. The turn-message is still what actually fires the
+        # transition and reminds the model IN THE MOMENT — this block is
+        # the standing reference for what that transition means.
+        _jarvis_state = "ON" if self._jarvis_mode else "OFF (the default)"
+        _jarvis_ctx = (
+            "[JARVIS_MODE]\n"
+            f"JARVIS mode is currently {_jarvis_state} for this session. "
+            "It is a distinct, OPT-IN mode — never switch it yourself; "
+            "only a real jarvis_mode tool call changes it, and that only "
+            "happens when the user explicitly asks (never merely because "
+            "they asked for a computer action). It always resets to OFF "
+            "on a fresh connection.\n"
+            "While OFF: ignore everything below, remain your normal self.\n"
+            "While ON: adopt a composed, precise, operationally confident, "
+            "concise, slightly formal tone — not your normal warm/casual "
+            "one. " + (
+                "On this desktop app, you may also use computer_control's "
+                "observe/verify/ui_find/ui_click/ui_type and "
+                "get_active_window_title actions, and lean more directly "
+                "on browser_control — but the same honesty standard you "
+                "always hold never relaxes: never claim an action "
+                "succeeded without an observe/verify call actually "
+                "confirming it, never guess an ambiguous UI target with "
+                "false confidence (ask instead), and always get an "
+                "explicit yes before sending a message, deleting "
+                "anything, or any purchase/financial/security-changing "
+                "action — never infer confirmation from unrelated speech."
+                if self._auto_start else
+                "This is a WEB session — you do NOT gain desktop computer "
+                "control here (no mouse/keyboard/native-app/OS access "
+                "either way, JARVIS mode or not). You still have whatever "
+                "web tools already exist (browser-visible capabilities, "
+                "camera/screen vision, normal conversation) — if asked "
+                "for something that genuinely needs the desktop app, say "
+                "so honestly instead of pretending you did it."
+            ) + "\n\n"
+        )
+
+        parts = [time_ctx, identity_ctx, _capabilities_ctx, _jarvis_ctx, _location_ctx]
         if _profile_ctx:
             parts.append(_profile_ctx)
         if mem_str:
@@ -2555,6 +2654,62 @@ class JarvisLive:
                         )
                         result = "Event cancelled."
 
+            elif name == "jarvis_mode":
+                # Cross-platform, session-scoped mode toggle — see
+                # self._jarvis_mode's own docstring. Deliberately NOT in
+                # DESKTOP_ONLY_TOOLS/WEB_ONLY_TOOLS: the persona/behavioral
+                # contract is universal, only the DESKTOP-only computer-
+                # control actions it unlocks (computer_control's observe/
+                # ui_find/etc — see that branch below) stay gated by
+                # DESKTOP_ONLY_TOOLS exactly as before.
+                _mode_action = (args.get("action") or "").strip().lower()
+                if _mode_action == "on":
+                    self._jarvis_mode = True
+                    self.ui.write_log("SYS: JARVIS mode ON")
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast_jarvis_mode(True))
+                    result = (
+                        "[JARVIS_MODE_ON] JARVIS mode is now active for this "
+                        "session. From your very next reply onward, adopt "
+                        "the JARVIS persona: composed, precise, "
+                        "operationally confident, concise, slightly formal "
+                        "— not your normal warm/casual tone. Acknowledge "
+                        "the switch in ONE short JARVIS-style line in the "
+                        "user's own language (e.g. something like "
+                        "\"JARVIS online.\"), nothing longer, then continue "
+                        "normally. " + (
+                            "You now also have real computer-control "
+                            "ability on this desktop (computer_control's "
+                            "observe/verify/ui_find/ui_click/ui_type, plus "
+                            "browser_control) — never claim an action "
+                            "succeeded without observing the result, and "
+                            "always ask for explicit confirmation before "
+                            "sending a message, deleting anything, or any "
+                            "purchase/financial/security-changing action."
+                            if self._auto_start else
+                            "This is a web session — you do NOT gain "
+                            "desktop computer control here; you still have "
+                            "browser-visible tools, camera/screen vision, "
+                            "and normal conversation. If asked for "
+                            "something that needs the desktop app, say so "
+                            "honestly instead of pretending."
+                        )
+                    )
+                elif _mode_action == "off":
+                    self._jarvis_mode = False
+                    self.ui.write_log("SYS: JARVIS mode OFF")
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast_jarvis_mode(False))
+                    result = (
+                        "[JARVIS_MODE_OFF] JARVIS mode is now off. From "
+                        "your very next reply onward, return fully to your "
+                        "normal SARANA persona — warm, conversational, "
+                        "emotionally present. Acknowledge briefly in ONE "
+                        "short natural line, then continue normally."
+                    )
+                else:
+                    result = "jarvis_mode requires action='on' or action='off'."
+
             elif name == "browser_control":
                 r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
                 result = r or "Done."
@@ -2803,8 +2958,84 @@ class JarvisLive:
                 result = r or "Done."
 
             elif name == "computer_control":
-                r = await loop.run_in_executor(None, lambda: computer_control(parameters=args, player=self.ui))
-                result = r or "Done."
+                # JARVIS Mode desktop computer-control. This whole tool is
+                # already DESKTOP_ONLY (see DESKTOP_ONLY_TOOLS/the gate at
+                # the top of this method) — a web session never reaches
+                # this branch at all. The NEW actions below additionally
+                # require self._jarvis_mode — the tool's EXISTING raw
+                # actions (click/type/hotkey/scroll/etc.) stay available
+                # exactly as before, unconditionally, so nothing already
+                # relying on computer_control regresses.
+                _cc_action = (args.get("action") or "").lower().strip()
+                _cc_jarvis_only = {
+                    "observe", "verify", "ui_find", "ui_click", "ui_type",
+                    "get_active_window_title",
+                }
+                if _cc_action in _cc_jarvis_only and not self._jarvis_mode:
+                    result = (
+                        "[JARVIS_MODE_REQUIRED] This action needs JARVIS mode "
+                        "on. Tell the user honestly that you'd need JARVIS "
+                        "mode active for that (they can say \"turn on JARVIS "
+                        "mode\") — never claim you looked at or interacted "
+                        "with the screen."
+                    )
+                elif _cc_action in ("observe", "verify"):
+                    # Reuses the EXACT same-session injection mechanism as
+                    # screen_process (self._pending_vision, injected by the
+                    # receive loop right after this tool's own response
+                    # turn completes — see that code for the actual send).
+                    # Deliberately shares screen_process's own
+                    # self._vision_busy/_vision_last_time cooldown guard
+                    # rather than a second, parallel one — one screen
+                    # capture in flight at a time is the correct behavior
+                    # regardless of which tool asked for it, and it doubles
+                    # as the "no unbounded observe loop" safety valve this
+                    # mode requires.
+                    _now = time.monotonic()
+                    _cooldown = 3.0
+                    if self._vision_busy or (_now - self._vision_last_time) < _cooldown:
+                        result = (
+                            "A screen observation is still in progress — "
+                            "I will not call this again yet."
+                        )
+                    else:
+                        self._vision_busy      = True
+                        self._vision_last_time = _now
+                        desc  = (args.get("description") or args.get("text") or "").strip()
+                        title = await loop.run_in_executor(None, get_active_window_title)
+                        img_b, mime_t = await loop.run_in_executor(None, _capture_screen)
+                        if _cc_action == "verify":
+                            question = (
+                                f"[JARVIS_VERIFY] Currently focused window: "
+                                f"'{title or 'unknown'}'. Check specifically "
+                                f"whether the following is now true: "
+                                f"{desc or 'the last action succeeded'}. "
+                                f"Answer directly based on what you actually "
+                                f"see — confirmed, not confirmed, or unclear "
+                                f"— never assume."
+                            )
+                        else:
+                            question = (
+                                f"[JARVIS_OBSERVE] Currently focused window: "
+                                f"'{title or 'unknown'}'. "
+                                f"{desc or 'Describe the current screen state relevant to the task at hand.'}"
+                            )
+                        # angle="screen": never opens the camera, so the
+                        # existing injection code's _vision_cam_active
+                        # branch is skipped and _vision_busy is released as
+                        # soon as the observation is answered — same as
+                        # screen_process's own angle="screen" path.
+                        self._pending_vision = (img_b, mime_t, question, "screen")
+                        result = (
+                            "[VISION_ACTIVE] Screen captured for JARVIS "
+                            "observation. Say ONE short natural JARVIS-style "
+                            "sentence acknowledging you're checking, then "
+                            "wait — the actual view arrives in the next "
+                            "message. Do NOT guess what you'll see."
+                        )
+                else:
+                    r = await loop.run_in_executor(None, lambda: computer_control(parameters=args, player=self.ui))
+                    result = r or "Done."
 
             elif name == "game_updater":
                 r = await loop.run_in_executor(None, lambda: game_updater(parameters=args, player=self.ui, speak=self.speak))
@@ -4869,6 +5100,9 @@ class JarvisLive:
                     self._last_web_image_sent_at = 0.0
                     self._web_vision_session    = None
                     self._web_vision_last_call  = 0.0
+                    # JARVIS Mode: session-scoped, never survives a
+                    # reconnect — see self._jarvis_mode's own docstring.
+                    self._jarvis_mode           = False
                     self._interrupted          = False
                     self._pending_tool_calls   = {}
                     self._active_tool_task     = None

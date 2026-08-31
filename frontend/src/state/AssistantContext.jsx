@@ -43,6 +43,15 @@ const initialState = {
   // App.jsx's displayStatus, which overlays that on top of this.
   assistantStatus: "SLEEPING", // SLEEPING | LISTENING | THINKING | SPEAKING
 
+  // JARVIS Mode: purely a reflection of main.py's self._jarvis_mode (see
+  // its own docstring) — the backend OWNS this; the frontend never
+  // toggles it independently, only renders whatever the last
+  // "jarvis_mode_changed" WS message (or RESET_FOR_LOGOUT, below) said.
+  // Session-scoped like everything else in this reducer: a fresh login
+  // (RESET_FOR_LOGOUT resets to initialState) always starts back at
+  // false, exactly mirroring the backend's own reconnect reset.
+  jarvisMode: false,
+
   messages: [], // {speaker: "user"|"jarvis"|"sys", text, ts}
   content: null, // {title, text} | null
 
@@ -76,6 +85,8 @@ function reducer(state, action) {
       return { ...state, audioState: action.value };
     case "MIC_STATE":
       return { ...state, microphoneState: action.value };
+    case "JARVIS_MODE":
+      return { ...state, jarvisMode: !!action.value };
     case "STATUS_MESSAGE": {
       // Web UI state fix: msg.state is now main.py's real, granular state
       // string (LISTENING | THINKING | SPEAKING | SLEEPING) — see

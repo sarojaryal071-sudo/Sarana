@@ -29,6 +29,21 @@ try:
 except ImportError:
     _PYPERCLIP = False
 
+# JARVIS Mode — Windows UI Automation. Already an established dependency
+# in this exact codebase (requirements.txt: "pywinauto; sys_platform ==
+# 'win32'") and already proven working here (actions/game_updater.py's
+# Steam-install-dialog automation) — this just widens its role from that
+# one narrow use to a general semantic (name/control-type, not raw pixel
+# coordinates) element finder for ui_find/ui_click/ui_type. Windows-only;
+# on mac/Linux these three actions honestly report unavailable and the
+# existing screen_find/screen_click (vision-coordinate) fallback still
+# works everywhere.
+try:
+    import pywinauto
+    _PYWINAUTO = True
+except ImportError:
+    _PYWINAUTO = False
+
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -310,6 +325,178 @@ def _focus_window(title: str) -> str:
 
     return f"focus_window: unknown OS '{os_name}'"
 
+
+# ── JARVIS Mode: active-window metadata + UI Automation ─────────────────
+
+def _foreground_hwnd() -> int | None:
+    """Windows only — the raw HWND of the current foreground window via a
+    direct ctypes call (user32.dll), no subprocess/PowerShell round trip
+    needed. Shared by get_active_window_title() and _ui_find() below so
+    both always agree on exactly which window "active" means."""
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        return hwnd or None
+    except Exception as e:
+        print(f"[ComputerControl] ⚠️ _foreground_hwnd failed: {e}")
+        return None
+
+
+def get_active_window_title() -> str:
+    """Best-effort title of the CURRENTLY foreground/active window — the
+    metadata that accompanies every JARVIS observe/verify capture (see
+    main.py's computer_control branch) so Gemini's reasoning doesn't have
+    to re-derive "what app is this" purely from pixels each time. Never
+    raises; an empty string means "couldn't determine it," handled
+    honestly by the caller, never guessed."""
+    os_name = _get_os()
+
+    if os_name == "windows":
+        try:
+            import ctypes
+            hwnd = _foreground_hwnd()
+            if not hwnd:
+                return ""
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+            return (buf.value or "").strip()
+        except Exception as e:
+            print(f"[ComputerControl] ⚠️ get_active_window_title (Windows) failed: {e}")
+            return ""
+
+    if os_name == "mac":
+        try:
+            script = (
+                'tell application "System Events" to get name of '
+                'first application process whose frontmost is true'
+            )
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True, text=True, timeout=5,
+            )
+            return (result.stdout or "").strip()
+        except Exception as e:
+            print(f"[ComputerControl] ⚠️ get_active_window_title (macOS) failed: {e}")
+            return ""
+
+    if os_name == "linux":
+        try:
+            result = subprocess.run(
+                ["xdotool", "getactivewindow", "getwindowname"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                return (result.stdout or "").strip()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"[ComputerControl] ⚠️ get_active_window_title (Linux) failed: {e}")
+        return ""
+
+    return ""
+
+
+_UI_FIND_MAX_CANDIDATES = 400  # bound — never walk an unbounded control tree
+
+
+def _ui_find(description: str):
+    """Best-effort, BOUNDED search of the ACTIVE window's UI Automation
+    tree (Windows only — see _PYWINAUTO above) for a control whose visible
+    text loosely matches `description`. Returns the matched pywinauto
+    control wrapper, or None — never raises, never falls back to a
+    coordinate guess itself (that's screen_find's job, a deliberately
+    separate/distinct tool action — see this tool's own declaration).
+    Only ever inspects the single foreground window, never the whole
+    desktop, and only a bounded number of its descendants, so a huge or
+    pathological control tree can't hang the tool call."""
+    if not _PYWINAUTO or _get_os() != "windows":
+        return None
+
+    needle = (description or "").strip().lower()
+    if not needle:
+        return None
+
+    hwnd = _foreground_hwnd()
+    if not hwnd:
+        print("[ComputerControl] ⚠️ ui_find: no foreground window handle")
+        return None
+
+    try:
+        from pywinauto import Desktop
+        win = Desktop(backend="uia").window(handle=hwnd)
+    except Exception as e:
+        print(f"[ComputerControl] ⚠️ ui_find: could not wrap active window ({e})")
+        return None
+
+    try:
+        candidates = win.descendants()
+    except Exception as e:
+        print(f"[ComputerControl] ⚠️ ui_find: could not enumerate controls ({e})")
+        return None
+
+    best = None
+    for i, ctrl in enumerate(candidates):
+        if i >= _UI_FIND_MAX_CANDIDATES:
+            break
+        try:
+            name = (ctrl.window_text() or "").strip().lower()
+        except Exception:
+            continue
+        if not name:
+            continue
+        if needle == name:
+            return ctrl  # exact match — stop immediately, no ambiguity
+        if best is None and needle in name:
+            best = ctrl
+    return best
+
+
+def _ui_find_report(description: str) -> str:
+    ctrl = _ui_find(description)
+    if ctrl is None:
+        return f"NOT_FOUND: '{description}' (accessibility tree)"
+    try:
+        r = ctrl.rectangle()
+        cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+        return f"Found (UI Automation): '{description}' near ({cx},{cy})"
+    except Exception:
+        return f"Found (UI Automation): '{description}'"
+
+
+def _ui_click_by_description(description: str) -> str:
+    if not _PYWINAUTO or _get_os() != "windows":
+        return "UI Automation is only available on Windows here — use screen_click instead."
+    ctrl = _ui_find(description)
+    if ctrl is None:
+        return f"UI element not found via accessibility tree: '{description}' — try screen_click instead."
+    try:
+        ctrl.click_input()
+        return f"Clicked (UI Automation): '{description}'"
+    except Exception as e:
+        return f"Found '{description}' but click failed: {e}"
+
+
+def _ui_type_by_description(description: str, text: str) -> str:
+    if not _PYWINAUTO or _get_os() != "windows":
+        return "UI Automation is only available on Windows here — use smart_type instead."
+    ctrl = _ui_find(description)
+    if ctrl is None:
+        return f"UI input not found via accessibility tree: '{description}' — try smart_type instead."
+    try:
+        ctrl.click_input()
+        time.sleep(0.1)
+        try:
+            ctrl.set_text(text)   # fast, exact path for real Edit/Text controls
+        except Exception:
+            _require_pyautogui()
+            pyautogui.typewrite(text, interval=0.03)
+        preview = text[:60] + ("…" if len(text) > 60 else "")
+        return f"Typed (UI Automation) into '{description}': {preview}"
+    except Exception as e:
+        return f"Found '{description}' but type failed: {e}"
+
+
 def _screen_find(description: str) -> tuple[int, int] | None:
     api_key = _get_api_key()
     if not api_key:
@@ -403,6 +590,19 @@ def computer_control(
       screen_click  — AI element finder + click
       random_data   — generate fake form data
       user_data     — pull real data from memory
+
+      JARVIS Mode only (gated by main.py's _execute_tool(), not here —
+      this module has no notion of JARVIS mode itself):
+      get_active_window_title — title of the currently foreground window
+      ui_find       — find a control by name in the ACTIVE window's UI
+                       Automation tree (Windows only; semantic, not pixels)
+      ui_click      — ui_find + click via UI Automation
+      ui_type       — ui_find + type via UI Automation (falls back to
+                       pyautogui typing if the control has no direct
+                       set_text)
+      (observe/verify are NOT dispatched here — they need main.py's own
+      async self._pending_vision injection, see that module's
+      computer_control branch)
     """
     params = parameters or {}
     action = params.get("action", "").lower().strip()
@@ -470,6 +670,19 @@ def computer_control(
         if action == "screen_find":
             coords = _screen_find(params.get("description", ""))
             return f"{coords[0]},{coords[1]}" if coords else "NOT_FOUND"
+
+        if action == "get_active_window_title":
+            title = get_active_window_title()
+            return title if title else "(could not determine the active window title)"
+
+        if action == "ui_find":
+            return _ui_find_report(params.get("description", ""))
+
+        if action == "ui_click":
+            return _ui_click_by_description(params.get("description", ""))
+
+        if action == "ui_type":
+            return _ui_type_by_description(params.get("description", ""), params.get("text", ""))
 
         if action == "screen_click":
             desc   = params.get("description", "")

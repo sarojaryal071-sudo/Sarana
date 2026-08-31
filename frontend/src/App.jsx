@@ -16,6 +16,7 @@ import { stopScreenVision } from "./lib/screenVision";
 import LoginScreen, { readStoredSession, clearStoredToken } from "./components/LoginScreen";
 import Header from "./components/Header";
 import SaranaFace from "./components/SaranaFace";
+import Orb from "./components/Orb";
 import SidePanel from "./components/SidePanel";
 import ContentPanel from "./components/ContentPanel";
 import Controls from "./components/Controls";
@@ -271,6 +272,14 @@ export default function App() {
             break;
           case "screen_vision_stop":
             setVisionRequest((cur) => (cur && cur.source === "screen" && cur.requestId === msg.request_id ? null : cur));
+            break;
+          case "jarvis_mode_changed":
+            // JARVIS Mode: backend is the authoritative source of
+            // self._jarvis_mode (see main.py's jarvis_mode tool) — this
+            // frontend never toggles the mode itself, only reflects
+            // whatever the backend just broadcast. Drives the orb-stage
+            // conditional below (Orb replaces SaranaFace while active).
+            dispatch({ type: "JARVIS_MODE", value: msg.active });
             break;
           case "device_action":
             // Reserved for Phase 6's desktop-agent dispatch — nothing sends
@@ -696,16 +705,19 @@ export default function App() {
           <ToolsRail tools={state.tools} />
         </div>
         <div className="panel-center">
-          {/* Web visual context (camera or screen): the live preview
-              replaces the normal-mode face in its own slot — never a
-              second, separate floating box (see VisionStage.jsx, which
-              renders into the identical "orb-stage" area SaranaFace itself
-              uses). Exactly one of the two is ever mounted.
-              Stage 1 (see core/prompt.txt): SaranaFace — a minimal
-              expressive AI face — is SARANA's normal-mode visual identity
-              now. Orb.jsx still exists untouched, reserved for a future
-              JARVIS mode (not wired up yet — see SaranaFace.jsx's own
-              header note on the intended orb-stage/mode relationship). */}
+          {/* Central visual stage: exactly ONE of VisionStage / Orb /
+              SaranaFace is ever mounted here, in that priority order —
+              never a second, separate floating element (see
+              VisionStage.jsx, which renders into the identical
+              "orb-stage" area both Orb.jsx and SaranaFace.jsx use).
+              Camera/screen vision always wins regardless of mode (a live
+              observation in progress is always shown). Otherwise: JARVIS
+              Mode (state.jarvisMode, purely a reflection of the backend's
+              self._jarvis_mode — see the "jarvis_mode_changed" WS case
+              above) shows the existing technical Orb; normal SARANA mode
+              shows SaranaFace. Orb.jsx itself needed no changes for
+              this — it was already fully built and simply unused since
+              the Stage-1 SaranaFace work (see that commit). */}
           {authenticated && visionRequest ? (
             <VisionStage
               source={visionRequest.source}
@@ -714,6 +726,8 @@ export default function App() {
               onFrame={handleVisionFrame}
               onStopped={handleVisionStopped}
             />
+          ) : state.jarvisMode ? (
+            <Orb status={displayStatus} assistantName={state.assistantName} />
           ) : (
             <SaranaFace status={displayStatus} assistantName={state.assistantName} />
           )}
