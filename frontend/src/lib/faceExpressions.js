@@ -29,6 +29,16 @@ export const FACE_EXPRESSIONS = Object.freeze([
   "curious",
   "confused",
   "reassuring",
+  // Added for the wireframe-face system (Human-Orb UI task) — same rule
+  // as the five above: fully implemented in CSS so the vocabulary stays
+  // extensible, but mapStatusToExpression() below still only ever
+  // returns one of the five states real, already-existing app state can
+  // honestly justify. No emotion classifier exists in this app; these
+  // four are not yet reachable from any real signal.
+  "empathetic",
+  "surprised",
+  "calm",
+  "focused",
 ]);
 
 // Mirrors the exact status precedence Orb.jsx itself already renders

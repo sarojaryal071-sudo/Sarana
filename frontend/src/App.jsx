@@ -689,6 +689,37 @@ export default function App() {
       ? "MUTED"
       : state.assistantStatus;
 
+  // SARANA <-> JARVIS visual identity crossfade (Human-Orb UI task): the
+  // orb-stage conditional below used to hard-swap SaranaFace/Orb the
+  // instant state.jarvisMode flipped — an abrupt component replacement,
+  // not the "smooth transition... intentional and polished" the brief
+  // asks for. `identity` tracks the CURRENTLY DISPLAYED component
+  // (deliberately one render behind state.jarvisMode during a switch);
+  // `identityFading` drives a brief fade-out/fade-in via CSS (see
+  // .identity-stage in index.css) around the actual swap, which happens
+  // at the fade's midpoint so only ONE of Orb's canvas loop / SaranaFace's
+  // SVG animation is ever mounted and animating at a time — a true
+  // simultaneous crossfade would briefly run both, which is exactly the
+  // kind of unnecessary extra animation cost this project's own
+  // performance requirements (here and in SaranaFace's own history) have
+  // consistently avoided. VisionStage is untouched by this — it already
+  // "always wins" instantly and isn't part of the identity switch.
+  const targetIdentity = state.jarvisMode ? "jarvis" : "sarana";
+  const [identity, setIdentity] = useState(targetIdentity);
+  const [identityFading, setIdentityFading] = useState(false);
+  const identityTimerRef = useRef(null);
+  const IDENTITY_FADE_MS = 260;
+
+  useEffect(() => {
+    if (targetIdentity === identity) return undefined;
+    setIdentityFading(true);
+    identityTimerRef.current = setTimeout(() => {
+      setIdentity(targetIdentity);
+      setIdentityFading(false);
+    }, IDENTITY_FADE_MS);
+    return () => clearTimeout(identityTimerRef.current);
+  }, [targetIdentity, identity]);
+
   return (
     <div className="app-shell">
       <Header
@@ -711,13 +742,13 @@ export default function App() {
               VisionStage.jsx, which renders into the identical
               "orb-stage" area both Orb.jsx and SaranaFace.jsx use).
               Camera/screen vision always wins regardless of mode (a live
-              observation in progress is always shown). Otherwise: JARVIS
-              Mode (state.jarvisMode, purely a reflection of the backend's
-              self._jarvis_mode — see the "jarvis_mode_changed" WS case
-              above) shows the existing technical Orb; normal SARANA mode
-              shows SaranaFace. Orb.jsx itself needed no changes for
-              this — it was already fully built and simply unused since
-              the Stage-1 SaranaFace work (see that commit). */}
+              observation in progress is always shown, instantly — no
+              crossfade). Otherwise: `identity` (not state.jarvisMode
+              directly — see the crossfade effect above) picks Orb
+              (JARVIS) or SaranaFace (normal SARANA); .identity-stage's
+              fade class wraps whichever one is mounted so the switch
+              reads as one intentional transformation instead of an
+              abrupt swap, without ever animating both at once. */}
           {authenticated && visionRequest ? (
             <VisionStage
               source={visionRequest.source}
@@ -726,10 +757,14 @@ export default function App() {
               onFrame={handleVisionFrame}
               onStopped={handleVisionStopped}
             />
-          ) : state.jarvisMode ? (
-            <Orb status={displayStatus} assistantName={state.assistantName} />
           ) : (
-            <SaranaFace status={displayStatus} assistantName={state.assistantName} />
+            <div className={`identity-stage${identityFading ? " identity-stage-fading" : ""}`}>
+              {identity === "jarvis" ? (
+                <Orb status={displayStatus} assistantName={state.assistantName} />
+              ) : (
+                <SaranaFace status={displayStatus} assistantName={state.assistantName} />
+              )}
+            </div>
           )}
           <ContentPanel content={state.content} onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })} />
           <Controls

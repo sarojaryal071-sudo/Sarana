@@ -1,13 +1,14 @@
 // src/components/SaranaFace.test.mjs — focused regression tests for
-// SARANA's normal-mode expressive face, source-inspection style (same
+// SARANA's Human-Orb wireframe face, source-inspection style (same
 // convention as Controls.test.mjs/VisionStage.test.mjs — this project
 // renders no components in tests; see those files' own header notes).
 //
 // Renders into the same "orb-stage" slot Orb.jsx/VisionStage.jsx occupy
 // (see App.jsx) instead of a new floating element. The expression mapping
-// itself is a pure function tested separately with real assertions in
-// lib/faceExpressions.test.mjs — this file only covers the component's own
-// structure/wiring, plus App.jsx integration.
+// and mesh geometry are pure functions tested separately with real
+// assertions (lib/faceExpressions.test.mjs, lib/faceMesh.test.mjs) — this
+// file only covers the component's own structure/wiring, the identity
+// crossfade, and App.jsx integration.
 //
 // Run with:
 //   cd frontend && node --test src/components/*.test.mjs
@@ -25,6 +26,7 @@ const controlsSrc = fs.readFileSync(path.join(__dirname, "Controls.jsx"), "utf8"
 const appSrc = fs.readFileSync(path.join(__dirname, "..", "App.jsx"), "utf8");
 const css = fs.readFileSync(path.join(__dirname, "..", "index.css"), "utf8");
 const faceExpressionsSrc = fs.readFileSync(path.join(__dirname, "..", "lib", "faceExpressions.js"), "utf8");
+const faceMeshSrc = fs.readFileSync(path.join(__dirname, "..", "lib", "faceMesh.js"), "utf8");
 
 // ── component structure ──────────────────────────────────────────────────
 
@@ -38,10 +40,27 @@ test("the face graphic is purely presentational (aria-hidden) — no interactive
   assert.doesNotMatch(src, /onClick/);
 });
 
-test("has exactly two eyes and one mouth element", () => {
-  assert.match(src, /face-eye-left/);
-  assert.match(src, /face-eye-right/);
-  assert.match(src, /face-mouth/);
+test("renders the procedural wireframe mesh from lib/faceMesh.js — not hand-authored SVG paths or an image asset", () => {
+  assert.match(src, /from ["']\.\.\/lib\/faceMesh["']/);
+  assert.match(src, /buildFacePoints/);
+  assert.match(src, /buildFaceEdges/);
+  assert.doesNotMatch(src, /<img/i, "no image asset for the face");
+});
+
+test("geometry is computed ONCE at module load, not inside the component function (no per-render/per-frame recomputation)", () => {
+  // The buildFacePoints()/buildFaceEdges() calls must appear at the top
+  // level of the module, before the exported component function starts —
+  // never inside it, which would recompute the same fixed geometry on
+  // every render for no reason.
+  const componentStart = src.indexOf("export default function SaranaFace");
+  const pointsCallIdx = src.indexOf("buildFacePoints()");
+  assert.ok(pointsCallIdx > -1 && pointsCallIdx < componentStart, "buildFacePoints() must run at module scope, before the component");
+});
+
+test("has all thirteen anatomical mesh groups referenced (eyes, brows, pupils, nose, cheeks, mouth, jaw, head)", () => {
+  for (const group of ["head", "browL", "browR", "eyeL", "eyeR", "pupilL", "pupilR", "nose", "cheekL", "cheekR", "mouthTop", "mouthBottom", "jaw"]) {
+    assert.match(faceMeshSrc, new RegExp(`"${group}"`), `mesh group "${group}" missing from faceMesh.js`);
+  }
 });
 
 test("delegates ALL status->expression logic to lib/faceExpressions.js — never reimplements the mapping inline", () => {
@@ -51,7 +70,7 @@ test("delegates ALL status->expression logic to lib/faceExpressions.js — never
   // literal in this file — the component must only ever obtain them
   // dynamically via mapStatusToExpression(status), never duplicate the
   // lookup table itself.
-  for (const word of ["neutral", "listening", "thinking", "speaking", "concerned"]) {
+  for (const word of ["neutral", "listening", "thinking", "speaking", "concerned", "empathetic", "surprised", "calm", "focused"]) {
     assert.doesNotMatch(src, new RegExp(`["']${word}["']`), `"${word}" must not be hardcoded in SaranaFace.jsx`);
   }
 });
@@ -61,11 +80,11 @@ test("the expression drives rendering via a data-expression attribute (styled en
   assert.doesNotMatch(src, /style=\{\{/, "expressions should be CSS-driven, not inline style objects");
 });
 
-test("every expression in the shared vocabulary has a matching CSS selector", () => {
+test("every expression in the shared fourteen-word vocabulary has a matching CSS selector", () => {
   const vocabMatch = faceExpressionsSrc.match(/FACE_EXPRESSIONS = Object\.freeze\(\[([\s\S]*?)\]\)/);
   assert.ok(vocabMatch, "could not locate FACE_EXPRESSIONS in faceExpressions.js");
   const names = [...vocabMatch[1].matchAll(/"([a-z]+)"/g)].map((m) => m[1]);
-  assert.ok(names.length >= 10, "expected the full ten-expression vocabulary");
+  assert.equal(names.length, 14, "expected the full fourteen-expression vocabulary");
   for (const name of names) {
     assert.match(
       css,
@@ -75,7 +94,7 @@ test("every expression in the shared vocabulary has a matching CSS selector", ()
   }
 });
 
-// ── blinking / timers (spec section 11: natural, no leaks) ───────────────
+// ── blinking / timers (natural, no leaks) ─────────────────────────────────
 
 test("blinking uses a randomized timer (not a fixed CSS `infinite` metronome) and is cleaned up on unmount", () => {
   assert.match(src, /setTimeout/);
@@ -90,14 +109,14 @@ test("blink scheduling checks document.hidden so a backgrounded tab doesn't keep
   assert.match(src, /document\.hidden/);
 });
 
-test("no requestAnimationFrame / per-frame render loop — CSS animations carry the motion instead (spec section 17)", () => {
+test("no requestAnimationFrame / per-frame render loop — CSS animations carry the motion instead", () => {
   assert.doesNotMatch(src, /requestAnimationFrame/);
   assert.doesNotMatch(src, /setInterval/, "prefer a single rescheduled timeout over an uncapped interval");
 });
 
 // ── visual/technology constraints ─────────────────────────────────────────
 
-test("no canvas, WebGL, Three.js, or photorealistic <img> avatar — CSS-driven shapes only", () => {
+test("no canvas, WebGL, Three.js, or photorealistic <img> avatar — SVG-driven procedural geometry only", () => {
   assert.doesNotMatch(src, /<canvas/i);
   assert.doesNotMatch(src, /<img/i);
   assert.doesNotMatch(src, /three\.js|WebGLRenderer/i);
@@ -115,45 +134,49 @@ test("accepts the same prop shape as Orb ({ status, assistantName }) for interch
   assert.match(orbSrc, /\{\s*status\s*,\s*assistantName\s*\}/);
 });
 
-// ── accessibility (spec section 16: face must not be the ONLY state signal) ─
+// ── accessibility (face must not be the ONLY state signal) ────────────────
 
 test("a real text status label exists with role=\"status\"/aria-live so screen readers get it too", () => {
   assert.match(src, /role="status"/);
   assert.match(src, /aria-live="polite"/);
 });
 
-// ── JARVIS-mode compatibility (spec section 13) ───────────────────────────
+// ── JARVIS-mode compatibility ──────────────────────────────────────────────
 
-test("Orb.jsx itself is left completely untouched and still exported as a component (reserved for a future JARVIS mode)", () => {
+test("Orb.jsx itself is left completely untouched and still exported as a component (JARVIS mode)", () => {
   assert.match(orbSrc, /export default function Orb\(/);
   assert.match(orbSrc, /className="orb-stage"/);
 });
 
+test("Orb.jsx contains no reference to the new face-mesh system — the two visual identities stay fully independent", () => {
+  assert.doesNotMatch(orbSrc, /faceMesh/);
+  assert.doesNotMatch(orbSrc, /mesh-group/);
+});
+
 // ── App.jsx integration ────────────────────────────────────────────────────
 
-test("App.jsx renders SaranaFace in the normal-mode branch of the orb-stage conditional", () => {
+test("App.jsx renders SaranaFace in the normal-identity branch, exactly once", () => {
   assert.match(appSrc, /import SaranaFace from ["']\.\/components\/SaranaFace["']/);
   const usages = appSrc.match(/<SaranaFace\b/g) || [];
   assert.equal(usages.length, 1, "SaranaFace must be rendered from exactly one place in App.jsx");
 });
 
-// ── JARVIS Mode: Orb is reinstated as the JARVIS-mode branch ──────────────
-
-test("App.jsx imports and renders Orb exactly once, as the JARVIS-mode branch (not alongside SaranaFace)", () => {
+test("App.jsx imports and renders Orb exactly once, as the JARVIS-identity branch (not alongside SaranaFace)", () => {
   assert.match(appSrc, /import Orb from ["']\.\/components\/Orb["']/);
   const usages = appSrc.match(/<Orb\b/g) || [];
   assert.equal(usages.length, 1, "Orb must be rendered from exactly one place in App.jsx");
 });
 
-test("the orb-stage conditional is a single three-way chain: VisionStage, then Orb (JARVIS), then SaranaFace (normal) — never two mounted at once", () => {
+test("the central stage is a single conditional: VisionStage first, then an identity-stage wrapper choosing Orb or SaranaFace — never two mounted at once", () => {
   assert.match(
     appSrc,
-    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,400}state\.jarvisMode\s*\?\s*\(\s*<Orb[\s\S]{0,300}<SaranaFace/,
-    "VisionStage, Orb, and SaranaFace must be the three branches of the SAME conditional",
+    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,600}identity === "jarvis"[\s\S]{0,200}<Orb[\s\S]{0,300}<SaranaFace/,
+    "VisionStage, then identity-gated Orb/SaranaFace must be the branches of the SAME central-stage conditional",
   );
 });
 
-test("Orb is gated on state.jarvisMode, which the frontend only ever sets FROM the backend's jarvis_mode_changed message — never toggled locally", () => {
+test("Orb/SaranaFace are chosen via `identity` state, itself derived from state.jarvisMode — which the frontend only ever sets FROM the backend's jarvis_mode_changed message, never toggled locally", () => {
+  assert.match(appSrc, /const targetIdentity = state\.jarvisMode \? "jarvis" : "sarana"/);
   assert.match(appSrc, /case "jarvis_mode_changed":/);
   assert.match(appSrc, /dispatch\(\{\s*type:\s*"JARVIS_MODE"\s*,\s*value:\s*msg\.active\s*\}\)/);
   // No local mic/interrupt/click handler should dispatch JARVIS_MODE —
@@ -162,12 +185,41 @@ test("Orb is gated on state.jarvisMode, which the frontend only ever sets FROM t
   assert.equal(dispatches.length, 1, "JARVIS_MODE must be dispatched from exactly one place — the WS message handler");
 });
 
-test("VisionStage (camera/screen) still replaces the face in-place — never renders alongside it as a second element", () => {
+test("VisionStage (camera/screen) still replaces the identity stage in-place, instantly — never renders alongside it as a second element", () => {
   assert.match(
     appSrc,
-    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,400}<SaranaFace/,
-    "VisionStage and SaranaFace must be the two branches of the SAME conditional",
+    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,600}<SaranaFace/,
+    "VisionStage and the identity-stage branch must be the two arms of the SAME conditional",
   );
+});
+
+// ── SARANA <-> JARVIS crossfade (Human-Orb UI task) ────────────────────────
+
+test("switching identity is a fade transition (a mounted-component swap at the fade midpoint), not an instant hard replace", () => {
+  assert.match(appSrc, /identity-stage/);
+  assert.match(appSrc, /identityFading/);
+  assert.match(appSrc, /setTimeout/);
+  assert.match(css, /\.identity-stage\s*\{/);
+  assert.match(css, /\.identity-stage-fading\s*\{/);
+});
+
+test("the identity crossfade timer is cleaned up (no leaked timeout across re-renders/unmount)", () => {
+  const effectBlock = appSrc.match(/targetIdentity === identity[\s\S]{0,400}/)[0];
+  assert.match(effectBlock, /return \(\) => clearTimeout/);
+});
+
+test("VisionStage bypasses the identity crossfade entirely — camera/screen vision always wins instantly, per the existing architecture", () => {
+  // Bounded specifically to <VisionStage ...props.../> itself (up to its
+  // own self-closing tag), not an arbitrary character window that would
+  // overrun into the following identity-stage branch and false-pass.
+  const visionTagMatch = appSrc.match(/<VisionStage\b[\s\S]*?\/>/);
+  assert.ok(visionTagMatch, "could not locate the <VisionStage ... /> element");
+  assert.doesNotMatch(visionTagMatch[0], /identity-stage/, "VisionStage's own element must not be wrapped in the identity-stage fade");
+});
+
+test("the identity crossfade respects prefers-reduced-motion", () => {
+  const reducedMotionBlock = css.match(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*$/)[0];
+  assert.match(reducedMotionBlock, /\.identity-stage/);
 });
 
 test("Controls (mic/interrupt/message input) remains rendered exactly once, unconditionally", () => {

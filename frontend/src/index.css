@@ -228,6 +228,37 @@ input {
   }
 }
 
+/* ── identity stage (SARANA <-> JARVIS crossfade wrapper) ────────────────
+   Wraps whichever of Orb/SaranaFace is currently mounted (see App.jsx's
+   identity/identityFading state) so switching between them reads as one
+   deliberate transformation, not an abrupt component swap. Only ONE of
+   the two is ever actually mounted at a time — this fades the CURRENT
+   one out, App.jsx swaps which component is rendered at the fade's
+   midpoint, then this fades the NEW one in — so Orb's canvas loop and
+   SaranaFace's SVG animation never run simultaneously. VisionStage
+   bypasses this wrapper entirely (see App.jsx) — camera/screen vision
+   always wins instantly, no transition. */
+.identity-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  opacity: 1;
+  transform: scale(1);
+  transition: opacity 260ms ease, transform 260ms ease;
+}
+
+.identity-stage-fading {
+  opacity: 0;
+  transform: scale(0.985);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .identity-stage {
+    transition: none;
+  }
+}
+
 /* ── orb stage ──────────────────────────────────────────────────────── */
 .orb-stage {
   flex: 1;
@@ -241,188 +272,294 @@ input {
   display: block;
 }
 
-/* ── SaranaFace — minimal expressive AI face (normal SARANA mode) ────────
+/* ── SaranaFace — Human-Orb wireframe face (normal SARANA mode) ──────────
    Renders into the SAME .orb-stage slot Orb.jsx's canvas normally
-   occupies (see components/SaranaFace.jsx's own header note) — this is
-   the visual centerpiece for normal mode now; Orb.jsx/its CSS above is
-   left completely untouched, reserved for a future JARVIS mode.
-   All sizing is relative (clamp()/vmin) so the face scales with the
-   viewport instead of a hardcoded canvas resolution — no ResizeObserver
-   needed. vmin (the smaller of viewport width/height) is used rather than
-   vw alone so the face stays well-proportioned on both a tall narrow phone
-   and a short wide desktop window, not just a wide one. */
-.sarana-face {
+   occupies (see components/SaranaFace.jsx's own header note) — the
+   visual centerpiece for normal mode; Orb.jsx/its CSS above is left
+   completely untouched, reserved for JARVIS mode. This is the SECOND
+   generation of this component (see git history for the Stage-1 "two
+   floating shapes" version this replaced) — a procedurally-generated
+   low-poly wireframe face (glowing nodes + connecting edges, from
+   lib/faceMesh.js) inside a luminous orb glow, per the project's own
+   "Human-Orb UI" design brief. Geometry lives in an SVG viewBox (see
+   FACE_VIEWBOX) that scales via `width/height: 100%`, not a hardcoded
+   canvas resolution — no ResizeObserver needed, same reasoning as the
+   Stage-1 version's own clamp()/vmin approach, just applied to an SVG
+   viewBox's natural scaling instead. --face-glow is a dedicated token
+   (not reusing Orb's --pri directly) so SARANA's luminous quality can
+   read as distinct from JARVIS's harder-edged technical cyan, while
+   still drawn from the same overall palette family — the two are meant
+   to feel like "two forms of the same intelligence", not unrelated UIs. */
+:root {
+  --face-glow: #74dcff;
+  --face-glow-soft: rgba(116, 220, 255, 0.16);
+}
+
+.sarana-face-glow {
+  position: absolute;
+  inset: -8%;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 46%, var(--face-glow-soft), transparent 68%);
+  filter: blur(4px);
+  animation: face-breathe 6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.sarana-face-mesh {
   position: absolute;
   inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: clamp(18px, 5vmin, 46px);
+  width: 100%;
+  height: 100%;
+  overflow: visible;
   animation: face-breathe 6s ease-in-out infinite;
 }
 
-.face-eyes {
-  display: flex;
-  align-items: center;
-  gap: clamp(36px, 10vmin, 110px);
+.mesh-ring {
+  fill: none;
+  stroke: var(--face-glow);
+  stroke-width: 0.5;
+  opacity: 0.14;
 }
 
-.face-eye {
-  display: block;
-  width: clamp(30px, 7vmin, 68px);
-  height: clamp(40px, 9.5vmin, 92px);
-  border-radius: 999px;
-  background: var(--pri);
-  box-shadow: 0 0 26px 4px var(--pri-ghost), 0 0 8px 0 var(--pri);
+.mesh-edge {
+  stroke: var(--face-glow);
+  stroke-width: 0.55;
+  opacity: 0.34;
+  transition: opacity 420ms ease, stroke 420ms ease;
+}
+
+.mesh-node {
+  fill: var(--face-glow);
+  filter: drop-shadow(0 0 2.5px var(--face-glow));
+  transition: fill 420ms ease;
+}
+
+.mesh-group {
+  transform-box: fill-box;
   transform-origin: center;
-  transition: height 340ms ease, transform 340ms ease, background 340ms ease,
-    border-radius 340ms ease, opacity 340ms ease;
+  transition: transform 480ms cubic-bezier(0.34, 1.2, 0.4, 1);
 }
 
-/* Blinking: both eyes collapse to a thin line briefly — a real timer-driven
-   toggle (see SaranaFace.jsx), not a fixed CSS `infinite` loop, so it never
-   reads as a metronome. !important only overrides the per-expression eye
-   height rules below for the instant of the blink itself. */
-.sarana-face-blink .face-eye {
-  height: 4px !important;
-  border-radius: 4px;
+/* Idle gaze drift — a small, continuous, ambient pupil movement so the
+   face reads as alive rather than a fixed image (the brief's own
+   "gaze direction, micro-movements" requirement), done entirely in CSS
+   (no per-frame JS) — disabled per-expression below wherever a static
+   gaze transform is more appropriate (curious/surprised). */
+.mesh-group[data-group^="pupil"] {
+  animation: face-gaze-drift 7s ease-in-out infinite;
 }
 
-.face-mouth {
-  display: block;
-  width: clamp(58px, 15vmin, 140px);
-  height: clamp(10px, 2.6vmin, 24px);
-  border-radius: 0 0 999px 999px;
-  border-bottom: clamp(3px, 0.9vmin, 6px) solid var(--pri);
-  transition: width 380ms ease, height 380ms ease, border-radius 380ms ease,
-    border-color 380ms ease, transform 380ms ease, background 380ms ease,
-    opacity 380ms ease;
+/* Blinking: eye node-groups collapse to a thin line briefly — a real
+   timer-driven toggle (see SaranaFace.jsx), not a fixed CSS `infinite`
+   loop, so it never reads as a metronome. !important only overrides the
+   per-expression eye transforms below for the instant of the blink. */
+.sarana-face-blink .mesh-group[data-group="eyeL"],
+.sarana-face-blink .mesh-group[data-group="eyeR"] {
+  transform: scaleY(0.06) !important;
 }
 
-/* neutral — calm, relaxed: default eye/mouth values above already ARE
-   neutral, this rule just makes that explicit/overridable on its own. */
-[data-expression="neutral"] .face-mouth {
-  height: clamp(4px, 1vmin, 8px);
-  border-radius: 6px;
-  border-bottom-width: clamp(3px, 0.7vmin, 4px);
+/* ── expression system ─────────────────────────────────────────────────
+   Fourteen expressions, each just a handful of transform/opacity/color
+   rules on a handful of named groups — never a different face per
+   state, exactly the "reusable facial system where small parameters
+   change" the brief asks for. Only neutral/listening/thinking/speaking/
+   concerned are ever actually reachable from real app state today (see
+   lib/faceExpressions.js's own honest-mapping note) — the rest exist so
+   the vocabulary is ready without a fabricated emotion signal driving
+   them. Every rule stays deliberately subtle — small translates/scales/
+   rotations, never a cartoon leap. */
+
+/* neutral — calm, relaxed: every group's default (untransformed) position
+   already IS neutral; this rule just restates the baseline breathing
+   rate explicitly/overridably, matching every other expression having
+   its own selector rather than being an implicit fallback. */
+[data-expression="neutral"] {
+  animation-duration: 6s;
 }
 
-/* listening — narrower, attentive eyes; a slightly more open mouth line */
-[data-expression="listening"] .face-eye {
-  height: clamp(34px, 8vmin, 78px);
-  transform: scaleX(0.92);
+[data-expression="listening"] .mesh-group[data-group="eyeL"],
+[data-expression="listening"] .mesh-group[data-group="eyeR"] {
+  transform: scale(0.94, 1.04);
 }
-[data-expression="listening"] .face-mouth {
-  height: clamp(7px, 1.6vmin, 14px);
-  border-radius: 0 0 40% 40%;
+[data-expression="listening"] {
+  animation-duration: 3.4s;
 }
 
-/* thinking — asymmetric focus (one eye narrows/lifts, the other settles),
-   mouth becomes a small pursed, softly pulsing dot rather than a line. */
-[data-expression="thinking"] .face-eye-left {
-  transform: translateY(-4px) rotate(-4deg);
+[data-expression="thinking"] .mesh-group[data-group="browL"] {
+  transform: translateY(-3px) rotate(-4deg);
 }
-[data-expression="thinking"] .face-eye-right {
-  transform: translateY(4px) rotate(6deg) scaleY(0.82);
+[data-expression="thinking"] .mesh-group[data-group="browR"] {
+  transform: translateY(1px) rotate(3deg);
 }
-[data-expression="thinking"] .face-mouth {
-  width: clamp(28px, 6vmin, 46px);
-  height: clamp(10px, 2.4vmin, 18px);
-  border-radius: 999px;
-  border-bottom: none;
-  background: var(--acc-2);
+[data-expression="thinking"] .mesh-group[data-group="mouthTop"] {
+  transform: translate(3px, 1px) scale(0.85);
+}
+[data-expression="thinking"] .mesh-group[data-group="mouthBottom"] {
+  transform: translate(3px, -1px) scale(0.8);
+}
+[data-expression="thinking"] .mesh-node {
   animation: face-think-pulse 2.4s ease-in-out infinite;
 }
 
-/* speaking — mouth animates with irregular timing/amplitude (see
-   face-speak below) so it never looks like a robotic open-close-open-close
-   loop; eyes stay put, alive rather than static. */
-[data-expression="speaking"] .face-mouth {
-  border-radius: 40%;
-  border-bottom: none;
-  background: var(--acc);
-  animation: face-speak 640ms ease-in-out infinite;
+/* speaking — mouth node-groups animate with irregular timing/amplitude
+   (asymmetric top/bottom keyframes) so it never looks like a robotic
+   open-close-open-close loop; eyes stay put, alive rather than static. */
+[data-expression="speaking"] .mesh-group[data-group="mouthTop"] {
+  animation: face-speak-top 620ms ease-in-out infinite;
+}
+[data-expression="speaking"] .mesh-group[data-group="mouthBottom"] {
+  animation: face-speak-bottom 620ms ease-in-out infinite;
 }
 
-/* happy — softened, brighter crescent eyes and a fuller smile */
-[data-expression="happy"] .face-eye {
-  height: clamp(18px, 5vmin, 34px);
-  border-radius: 0 0 999px 999px;
-  background: var(--green);
-  box-shadow: 0 0 26px 4px var(--pri-ghost), 0 0 8px 0 var(--green);
+/* happy — lifted brows, a fuller mouth curve, brightened cheeks */
+[data-expression="happy"] .mesh-group[data-group="browL"],
+[data-expression="happy"] .mesh-group[data-group="browR"] {
+  transform: translateY(-2px);
 }
-[data-expression="happy"] .face-mouth {
-  height: clamp(18px, 5vmin, 34px);
-  border-bottom-width: clamp(4px, 1vmin, 7px);
-  border-color: var(--green);
+[data-expression="happy"] .mesh-group[data-group="mouthTop"] {
+  transform: translateY(1px) scale(1.08, 0.9);
+}
+[data-expression="happy"] .mesh-group[data-group="mouthBottom"] {
+  transform: translateY(-3px) scale(1.12, 1.15);
+}
+[data-expression="happy"] .mesh-group[data-group="cheekL"],
+[data-expression="happy"] .mesh-group[data-group="cheekR"] {
+  transform: translateY(-2px) scale(1.06);
+}
+[data-expression="happy"] .mesh-node {
+  fill: var(--green);
+  filter: drop-shadow(0 0 2.5px var(--green));
 }
 
-/* concerned — eyes angled inward/down like lowered brows, a subtle frown */
-[data-expression="concerned"] .face-eye-left {
-  transform: rotate(10deg);
+/* curious — one brow raised, that eye slightly widened, gaze drift
+   replaced by a static toward-the-subject shift */
+[data-expression="curious"] .mesh-group[data-group="browR"] {
+  transform: translateY(-4px);
 }
-[data-expression="concerned"] .face-eye-right {
-  transform: rotate(-10deg);
+[data-expression="curious"] .mesh-group[data-group="eyeR"] {
+  transform: translateY(-1px) scale(1.05);
 }
-[data-expression="concerned"] .face-mouth {
-  border-radius: 999px 999px 0 0;
-  border-bottom: none;
-  border-top: clamp(3px, 1vmin, 6px) solid var(--muted-c);
-  transform: translateY(6px);
+[data-expression="curious"] .mesh-group[data-group^="pupil"] {
+  animation: none;
+  transform: translate(1.5px, -0.5px);
+}
+
+/* concerned — brows angled inward/down, mouth softened into a small frown */
+[data-expression="concerned"] .mesh-group[data-group="browL"] {
+  transform: rotate(8deg) translate(2px, 1px);
+}
+[data-expression="concerned"] .mesh-group[data-group="browR"] {
+  transform: rotate(-8deg) translate(-2px, 1px);
+}
+[data-expression="concerned"] .mesh-group[data-group="mouthTop"] {
+  transform: translateY(2px) scale(0.9, 0.8);
+}
+[data-expression="concerned"] .mesh-group[data-group="mouthBottom"] {
+  transform: translateY(1px) scale(0.9, 0.75);
+}
+[data-expression="concerned"] .mesh-node {
+  fill: var(--muted-c);
+  filter: drop-shadow(0 0 2.5px var(--muted-c));
 }
 
 /* sad — a gentle, deliberately UNexaggerated downward expression */
-[data-expression="sad"] .face-eye {
-  height: clamp(28px, 6.5vmin, 62px);
+[data-expression="sad"] .mesh-group[data-group="browL"] {
+  transform: rotate(6deg) translateY(1px);
+}
+[data-expression="sad"] .mesh-group[data-group="browR"] {
+  transform: rotate(-6deg) translateY(1px);
+}
+[data-expression="sad"] .mesh-group[data-group="mouthTop"] {
+  transform: translateY(4px) scale(0.85, 0.7);
+}
+[data-expression="sad"] .mesh-group[data-group="mouthBottom"] {
+  transform: translateY(2px) scale(0.8, 0.6);
+}
+[data-expression="sad"] .mesh-node {
   opacity: 0.85;
 }
-[data-expression="sad"] .face-eye-left {
-  transform: rotate(6deg);
+
+/* confused — small asymmetric wobble across brows and mouth */
+[data-expression="confused"] .mesh-group[data-group="browL"] {
+  transform: rotate(-6deg) translateY(-2px);
 }
-[data-expression="sad"] .face-eye-right {
-  transform: rotate(-6deg);
+[data-expression="confused"] .mesh-group[data-group="browR"] {
+  transform: rotate(9deg) translateY(2px);
 }
-[data-expression="sad"] .face-mouth {
-  width: clamp(34px, 8vmin, 64px);
-  border-radius: 999px 999px 0 0;
-  border-bottom: none;
-  border-top: clamp(2px, 0.7vmin, 4px) solid var(--text-dim);
-  transform: translateY(4px);
+[data-expression="confused"] .mesh-group[data-group="mouthTop"] {
+  transform: rotate(-3deg) translate(2px, 1px);
+}
+[data-expression="confused"] .mesh-group[data-group="mouthBottom"] {
+  transform: rotate(-3deg) translate(2px, -1px);
 }
 
-/* curious — a small, asymmetric eye/mouth shift, nothing exaggerated */
-[data-expression="curious"] .face-eye-right {
-  transform: translateY(-7px) scaleY(1.1);
+/* reassuring — soft, steady, a gentle calm smile, slower breathing */
+[data-expression="reassuring"] .mesh-group[data-group="mouthTop"] {
+  transform: translateY(1px) scale(1.03, 0.92);
 }
-[data-expression="curious"] .face-mouth {
-  width: clamp(24px, 5.5vmin, 42px);
-  border-radius: 999px;
-  border-bottom-width: clamp(3px, 0.8vmin, 5px);
-  transform: translateX(8px);
+[data-expression="reassuring"] .mesh-group[data-group="mouthBottom"] {
+  transform: translateY(-1px) scale(1.05, 1.05);
 }
-
-/* confused — small asymmetric wobble across both eyes and the mouth */
-[data-expression="confused"] .face-eye-left {
-  transform: rotate(-8deg) translateY(3px);
-}
-[data-expression="confused"] .face-eye-right {
-  transform: rotate(10deg) translateY(-3px);
-}
-[data-expression="confused"] .face-mouth {
-  width: clamp(28px, 6.5vmin, 50px);
-  border-radius: 8px;
-  height: clamp(4px, 1vmin, 8px);
-  transform: rotate(-4deg);
+[data-expression="reassuring"] {
+  animation-duration: 7.5s;
 }
 
-/* reassuring — soft, steady eyes and a gentle, calm smile */
-[data-expression="reassuring"] .face-eye {
-  opacity: 0.92;
+/* empathetic — softened brows, slightly lowered eyes, a listening-adjacent mouth */
+[data-expression="empathetic"] .mesh-group[data-group="browL"] {
+  transform: rotate(5deg) translateY(0.5px);
 }
-[data-expression="reassuring"] .face-mouth {
-  height: clamp(14px, 4vmin, 28px);
-  border-bottom-width: clamp(4px, 1vmin, 6px);
+[data-expression="empathetic"] .mesh-group[data-group="browR"] {
+  transform: rotate(-3deg);
+}
+[data-expression="empathetic"] .mesh-group[data-group="eyeL"],
+[data-expression="empathetic"] .mesh-group[data-group="eyeR"] {
+  transform: scaleY(0.96);
+}
+[data-expression="empathetic"] .mesh-group[data-group="mouthTop"] {
+  transform: translateY(0.5px) scale(0.97, 0.85);
+}
+
+/* surprised — raised brows, widened eyes, a small rounded mouth */
+[data-expression="surprised"] .mesh-group[data-group="browL"],
+[data-expression="surprised"] .mesh-group[data-group="browR"] {
+  transform: translateY(-5px);
+}
+[data-expression="surprised"] .mesh-group[data-group="eyeL"],
+[data-expression="surprised"] .mesh-group[data-group="eyeR"] {
+  transform: scale(1.1, 1.15);
+}
+[data-expression="surprised"] .mesh-group[data-group="mouthTop"] {
+  transform: scale(0.75, 1.2) translateY(-1px);
+}
+[data-expression="surprised"] .mesh-group[data-group="mouthBottom"] {
+  transform: scale(0.75, 1.3) translateY(1px);
+}
+[data-expression="surprised"] .mesh-group[data-group^="pupil"] {
+  animation: none;
+}
+
+/* calm — slower breathing, softly lowered eyes, otherwise neutral */
+[data-expression="calm"] {
+  animation-duration: 8s;
+}
+[data-expression="calm"] .mesh-group[data-group="eyeL"],
+[data-expression="calm"] .mesh-group[data-group="eyeR"] {
+  transform: scaleY(0.98);
+}
+
+/* focused — narrowed eyes, drawn-in brows, faster/tighter breathing */
+[data-expression="focused"] .mesh-group[data-group="eyeL"],
+[data-expression="focused"] .mesh-group[data-group="eyeR"] {
+  transform: scale(0.9, 0.96);
+}
+[data-expression="focused"] .mesh-group[data-group="browL"] {
+  transform: translateY(-1px) rotate(-2deg);
+}
+[data-expression="focused"] .mesh-group[data-group="browR"] {
+  transform: translateY(-1px) rotate(2deg);
+}
+[data-expression="focused"] {
+  animation-duration: 4.5s;
 }
 
 .sarana-face-status {
@@ -442,29 +579,34 @@ input {
     transform: scale(1);
   }
   50% {
-    transform: scale(1.015);
+    transform: scale(1.018);
   }
 }
 
-@keyframes face-speak {
-  0% {
-    height: clamp(8px, 2vmin, 18px);
+@keyframes face-gaze-drift {
+  0%, 100% {
+    transform: translate(0, 0);
   }
-  18% {
-    height: clamp(26px, 6.5vmin, 58px);
+  30% {
+    transform: translate(0.9px, -0.4px);
   }
-  37% {
-    height: clamp(14px, 3.5vmin, 32px);
+  65% {
+    transform: translate(-0.6px, 0.5px);
   }
-  55% {
-    height: clamp(32px, 8vmin, 72px);
-  }
-  78% {
-    height: clamp(12px, 3vmin, 26px);
-  }
-  100% {
-    height: clamp(8px, 2vmin, 18px);
-  }
+}
+
+@keyframes face-speak-top {
+  0%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-2.5px); }
+  55% { transform: translateY(-1px); }
+  80% { transform: translateY(-3.5px); }
+}
+
+@keyframes face-speak-bottom {
+  0%, 100% { transform: translateY(0); }
+  30% { transform: translateY(3.5px); }
+  55% { transform: translateY(1.5px); }
+  80% { transform: translateY(5px); }
 }
 
 @keyframes face-think-pulse {
@@ -477,9 +619,11 @@ input {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sarana-face,
-  .face-eye,
-  .face-mouth {
+  .sarana-face-glow,
+  .sarana-face-mesh,
+  .mesh-group,
+  .mesh-node,
+  .mesh-edge {
     animation: none !important;
     transition: none !important;
   }
