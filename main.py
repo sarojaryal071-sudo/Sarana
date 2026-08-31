@@ -803,23 +803,31 @@ TOOL_DECLARATIONS = [
         "name": "computer_control",
         "description": (
             "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen. "
-            "The observe/verify/ui_find/ui_click/ui_type/get_active_window_title actions are JARVIS-mode-only "
-            "(desktop) — they need jarvis_mode='on' first, and return [JARVIS_MODE_REQUIRED] otherwise. observe/"
-            "verify capture the CURRENT screen and send it back to you as a later message in this same "
-            "conversation (same [VISION_ACTIVE] pattern as screen_process) — say one short line, then wait, never "
-            "guess what you'll see. ui_find/ui_click/ui_type use the OS accessibility tree (not raw pixel "
-            "coordinates) to locate a described element by name — prefer these over screen_find/screen_click/raw "
-            "x,y clicks for native desktop apps whenever JARVIS mode is on; fall back to screen_find only if the "
-            "accessibility tree can't find the element. ui_click/ui_type automatically verify their own result "
-            "locally (a tag in the returned text tells you: verified success, verified failure, ambiguous, or no "
-            "observable change — read it honestly) and escalate to a real screen look automatically when that "
-            "local check is inconclusive; you never need to remember to call verify after every click, but you "
-            "still can for anything consequential. Never claim an action worked when the result says otherwise."
+            "The observe/verify/list_ui_elements/ui_find/ui_click/ui_type/get_active_window_title actions are "
+            "JARVIS-mode-only (desktop) — they need jarvis_mode='on' first, and return [JARVIS_MODE_REQUIRED] "
+            "otherwise. observe/verify capture the CURRENT screen and send it back to you as a later message in "
+            "this same conversation (same [VISION_ACTIVE] pattern as screen_process) — say one short line, then "
+            "wait, never guess what you'll see. This is a GENERAL computer-control toolkit, not app-specific: for "
+            "an application you've never automated before, do NOT guess at its UI — call list_ui_elements first "
+            "to see what's actually interactive in the active window (control type + name + state, no vision call "
+            "needed), THEN ui_find/ui_click/ui_type using names you actually saw there. ui_find/ui_click/ui_type "
+            "use the OS accessibility tree (not raw pixel coordinates) to locate a described element by name — "
+            "prefer these over screen_find/screen_click/raw x,y clicks for native desktop apps whenever JARVIS "
+            "mode is on; fall back to screen_find/observe only if the accessibility tree can't find or resolve "
+            "the element. If ui_find/ui_click/ui_type reports [UI_AMBIGUOUS], more than one distinct element "
+            "matched — call list_ui_elements for more context or ask the user which one, never guess which to "
+            "click. ui_click/ui_type automatically verify their own result locally (a tag in the returned text "
+            "tells you: verified success, verified failure, ambiguous, or no observable change — read it "
+            "honestly) and escalate to a real screen look automatically when that local check is inconclusive; "
+            "you never need to remember to call verify after every click, but you still can — and for anything "
+            "the user actually asked to confirm (e.g. 'is Bluetooth on now', 'did the message send'), verify "
+            "against THAT requested outcome specifically, not merely that a click was performed. Never claim an "
+            "action worked when the result says otherwise."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data | observe | verify | ui_find | ui_click | ui_type | get_active_window_title"},
+                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data | observe | verify | list_ui_elements | ui_find | ui_click | ui_type | get_active_window_title"},
                 "text":        {"type": "STRING", "description": "Text to type or paste"},
                 "x":           {"type": "INTEGER", "description": "X coordinate"},
                 "y":           {"type": "INTEGER", "description": "Y coordinate"},
@@ -830,6 +838,7 @@ TOOL_DECLARATIONS = [
                 "seconds":     {"type": "NUMBER",  "description": "Seconds to wait"},
                 "title":       {"type": "STRING",  "description": "Window title for focus_window"},
                 "description": {"type": "STRING",  "description": "Element description for screen_find/screen_click/ui_find/ui_click/ui_type, or what to look for/verify for observe/verify"},
+                "control_type": {"type": "STRING", "description": "Optional UI Automation control type filter for list_ui_elements/ui_find/ui_click/ui_type, e.g. 'button', 'edit', 'checkbox' — narrows a search when the same label appears on more than one kind of control"},
                 "type":        {"type": "STRING",  "description": "Data type for random_data"},
                 "field":       {"type": "STRING",  "description": "Field for user_data: name|email|city"},
                 "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
@@ -2107,17 +2116,25 @@ class JarvisLive:
             "concise, slightly formal tone — not your normal warm/casual "
             "one. " + (
                 "On this desktop app, you may also use computer_control's "
-                "observe/verify/ui_find/ui_click/ui_type and "
-                "get_active_window_title actions, and lean more directly "
-                "on browser_control — but the same honesty standard you "
-                "always hold never relaxes: ui_click/ui_type verify "
-                "themselves automatically now, but never override what "
-                "that verification says, never claim success it didn't "
-                "confirm, never guess an ambiguous UI target with "
-                "false confidence (ask instead), and always get an "
-                "explicit yes before sending a message, deleting "
-                "anything, or any purchase/financial/security-changing "
-                "action — never infer confirmation from unrelated speech."
+                "observe/verify/list_ui_elements/ui_find/ui_click/ui_type "
+                "and get_active_window_title actions, and lean more "
+                "directly on browser_control. You operate the computer "
+                "GENERICALLY — never assume a fixed click sequence for an "
+                "app; inspect what's actually there (list_ui_elements or "
+                "observe) before acting, especially on an app you haven't "
+                "automated before. The same honesty standard you always "
+                "hold never relaxes: ui_click/ui_type verify themselves "
+                "automatically now, but never override what that "
+                "verification says, never claim success it didn't "
+                "confirm, never guess an ambiguous UI target with false "
+                "confidence — an [UI_AMBIGUOUS] result means inspect more "
+                "or ask, never pick one blindly. Verify against what the "
+                "user actually asked for (e.g. 'Bluetooth is on', 'the "
+                "conversation is open'), not merely that a click happened. "
+                "Always get an explicit yes before sending a message, "
+                "deleting anything, or any purchase/financial/security-"
+                "changing action — never infer confirmation from unrelated "
+                "speech."
                 if self._auto_start else
                 "This is a WEB session — you do NOT gain desktop computer "
                 "control here (no mouse/keyboard/native-app/OS access "
@@ -2685,14 +2702,19 @@ class JarvisLive:
                         "normally. " + (
                             "You now also have real computer-control "
                             "ability on this desktop (computer_control's "
-                            "observe/verify/ui_find/ui_click/ui_type, plus "
-                            "browser_control) — ui_click/ui_type verify "
-                            "themselves automatically, so trust and report "
-                            "what that verification actually says rather "
-                            "than assuming success, and always ask for "
-                            "explicit confirmation before "
-                            "sending a message, deleting anything, or any "
-                            "purchase/financial/security-changing action."
+                            "observe/verify/list_ui_elements/ui_find/"
+                            "ui_click/ui_type, plus browser_control) — "
+                            "this works generically, not just for apps "
+                            "you already know: use list_ui_elements/"
+                            "observe to see what's really there before "
+                            "acting on an unfamiliar screen. ui_click/"
+                            "ui_type verify themselves automatically, so "
+                            "trust and report what that verification "
+                            "actually says rather than assuming success, "
+                            "and always ask for explicit confirmation "
+                            "before sending a message, deleting anything, "
+                            "or any purchase/financial/security-changing "
+                            "action."
                             if self._auto_start else
                             "This is a web session — you do NOT gain "
                             "desktop computer control here; you still have "
@@ -2975,7 +2997,7 @@ class JarvisLive:
                 # relying on computer_control regresses.
                 _cc_action = (args.get("action") or "").lower().strip()
                 _cc_jarvis_only = {
-                    "observe", "verify", "ui_find", "ui_click", "ui_type",
+                    "observe", "verify", "list_ui_elements", "ui_find", "ui_click", "ui_type",
                     "get_active_window_title",
                 }
                 if _cc_action in _cc_jarvis_only and not self._jarvis_mode:

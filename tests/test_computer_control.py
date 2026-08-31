@@ -33,6 +33,8 @@ from actions.computer_control import (
     VERIFY_TAG_SUCCESS, VERIFY_TAG_AMBIGUOUS, VERIFY_TAG_NO_CHANGE,
     TYPE_TAG_SUCCESS, TYPE_TAG_FAILURE, TYPE_TAG_AMBIGUOUS,
     INCONCLUSIVE_TAGS,
+    _resolve_ui_target, _all_same_visual_element,
+    _element_rect_key, _element_control_type, _element_automation_id,
 )
 
 
@@ -54,6 +56,36 @@ class _RaisingCtrl:
 
     def window_text(self):
         raise RuntimeError("element went stale")
+
+
+class _Rect:
+    def __init__(self, rect):
+        self.left, self.top, self.right, self.bottom = rect
+
+
+class _ElementInfo:
+    def __init__(self, control_type="", automation_id=""):
+        self.control_type = control_type
+        self.automation_id = automation_id
+
+
+class _FakeCtrlFull(_FakeCtrl):
+    """A fake with the extra surface _resolve_ui_target/list_ui_elements
+    use: .rectangle(), .element_info.control_type/.automation_id,
+    .is_enabled()/.is_selected()/.get_toggle_state(). None of these are
+    required (each is individually try/except-guarded in the real code —
+    see _element_rect_key etc.), so plain _FakeCtrl instances (no
+    rectangle at all) remain valid throughout this file."""
+
+    def __init__(self, name, rect=None, control_type="", automation_id=""):
+        super().__init__(name)
+        self._rect = rect
+        self.element_info = _ElementInfo(control_type, automation_id)
+
+    def rectangle(self):
+        if self._rect is None:
+            raise RuntimeError("no rectangle available")
+        return _Rect(self._rect)
 
 
 # ── _pick_best_match: the real WhatsApp bug, reproduced with fakes ───────
@@ -132,6 +164,116 @@ def test_max_candidates_bound_is_respected() -> None:
     assert _pick_best_match("Target", candidates, max_candidates=5) is None
     assert _pick_best_match("Target", candidates, max_candidates=6) is not None
     print("test_max_candidates_bound_is_respected: PASS")
+
+
+# ── _resolve_ui_target: ambiguity-aware general UI resolver ─────────────
+#   (the general "find the ONE real element for this description" primitive
+#   behind ui_find/ui_click/ui_type/list_ui_elements — see this module's
+#   own docstring). _pick_best_match above already covers the base tier
+#   priority; these cover the NEW behavior: genuine-ambiguity detection,
+#   virtualization-duplicate collapsing (validated against real, live-
+#   dumped WhatsApp data — its search box exposed the SAME visible control
+#   through 79 duplicate AutomationElements, all sharing one identical
+#   rectangle), automation-id matching, and control_type filtering.
+
+def test_resolve_ui_target_two_different_elements_same_rank_is_ambiguous() -> None:
+    # Two REAL, DIFFERENT on-screen "OK" buttons (different rectangles) —
+    # a genuine ambiguity that must be reported, never silently guessed.
+    a = _FakeCtrlFull("OK", rect=(10, 10, 60, 30))
+    b = _FakeCtrlFull("OK", rect=(400, 400, 450, 420))
+    status, ctrl, note = _resolve_ui_target("OK", [a, b])
+    assert status == "ambiguous"
+    assert ctrl is None
+    assert "2" in note
+    print("test_resolve_ui_target_two_different_elements_same_rank_is_ambiguous: PASS")
+
+
+def test_resolve_ui_target_virtualization_duplicates_not_ambiguous() -> None:
+    # Mirrors the REAL, live-dumped WhatsApp evidence: dozens of
+    # AutomationElements exposing the SAME visible control, all sharing
+    # one identical rectangle — must resolve cleanly, not be flagged
+    # ambiguous.
+    same_rect = (167, 143, 388, 169)
+    dupes = [_FakeCtrlFull("Search or start a new chat", rect=same_rect) for _ in range(79)]
+    status, ctrl, note = _resolve_ui_target("Search or start a new chat", dupes)
+    assert status == "found"
+    assert ctrl is dupes[0]
+    print("test_resolve_ui_target_virtualization_duplicates_not_ambiguous: PASS")
+
+
+def test_resolve_ui_target_no_rectangle_info_falls_back_to_first_seen() -> None:
+    # Back-compat: candidates with NO rectangle at all (plain _FakeCtrl,
+    # what every _pick_best_match test above uses) must resolve exactly
+    # like the pre-ambiguity-detection behavior — first-seen wins, never
+    # reported as ambiguous merely for lacking rectangle info.
+    a = _FakeCtrl("Save")
+    b = _FakeCtrl("Save")
+    status, ctrl, _ = _resolve_ui_target("Save", [a, b])
+    assert status == "found"
+    assert ctrl is a
+    print("test_resolve_ui_target_no_rectangle_info_falls_back_to_first_seen: PASS")
+
+
+def test_resolve_ui_target_automation_id_exact_match_wins() -> None:
+    # A stable identifier some apps expose even when the visible text
+    # doesn't match what was asked for.
+    by_id = _FakeCtrlFull("Envoyer", automation_id="SendButton")   # French UI, English automation id
+    decoy = _FakeCtrlFull("SendButtonLabelPreview thing")           # incidental text substring
+    status, ctrl, note = _resolve_ui_target("SendButton", [decoy, by_id])
+    assert status == "found"
+    assert ctrl is by_id
+    assert "match" in note
+    print("test_resolve_ui_target_automation_id_exact_match_wins: PASS")
+
+
+def test_resolve_ui_target_control_type_filter_narrows_search() -> None:
+    text_el = _FakeCtrlFull("Connect", control_type="text")
+    button_el = _FakeCtrlFull("Connect", control_type="button")
+    status, ctrl, _ = _resolve_ui_target("Connect", [text_el, button_el], control_type="button")
+    assert status == "found"
+    assert ctrl is button_el
+    print("test_resolve_ui_target_control_type_filter_narrows_search: PASS")
+
+
+def test_resolve_ui_target_not_found_and_empty_description() -> None:
+    status, ctrl, _ = _resolve_ui_target("Nobody Here", [_FakeCtrl("Ankit")])
+    assert status == "not_found" and ctrl is None
+    status, ctrl, _ = _resolve_ui_target("", [_FakeCtrl("Ankit")])
+    assert status == "not_found" and ctrl is None
+    print("test_resolve_ui_target_not_found_and_empty_description: PASS")
+
+
+def test_resolve_ui_target_startswith_ambiguity_with_different_rects() -> None:
+    # Same startswith TIER, same name LENGTH, but genuinely different
+    # elements (different rectangles) — must be ambiguous, not a silent
+    # first-seen guess (this is the specific gap the WhatsApp-duplicate
+    # dedup logic must NOT accidentally suppress).
+    a = _FakeCtrlFull("Saroj K", rect=(0, 0, 10, 10))
+    b = _FakeCtrlFull("Saroj T", rect=(500, 500, 600, 520))
+    status, ctrl, note = _resolve_ui_target("Saroj", [a, b])
+    assert status == "ambiguous"
+    print("test_resolve_ui_target_startswith_ambiguity_with_different_rects: PASS")
+
+
+def test_all_same_visual_element_helper() -> None:
+    same = [_FakeCtrlFull("X", rect=(1, 1, 2, 2)), _FakeCtrlFull("X", rect=(1, 1, 2, 2))]
+    diff = [_FakeCtrlFull("X", rect=(1, 1, 2, 2)), _FakeCtrlFull("X", rect=(9, 9, 20, 20))]
+    assert _all_same_visual_element(same) is True
+    assert _all_same_visual_element(diff) is False
+    assert _all_same_visual_element([_FakeCtrl("no-rect-a"), _FakeCtrl("no-rect-b")]) is True
+    print("test_all_same_visual_element_helper: PASS")
+
+
+def test_element_accessor_helpers_never_raise_on_bare_fakes() -> None:
+    bare = _FakeCtrl("plain")
+    assert _element_rect_key(bare) is None
+    assert _element_control_type(bare) == ""
+    assert _element_automation_id(bare) == ""
+    full = _FakeCtrlFull("full", rect=(1, 2, 3, 4), control_type="Button", automation_id="Go")
+    assert _element_rect_key(full) == (1, 2, 3, 4)
+    assert _element_control_type(full) == "button"
+    assert _element_automation_id(full) == "go"
+    print("test_element_accessor_helpers_never_raise_on_bare_fakes: PASS")
 
 
 # ── _new_window_note: the real Notepad dialog-swallowed-click bug ────────
@@ -324,6 +466,15 @@ if __name__ == "__main__":
     test_empty_description_returns_none()
     test_blank_and_stale_candidates_are_skipped_not_fatal()
     test_max_candidates_bound_is_respected()
+    test_resolve_ui_target_two_different_elements_same_rank_is_ambiguous()
+    test_resolve_ui_target_virtualization_duplicates_not_ambiguous()
+    test_resolve_ui_target_no_rectangle_info_falls_back_to_first_seen()
+    test_resolve_ui_target_automation_id_exact_match_wins()
+    test_resolve_ui_target_control_type_filter_narrows_search()
+    test_resolve_ui_target_not_found_and_empty_description()
+    test_resolve_ui_target_startswith_ambiguity_with_different_rects()
+    test_all_same_visual_element_helper()
+    test_element_accessor_helpers_never_raise_on_bare_fakes()
     test_new_window_note_fires_when_a_new_window_appears()
     test_new_window_note_is_empty_when_nothing_changed()
     test_new_window_note_ignores_blank_titles()

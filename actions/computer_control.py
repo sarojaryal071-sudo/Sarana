@@ -411,10 +411,61 @@ def get_active_window_title() -> str:
 _UI_FIND_MAX_CANDIDATES = 2000
 
 
-def _pick_best_match(description: str, candidates, max_candidates: int = _UI_FIND_MAX_CANDIDATES):
-    """Pure matching logic, deliberately separated from _ui_find() below so
-    it's testable with plain fake objects (anything with a .window_text()
-    method) rather than a real pywinauto/UIA session — see
+def _element_rect_key(ctrl):
+    """(left, top, right, bottom) of a control's on-screen rectangle, or
+    None if unavailable. Used ONLY to tell a genuine ambiguity (two
+    DIFFERENT elements sharing a label) apart from a virtualization
+    duplicate (the SAME visible control exposed multiple times in the
+    tree) — see _all_same_visual_element."""
+    try:
+        r = ctrl.rectangle()
+        return (r.left, r.top, r.right, r.bottom)
+    except Exception:
+        return None
+
+
+def _element_control_type(ctrl) -> str:
+    try:
+        return (ctrl.element_info.control_type or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _element_automation_id(ctrl) -> str:
+    try:
+        return (ctrl.element_info.automation_id or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _all_same_visual_element(ctrls) -> bool:
+    """True if every candidate shares the same on-screen rectangle — a
+    real, LIVE-CONFIRMED pattern (dumped against the user's actual running
+    WhatsApp Desktop: its virtualized chat list and search box each expose
+    ONE visible control through dozens of duplicate AutomationElements —
+    up to 79 observed for a single search box — every one sharing an
+    IDENTICAL rectangle). That must never be reported as a genuine
+    ambiguity. A real ambiguity is two DIFFERENT elements at DIFFERENT
+    screen locations that happen to share a label (rare, but real — e.g.
+    two "OK" buttons behind two different dialogs). Candidates with no
+    readable rectangle at all (e.g. plain test fakes) are treated as
+    "same" — the safe, backward-compatible default (see _pick_best_match's
+    own tests, none of which model rectangles)."""
+    keys = {_element_rect_key(c) for c in ctrls}
+    return len(keys) <= 1
+
+
+def _resolve_ui_target(
+    description: str,
+    candidates,
+    max_candidates: int = _UI_FIND_MAX_CANDIDATES,
+    control_type: str | None = None,
+) -> tuple[str, object, str]:
+    """The general UI resolver behind ui_find/ui_click/ui_type/
+    list_ui_elements — the "given a natural-language description, find the
+    ONE real element it refers to" primitive the whole generic
+    computer-control loop depends on (see this module's own module
+    docstring). Pure function, testable with plain fake objects — see
     tests/test_computer_control.py.
 
     Matching priority — fixed after a real, live-reproduced bug: a naive
@@ -422,22 +473,47 @@ def _pick_best_match(description: str, candidates, max_candidates: int = _UI_FIN
     of the needle buried inside unrelated text (e.g. a WhatsApp message
     PREVIEW that happens to mention the contact's name mid-sentence,
     appearing earlier in tree-walk order than the real contact's own
-    entry) instead of the actual target, silently clicking the wrong
-    thing. A real "this control IS the thing" label (a contact name, a
-    button caption) almost always STARTS WITH what was asked for; an
-    incidental mention never does — so a startswith match is always
-    preferred over a substring-anywhere match, and ties are broken by
-    preferring the SHORTEST matching name (closer to a precise label than
-    a long compound string that merely begins the same way)."""
+    entry) instead of the actual target. So:
+      1. an exact automation-id match (a stable identifier some apps
+         expose even when the visible text doesn't match what was asked)
+      2. an exact visible-text match
+      3. the SHORTEST name that STARTS WITH the needle (closer to a
+         precise label than a long compound string that merely begins
+         the same way)
+      4. the SHORTEST name that merely CONTAINS the needle, only if no
+         startswith match exists at all
+    An optional control_type filter (e.g. "button", "edit") narrows the
+    search when the same label appears on more than one KIND of control.
+
+    Returns (status, ctrl_or_None, note):
+      "found"     — ctrl is the single resolved match; note says how
+      "ambiguous" — ctrl is None; note names how many DISTINCT elements
+                    tied for the win (see _all_same_visual_element for how
+                    virtualization duplicates are told apart from this)
+      "not_found" — ctrl is None; note says why
+
+    Never silently guesses when genuinely unsure — the caller (ui_find/
+    ui_click/ui_type) is expected to report "ambiguous" honestly rather
+    than picking one, per the project brief's explicit requirement."""
     needle = (description or "").strip().lower()
     if not needle:
-        return None
+        return "not_found", None, "no description given"
 
-    best_startswith, best_startswith_len = None, None
-    best_substring, best_substring_len = None, None
+    ctype_filter = (control_type or "").strip().lower() or None
+
+    exact: list = []
+    startswith_by_len: dict[int, list] = {}
+    substring_by_len: dict[int, list] = {}
+
     for i, ctrl in enumerate(candidates):
         if i >= max_candidates:
             break
+        if ctype_filter and _element_control_type(ctrl) != ctype_filter:
+            continue
+        auto_id = _element_automation_id(ctrl)
+        if auto_id and auto_id == needle:
+            exact.append(ctrl)
+            continue
         try:
             name = (ctrl.window_text() or "").strip().lower()
         except Exception:
@@ -445,64 +521,100 @@ def _pick_best_match(description: str, candidates, max_candidates: int = _UI_FIN
         if not name:
             continue
         if needle == name:
-            return ctrl  # exact match — stop immediately, no ambiguity
-        if name.startswith(needle):
-            if best_startswith is None or len(name) < best_startswith_len:
-                best_startswith, best_startswith_len = ctrl, len(name)
+            exact.append(ctrl)
+        elif name.startswith(needle):
+            startswith_by_len.setdefault(len(name), []).append(ctrl)
         elif needle in name:
-            if best_substring is None or len(name) < best_substring_len:
-                best_substring, best_substring_len = ctrl, len(name)
-    return best_startswith or best_substring
+            substring_by_len.setdefault(len(name), []).append(ctrl)
+
+    for tier_name, winners in (
+        ("exact", exact),
+        ("startswith", startswith_by_len[min(startswith_by_len)] if startswith_by_len else []),
+        ("substring", substring_by_len[min(substring_by_len)] if substring_by_len else []),
+    ):
+        if not winners:
+            continue
+        if len(winners) == 1 or _all_same_visual_element(winners):
+            return "found", winners[0], f"{tier_name} match"
+        return "ambiguous", None, (
+            f"{len(winners)} distinct elements equally match '{description}' "
+            f"({tier_name}) — inspect more context (list_ui_elements/observe) "
+            f"or ask the user which one they mean, rather than guessing"
+        )
+
+    return "not_found", None, f"no element matches '{description}'"
 
 
-def _ui_find(description: str):
-    """Best-effort, BOUNDED search of the ACTIVE window's UI Automation
-    tree (Windows only — see _PYWINAUTO above) for a control whose visible
-    text loosely matches `description`, using _pick_best_match()'s
-    priority order above. Returns the matched pywinauto control wrapper,
-    or None — never raises, never falls back to a coordinate guess itself
-    (that's screen_find's job, a deliberately separate/distinct tool
-    action — see this tool's own declaration). Only ever inspects the
-    single foreground window, never the whole desktop, and only a bounded
-    number of its descendants, so a huge or pathological control tree
-    can't hang the tool call."""
+def _pick_best_match(description: str, candidates, max_candidates: int = _UI_FIND_MAX_CANDIDATES):
+    """Back-compat thin wrapper around _resolve_ui_target() — always
+    returns a bare ctrl or None, never surfaces ambiguity itself ("found"
+    -> the resolved ctrl, "ambiguous"/"not_found" -> None alike). Kept
+    because it's the smallest, most directly testable surface for the
+    matching-tier logic (see tests/test_computer_control.py — none of
+    those fakes model rectangles, so a genuine ambiguous verdict never
+    actually arises there; _all_same_visual_element treats rectangle-less
+    candidates as "same", which is exactly the pre-existing "first
+    shortest match wins" behavior those tests already expect). ui_find()
+    itself now calls _resolve_ui_target() directly so it CAN report
+    ambiguity honestly instead of collapsing it to None."""
+    status, ctrl, _ = _resolve_ui_target(description, candidates, max_candidates)
+    return ctrl
+
+
+def _ui_find(description: str, control_type: str | None = None) -> tuple[str, object, str]:
+    """Best-effort, BOUNDED, AMBIGUITY-AWARE search of the ACTIVE window's
+    UI Automation tree (Windows only — see _PYWINAUTO above) for a control
+    matching `description`, delegating to _resolve_ui_target() for the
+    actual tiered matching/ambiguity logic. Never raises, never falls back
+    to a coordinate guess itself (that's screen_find's job, a deliberately
+    separate/distinct tool action — see this tool's own declaration).
+    Only ever inspects the single foreground window, never the whole
+    desktop, and only a bounded number of its descendants, so a huge or
+    pathological control tree can't hang the tool call.
+
+    Returns (status, ctrl_or_None, note) — status is "found" | "ambiguous"
+    | "not_found" | "unavailable" (non-Windows, or pywinauto missing)."""
     if not _PYWINAUTO or _get_os() != "windows":
-        return None
+        return "unavailable", None, "UI Automation is only available on Windows here"
 
     if not (description or "").strip():
-        return None
+        return "not_found", None, "no description given"
 
     hwnd = _foreground_hwnd()
     if not hwnd:
         print("[ComputerControl] ⚠️ ui_find: no foreground window handle")
-        return None
+        return "not_found", None, "no foreground window handle"
 
     try:
         from pywinauto import Desktop
         win = Desktop(backend="uia").window(handle=hwnd)
     except Exception as e:
         print(f"[ComputerControl] ⚠️ ui_find: could not wrap active window ({e})")
-        return None
+        return "not_found", None, f"could not wrap the active window ({e})"
 
     try:
         candidates = win.descendants()
     except Exception as e:
         print(f"[ComputerControl] ⚠️ ui_find: could not enumerate controls ({e})")
-        return None
+        return "not_found", None, f"could not enumerate controls ({e})"
 
-    return _pick_best_match(description, candidates)
+    return _resolve_ui_target(description, candidates, control_type=control_type)
 
 
-def _ui_find_report(description: str) -> str:
-    ctrl = _ui_find(description)
-    if ctrl is None:
-        return f"NOT_FOUND: '{description}' (accessibility tree)"
+def _ui_find_report(description: str, control_type: str | None = None) -> str:
+    status, ctrl, note = _ui_find(description, control_type=control_type)
+    if status == "unavailable":
+        return note
+    if status == "not_found":
+        return f"NOT_FOUND: '{description}' (accessibility tree) — {note}"
+    if status == "ambiguous":
+        return f"[UI_AMBIGUOUS] '{description}': {note}"
     try:
         r = ctrl.rectangle()
         cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
-        return f"Found (UI Automation): '{description}' near ({cx},{cy})"
+        return f"Found (UI Automation): '{description}' near ({cx},{cy}) — {note}"
     except Exception:
-        return f"Found (UI Automation): '{description}'"
+        return f"Found (UI Automation): '{description}' — {note}"
 
 
 def _top_level_window_titles() -> set[str]:
@@ -686,12 +798,19 @@ def _classify_click_result(description: str, before: dict, after: dict) -> tuple
     )
 
 
-def _ui_click_by_description(description: str) -> str:
-    if not _PYWINAUTO or _get_os() != "windows":
-        return "UI Automation is only available on Windows here — use screen_click instead."
-    ctrl = _ui_find(description)
-    if ctrl is None:
-        return f"UI element not found via accessibility tree: '{description}' — try screen_click instead."
+def _ui_click_by_description(description: str, control_type: str | None = None) -> str:
+    status, ctrl, note = _ui_find(description, control_type=control_type)
+    if status == "unavailable":
+        return note
+    if status == "ambiguous":
+        return (
+            f"[UI_AMBIGUOUS] Cannot click '{description}': {note}. Call "
+            f"list_ui_elements (or observe) for more context, narrow the "
+            f"description, or ask the user which one they mean — never "
+            f"guess."
+        )
+    if status == "not_found" or ctrl is None:
+        return f"UI element not found via accessibility tree: '{description}' — try screen_click instead. ({note})"
 
     before = _snapshot(ctrl)
     try:
@@ -706,35 +825,34 @@ def _ui_click_by_description(description: str) -> str:
     after = _snapshot(ctrl)
     tag, reason = _classify_click_result(description, before, after)
 
-    # Exactly ONE bounded, automatic retry — ONLY for the "genuinely
-    # nothing happened" case (never when a dialog appeared, never after a
-    # raised exception): the UI may simply still have been loading. This
-    # is a hard cap, never a loop — see the project brief's own retry
-    # rules ("never repeatedly click a potentially dangerous control").
-    retried = False
-    if tag == VERIFY_TAG_NO_CHANGE:
-        time.sleep(0.5)
-        retry_ctrl = _ui_find(description) or ctrl
-        try:
-            retry_ctrl.click_input()
-            retried = True
-        except Exception:
-            pass
-        if retried:
-            time.sleep(0.3)
-            after = _snapshot(retry_ctrl)
-            tag, reason = _classify_click_result(description, before, after)
-
-    retry_note = ""
-    if retried:
-        retry_note = (
-            " (confirmed after one automatic retry)"
-            if tag != VERIFY_TAG_NO_CHANGE
-            else " (retried once automatically — still no observable change)"
-        )
+    # NO automatic retry here — deliberately removed after a real,
+    # live-reproduced counter-example: clicking a Windows Calculator digit
+    # button (a REAL, stateful action — it appends to the display) still
+    # classifies as VERIFY_TAG_NO_CHANGE, because a calculator button
+    # exposes no toggle/selection/staleness signal and its window title
+    # never changes — there is nothing WRONG with the click, our LOCAL
+    # signals just can't see the effect. An earlier version of this
+    # function retried once automatically on NO_CHANGE, reasoning that
+    # "nothing observably happened" was the SAFEST case to repeat — live
+    # testing proved that assumption false: every digit/operator got
+    # clicked twice, silently computing the wrong result (12+7 became
+    # 1122+77, then Equals doubled again to 1276). NO_OBSERVABLE_CHANGE
+    # means "we don't know", never "nothing happened" — so blindly
+    # clicking again is exactly the "unsafe automatic clicking" the
+    # project brief warns against. Recovery now belongs one level up:
+    # main.py escalates an inconclusive verdict to a REAL look (the
+    # existing observe/verify vision mechanism — see
+    # computer_control.INCONCLUSIVE_TAGS), and only Gemini's own
+    # reasoning — which can judge whether repeating THIS specific action
+    # is actually safe — decides whether to click again.
     return (
-        f"Clicked (UI Automation): '{description}'. {tag} — {reason}{retry_note}. "
-        f"For anything consequential, call action='verify' for a closer look."
+        f"Clicked (UI Automation): '{description}'. {tag} — {reason}. "
+        f"This does NOT necessarily mean nothing happened — some controls "
+        f"(e.g. calculator/numeric-entry-style buttons) never expose a "
+        f"locally observable success signal even on a correct click. Call "
+        f"action='verify' to check the real result before deciding "
+        f"whether to click again — never click the same target a second "
+        f"time without confirming first."
     )
 
 
@@ -783,12 +901,19 @@ def _classify_type_result(expected: str, before_val, after_val) -> tuple[str, st
     )
 
 
-def _ui_type_by_description(description: str, text: str) -> str:
-    if not _PYWINAUTO or _get_os() != "windows":
-        return "UI Automation is only available on Windows here — use smart_type instead."
-    ctrl = _ui_find(description)
-    if ctrl is None:
-        return f"UI input not found via accessibility tree: '{description}' — try smart_type instead."
+def _ui_type_by_description(description: str, text: str, control_type: str | None = None) -> str:
+    status, ctrl, note = _ui_find(description, control_type=control_type)
+    if status == "unavailable":
+        return note
+    if status == "ambiguous":
+        return (
+            f"[UI_AMBIGUOUS] Cannot type into '{description}': {note}. Call "
+            f"list_ui_elements (or observe) for more context, narrow the "
+            f"description, or ask the user which one they mean — never "
+            f"guess."
+        )
+    if status == "not_found" or ctrl is None:
+        return f"UI input not found via accessibility tree: '{description}' — try smart_type instead. ({note})"
     before = _top_level_window_titles()
     before_val = _read_control_value(ctrl)
     try:
@@ -814,6 +939,111 @@ def _ui_type_by_description(description: str, text: str) -> str:
         f"Typed (UI Automation) into '{description}': {preview}. "
         f"{tag} — {reason}{note}"
     )
+
+
+# ── JARVIS Mode: general-purpose UI discovery ─────────────────────────────
+#
+# The generic "what's actually here?" primitive the rest of the loop
+# depends on. Before this, JARVIS could only search for ONE element by a
+# description it had to GUESS blindly (ui_find) — it had no cheap way to
+# discover what's really clickable in an app it has never seen before
+# without a full vision round trip. This closes that gap LOCALLY (no
+# Gemini call): a small, bounded, deduplicated text summary of the active
+# window's interactive controls, cheap enough to call before almost every
+# unfamiliar UI interaction.
+
+_LIST_UI_MAX_ELEMENTS = 60  # keeps the report small/cheap for Gemini — a
+# TEXT summary, not a vision call; bounded so a huge tree (WhatsApp's real
+# chat list runs ~25,000 descendants) can't produce an unusable result.
+
+_LIST_UI_INTERESTING_TYPES = frozenset({
+    "button", "edit", "checkbox", "radiobutton", "combobox", "menuitem",
+    "listitem", "tabitem", "hyperlink", "text",
+})
+
+
+def list_ui_elements(control_type: str | None = None) -> str:
+    """General-purpose UI discovery for the CURRENT foreground window —
+    the generic alternative to guessing a description string for ui_find
+    and hoping it matches something real. Returns a bounded, human-
+    readable list of control_type + accessible name (+ enabled/selected/
+    toggle state where cheaply readable) for whatever's actually
+    interactive right now, application-agnostic (no per-app knowledge —
+    same code path for WhatsApp, Word, Settings, File Explorer, or an
+    app installed five minutes ago). Deduplicates the same virtualization-
+    duplicate pattern documented on _all_same_visual_element (one real
+    on-screen control should be listed once, not dozens of times) so the
+    output stays genuinely useful rather than repetitive.
+
+    Never persists anything — this is a live, ephemeral read, discarded
+    by the caller (Gemini's own reasoning, via the tool-call response)
+    immediately after use, same as every other JARVIS observation."""
+    if not _PYWINAUTO or _get_os() != "windows":
+        return "UI Automation is only available on Windows here — use action='observe' (screen vision) instead."
+    hwnd = _foreground_hwnd()
+    if not hwnd:
+        return "Could not determine the foreground window."
+    try:
+        from pywinauto import Desktop
+        win = Desktop(backend="uia").window(handle=hwnd)
+        candidates = win.descendants()
+    except Exception as e:
+        return f"Could not inspect the active window's UI: {e}"
+
+    ctype_filter = (control_type or "").strip().lower() or None
+    seen_rects: set = set()
+    lines: list[str] = []
+    for ctrl in candidates:
+        if len(lines) >= _LIST_UI_MAX_ELEMENTS:
+            break
+        try:
+            ct = _element_control_type(ctrl)
+            if not ct or ct not in _LIST_UI_INTERESTING_TYPES:
+                continue
+            if ctype_filter and ct != ctype_filter:
+                continue
+            name = (ctrl.window_text() or "").strip()
+            if not name:
+                continue
+            rect_key = _element_rect_key(ctrl)
+            if rect_key is not None:
+                if rect_key in seen_rects:
+                    continue  # same virtualization-duplicate pattern as _resolve_ui_target
+                seen_rects.add(rect_key)
+
+            state_bits = []
+            try:
+                if not ctrl.is_enabled():
+                    state_bits.append("disabled")
+            except Exception:
+                pass
+            try:
+                if ctrl.is_selected():
+                    state_bits.append("selected")
+            except Exception:
+                pass
+            try:
+                tog = ctrl.get_toggle_state()
+                if tog is not None:
+                    state_bits.append(f"toggle={tog}")
+            except Exception:
+                pass
+            state = f" [{', '.join(state_bits)}]" if state_bits else ""
+
+            preview = name[:70] + ("…" if len(name) > 70 else "")
+            lines.append(f"- {ct}: '{preview}'{state}")
+        except Exception:
+            continue
+
+    if not lines:
+        return (
+            "No interactive elements were found in the active window (it "
+            "may rely on custom drawing without accessibility support — "
+            "try action='observe' for a visual look instead)."
+        )
+    title = get_active_window_title()
+    header = f"Active window: '{title or 'unknown'}'. Interactive elements found (up to {_LIST_UI_MAX_ELEMENTS}):"
+    return header + "\n" + "\n".join(lines)
 
 
 def _screen_find(description: str) -> tuple[int, int] | None:
@@ -887,6 +1117,10 @@ def computer_control(
       field         : memory field name for user_data
       clear_first   : bool, clear field before typing (default: true)
       path          : save path for screenshot (must be inside home dir)
+      control_type  : optional UI Automation control type filter (e.g.
+                       'button', 'edit') for list_ui_elements/ui_find/
+                       ui_click/ui_type — narrows a search when the same
+                       label appears on more than one kind of control
 
     Actions:
       type          — type text at cursor
@@ -913,25 +1147,51 @@ def computer_control(
       JARVIS Mode only (gated by main.py's _execute_tool(), not here —
       this module has no notion of JARVIS mode itself):
       get_active_window_title — title of the currently foreground window
-      ui_find       — find a control by name in the ACTIVE window's UI
-                       Automation tree (Windows only; semantic, not pixels)
+      list_ui_elements — GENERAL discovery: a bounded, deduplicated text
+                       list of every interactive control (type + name +
+                       state) in the ACTIVE window's UI Automation tree.
+                       No app-specific knowledge — the same call surfaces
+                       WhatsApp's chat list, Word's ribbon, a Settings
+                       page, or a brand-new app's UI alike. Prefer this
+                       BEFORE guessing a ui_find/ui_click/ui_type
+                       description for an unfamiliar screen. Optional
+                       control_type param narrows to one kind (e.g.
+                       'button').
+      ui_find       — find a control by name (optionally + control_type
+                       and/or automation-id) in the ACTIVE window's UI
+                       Automation tree (Windows only; semantic, not
+                       pixels). Now ambiguity-aware: if more than one
+                       DISTINCT real element equally matches, this
+                       reports [UI_AMBIGUOUS] instead of silently
+                       guessing — call list_ui_elements/observe for more
+                       context or ask the user, never assume.
       ui_click      — ui_find + click via UI Automation. Automatically
                        verifies the result using cheap LOCAL signals only
                        (no Gemini call) and reports one of four honest
                        verdicts in the returned text: [CLICK_VERIFIED_
                        SUCCESS], [CLICK_VERIFIED_FAILURE] (click itself
                        raised), [CLICK_AMBIGUOUS], or [CLICK_NO_
-                       OBSERVABLE_CHANGE] — the latter two trigger exactly
-                       one bounded automatic retry when safe (see
-                       _ui_click_by_description), and main.py may escalate
-                       them ONCE to the existing observe/verify vision
-                       mechanism if still inconclusive.
+                       OBSERVABLE_CHANGE]. Deliberately does NOT retry the
+                       click itself, even on NO_OBSERVABLE_CHANGE — a
+                       real, live-reproduced case (Calculator digit
+                       buttons: no toggle/selection/title signal on a
+                       correct click) proved that "nothing observably
+                       changed" does NOT mean "nothing happened", so an
+                       earlier auto-retry silently double-clicked and
+                       computed the wrong result. Instead main.py escalates
+                       an inconclusive verdict ONCE to the existing
+                       observe/verify vision mechanism, and only Gemini's
+                       own reasoning decides whether repeating the SAME
+                       click is actually safe. May also report
+                       [UI_AMBIGUOUS] up front if the description doesn't
+                       resolve to one distinct element.
       ui_type       — ui_find + type via UI Automation (falls back to
                        pyautogui typing if the control has no direct
                        set_text). Automatically reads the field back and
                        reports [TYPE_VERIFIED_SUCCESS]/[TYPE_VERIFIED_
                        FAILURE]/[TYPE_AMBIGUOUS] — never persists or logs
-                       the typed/read-back content itself.
+                       the typed/read-back content itself. May also
+                       report [UI_AMBIGUOUS] up front, same as ui_click.
       (observe/verify are NOT dispatched here — they need main.py's own
       async self._pending_vision injection, see that module's
       computer_control branch)
@@ -1007,14 +1267,19 @@ def computer_control(
             title = get_active_window_title()
             return title if title else "(could not determine the active window title)"
 
+        if action == "list_ui_elements":
+            return list_ui_elements(params.get("control_type"))
+
         if action == "ui_find":
-            return _ui_find_report(params.get("description", ""))
+            return _ui_find_report(params.get("description", ""), params.get("control_type"))
 
         if action == "ui_click":
-            return _ui_click_by_description(params.get("description", ""))
+            return _ui_click_by_description(params.get("description", ""), params.get("control_type"))
 
         if action == "ui_type":
-            return _ui_type_by_description(params.get("description", ""), params.get("text", ""))
+            return _ui_type_by_description(
+                params.get("description", ""), params.get("text", ""), params.get("control_type")
+            )
 
         if action == "screen_click":
             desc   = params.get("description", "")

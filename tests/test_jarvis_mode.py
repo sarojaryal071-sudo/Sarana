@@ -166,7 +166,10 @@ def test_build_config_jarvis_mode_desktop_vs_web_capability_text_differs() -> No
 
 # ── computer_control: new JARVIS-only actions require jarvis_mode ─────────
 
-_NEW_ACTIONS = ["observe", "verify", "ui_find", "ui_click", "ui_type", "get_active_window_title"]
+_NEW_ACTIONS = [
+    "observe", "verify", "list_ui_elements", "ui_find", "ui_click", "ui_type",
+    "get_active_window_title",
+]
 
 
 def test_computer_control_new_actions_blocked_without_jarvis_mode() -> None:
@@ -283,6 +286,25 @@ def test_computer_control_observe_shares_busy_guard_with_screen_process() -> Non
         assert jarvis._pending_vision is None
     asyncio.run(_run())
     print("test_computer_control_observe_shares_busy_guard_with_screen_process: PASS")
+
+
+def test_list_ui_elements_routes_through_plain_passthrough_when_jarvis_mode_on() -> None:
+    # list_ui_elements is a synchronous, purely-local action (no vision,
+    # no _pending_vision involvement) — it must fall through to the same
+    # plain computer_control(...) passthrough as any other raw action,
+    # never trigger the observe/verify vision branch or the ui_click/
+    # ui_type escalation branch.
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        jarvis._jarvis_mode = True
+        fake_result = "Active window: 'Notepad'. Interactive elements found (up to 60):\n- Edit: ''"
+        with patch.object(main_module, "computer_control", lambda **kw: fake_result):
+            fr = await jarvis._execute_tool(_fc("computer_control", action="list_ui_elements"))
+        assert fr.response["result"] == fake_result
+        assert jarvis._pending_vision is None
+        assert jarvis._vision_busy is False
+    asyncio.run(_run())
+    print("test_list_ui_elements_routes_through_plain_passthrough_when_jarvis_mode_on: PASS")
 
 
 # ── ui_click/ui_type: automatic local verification + bounded vision ───────
@@ -433,6 +455,7 @@ if __name__ == "__main__":
     test_computer_control_verify_uses_verify_wording_not_observe_wording()
     test_computer_control_observe_cooldown_blocks_rapid_repeat()
     test_computer_control_observe_shares_busy_guard_with_screen_process()
+    test_list_ui_elements_routes_through_plain_passthrough_when_jarvis_mode_on()
     test_ui_click_verified_success_does_not_escalate_to_vision()
     test_ui_click_ambiguous_escalates_to_vision_exactly_once()
     test_ui_click_no_observable_change_also_escalates()
