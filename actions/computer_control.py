@@ -845,15 +845,24 @@ def _ui_click_by_description(description: str, control_type: str | None = None) 
     # computer_control.INCONCLUSIVE_TAGS), and only Gemini's own
     # reasoning — which can judge whether repeating THIS specific action
     # is actually safe — decides whether to click again.
-    return (
-        f"Clicked (UI Automation): '{description}'. {tag} — {reason}. "
-        f"This does NOT necessarily mean nothing happened — some controls "
-        f"(e.g. calculator/numeric-entry-style buttons) never expose a "
-        f"locally observable success signal even on a correct click. Call "
-        f"action='verify' to check the real result before deciding "
-        f"whether to click again — never click the same target a second "
-        f"time without confirming first."
-    )
+    if tag == VERIFY_TAG_NO_CHANGE:
+        # Only attach this caveat to the genuinely uncertain verdict — a
+        # real, live-caught wording bug: an earlier version of this
+        # message attached "this does NOT necessarily mean nothing
+        # happened" to EVERY verdict, including CLICK_VERIFIED_SUCCESS,
+        # which reads as self-contradictory nonsense on a confirmed
+        # success (caught live while testing against Microsoft Paint).
+        return (
+            f"Clicked (UI Automation): '{description}'. {tag} — {reason}. "
+            f"This does NOT necessarily mean nothing happened — some "
+            f"controls (e.g. calculator/numeric-entry-style buttons) "
+            f"never expose a locally observable success signal even on a "
+            f"correct click. Call action='verify' to check the real "
+            f"result before deciding whether to click again — never "
+            f"click the same target a second time without confirming "
+            f"first."
+        )
+    return f"Clicked (UI Automation): '{description}'. {tag} — {reason}."
 
 
 def _read_control_value(ctrl) -> str | None:

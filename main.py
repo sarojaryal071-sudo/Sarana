@@ -1120,6 +1120,23 @@ DESKTOP_ONLY_TOOLS = frozenset({
     "system_status", "shutdown_jarvis",
 })
 
+# Bounded autonomous-execution governor (self._jarvis_action_count, its
+# own docstring) — the hard cap on computer_control/browser_control calls
+# allowed within a single user request before _execute_tool() stops
+# executing them and reports honestly instead. Exists because a goal-
+# directed loop (observe -> act -> verify -> reason -> act again) has no
+# other natural stopping point: Gemini decides for itself when to keep
+# calling tools, and a genuinely stuck strategy (an element that never
+# resolves, a verification that never confirms) could otherwise keep
+# calling forever. There's no single existing constant in this codebase
+# to derive an exact number from, so this is a considered judgment call,
+# not a precise derivation: 20 comfortably covers every multi-step example
+# in this project's own briefs (a Bluetooth connect-and-verify sequence,
+# a "find a file and open it in another app" hand-off) — each realistically
+# 6-15 calls — while still stopping a runaway loop within seconds rather
+# than minutes.
+_JARVIS_MAX_ACTIONS_PER_TURN = 20
+
 # ── Web visual context (camera + screen) ─────────────────────────────────
 # The mirror image of DESKTOP_ONLY_TOOLS: web_camera_vision/web_screen_
 # vision need BROWSER capture (getUserMedia/getDisplayMedia), which a
@@ -1519,6 +1536,16 @@ class JarvisLive:
         # tool's existing raw actions stay available exactly as before
         # regardless of this flag).
         self._jarvis_mode: bool = False
+        # Bounded autonomous-execution governor — see
+        # _JARVIS_MAX_ACTIONS_PER_TURN's own docstring for the reasoning
+        # and _execute_tool()'s gate for where this is enforced. Counts
+        # computer_control/browser_control calls since the last real user
+        # turn; reset on fresh user speech (_receive_audio()'s
+        # sc.input_transcription handling), a typed command
+        # (_on_text_command()), a barge-in interrupt (sc.interrupted), and
+        # every reconnect (run()'s reset block) — never persisted, RAM-only,
+        # same lifetime as self._jarvis_mode.
+        self._jarvis_action_count: int = 0
         self._interrupted          = False   # True while draining audio after user interrupt
         # Tool execution / receive-loop decoupling: a dedicated background
         # consumer (see _process_tool_calls()) drains this queue so the
@@ -1604,6 +1631,11 @@ class JarvisLive:
     def _on_text_command(self, text: str):
         if not self._loop or not self.session:
             return
+        # A fresh, explicit user turn — reset the autonomous-action
+        # governor (see self._jarvis_action_count's own docstring) so a
+        # NEW request always gets its own full budget, independent of
+        # whatever a previous request used.
+        self._jarvis_action_count = 0
         asyncio.run_coroutine_threadsafe(
             self.session.send_client_content(
                 turns={"parts": [{"text": text}]},
@@ -2118,23 +2150,42 @@ class JarvisLive:
                 "On this desktop app, you may also use computer_control's "
                 "observe/verify/list_ui_elements/ui_find/ui_click/ui_type "
                 "and get_active_window_title actions, and lean more "
-                "directly on browser_control. You operate the computer "
-                "GENERICALLY — never assume a fixed click sequence for an "
-                "app; inspect what's actually there (list_ui_elements or "
-                "observe) before acting, especially on an app you haven't "
-                "automated before. The same honesty standard you always "
-                "hold never relaxes: ui_click/ui_type verify themselves "
-                "automatically now, but never override what that "
-                "verification says, never claim success it didn't "
-                "confirm, never guess an ambiguous UI target with false "
-                "confidence — an [UI_AMBIGUOUS] result means inspect more "
-                "or ask, never pick one blindly. Verify against what the "
-                "user actually asked for (e.g. 'Bluetooth is on', 'the "
-                "conversation is open'), not merely that a click happened. "
-                "Always get an explicit yes before sending a message, "
-                "deleting anything, or any purchase/financial/security-"
-                "changing action — never infer confirmation from unrelated "
-                "speech."
+                "directly on browser_control. Reason about the GOAL, not "
+                "a script — you have no pre-taught sequence for any "
+                "specific app; for every request, work out what outcome "
+                "the user actually wants, then discover how THIS "
+                "computer, right now, gets you there (list_ui_elements/"
+                "observe before guessing, act, observe again, verify "
+                "against the outcome, not the click). If your first "
+                "approach doesn't get there — a click only selects "
+                "instead of opening, a pane doesn't appear, a target "
+                "isn't found — try a genuinely DIFFERENT next step (a "
+                "keyboard key, a different control, a different app "
+                "route) rather than repeating the same action; the same "
+                "honesty standard you always hold never relaxes: never "
+                "override what verification actually says, never claim "
+                "success it didn't confirm, and an [UI_AMBIGUOUS] result "
+                "means inspect more or ask, never pick one blindly. "
+                "Verify against what the user actually asked for (e.g. "
+                "'Bluetooth is on', 'the conversation is open'), not "
+                "merely that a click happened. Before assuming a device/"
+                "app feature is controllable, distinguish what's actually "
+                "exposed: something the OS itself exposes (a Bluetooth/"
+                "audio toggle, a paired-device list, volume) you can "
+                "usually operate directly; something only a specific "
+                "installed app exposes, you can discover and operate "
+                "through THAT app; and if neither exposes it (a device's "
+                "own private controls with no computer-side interface), "
+                "say so honestly rather than pretending it worked. Each "
+                "request gets a bounded number of computer/browser "
+                "actions — if you see [JARVIS_ACTION_LIMIT_REACHED], stop "
+                "immediately, tell the user plainly you couldn't safely "
+                "finish automatically, summarize what happened so far, "
+                "and ask how they'd like to proceed; never keep trying "
+                "after that. Always get an explicit yes before sending a "
+                "message, deleting anything, or any purchase/financial/"
+                "security-changing action — never infer confirmation from "
+                "unrelated speech."
                 if self._auto_start else
                 "This is a WEB session — you do NOT gain desktop computer "
                 "control here (no mouse/keyboard/native-app/OS access "
@@ -2358,6 +2409,43 @@ class JarvisLive:
                     f"{_desktop_equivalent}."
                 )},
             )
+
+        # Bounded autonomous-execution governor — see
+        # _JARVIS_MAX_ACTIONS_PER_TURN's own docstring. Applies to every
+        # computer_control/browser_control call (JARVIS mode or not — both
+        # tools can already act on the real computer/browser regardless of
+        # persona, see their own gating above) so a stuck strategy stops
+        # itself within a bounded number of actions instead of calling
+        # tools indefinitely. Checked BEFORE incrementing so exactly
+        # _JARVIS_MAX_ACTIONS_PER_TURN calls are actually allowed to run;
+        # once tripped, the counter stays pinned (never incremented
+        # further) until a real user turn resets it — see this session's
+        # reset points on self._jarvis_action_count's own docstring.
+        if name in ("computer_control", "browser_control"):
+            if self._jarvis_action_count >= _JARVIS_MAX_ACTIONS_PER_TURN:
+                print(
+                    f"[JARVIS] ⚠️ Action governor: {self._jarvis_action_count} "
+                    f"computer/browser actions this turn — refusing to run "
+                    f"another ({name})."
+                )
+                if not self.ui.muted:
+                    self._push_state("LISTENING")
+                return types.FunctionResponse(
+                    id=fc.id, name=name,
+                    response={"result": (
+                        f"[JARVIS_ACTION_LIMIT_REACHED] This request has "
+                        f"already taken {self._jarvis_action_count} computer/"
+                        f"browser actions without completing — stopping "
+                        f"here rather than continuing indefinitely, for "
+                        f"safety. Tell the user plainly and honestly that "
+                        f"you could not safely finish this automatically, "
+                        f"briefly summarize what you did or observed so "
+                        f"far, and ask how they'd like to proceed. Do NOT "
+                        f"keep trying automatically, and do NOT claim the "
+                        f"task completed."
+                    )},
+                )
+            self._jarvis_action_count += 1
 
         loop   = asyncio.get_event_loop()
         result = "Done."
@@ -3314,6 +3402,14 @@ class JarvisLive:
                             # in_buf/out_buf — nothing further to do with
                             # those here.
                             self._interrupted = True
+                            # A real barge-in means "stop whatever
+                            # autonomous sequence was in progress" (see this
+                            # project's own user-interrupt-always-wins
+                            # requirement) — reset the action governor so
+                            # the NEXT thing the user says gets a full,
+                            # fresh budget rather than inheriting whatever
+                            # was left over from the interrupted sequence.
+                            self._jarvis_action_count = 0
                             _drained = 0
                             while True:
                                 try:
@@ -3346,6 +3442,16 @@ class JarvisLive:
                         if sc.input_transcription and sc.input_transcription.text:
                             txt = _clean_transcript(sc.input_transcription.text)
                             if txt:
+                                if not in_buf:
+                                    # First transcription chunk of a NEW
+                                    # user utterance — reset the
+                                    # autonomous-action governor so this
+                                    # fresh request gets its own full
+                                    # budget (see
+                                    # self._jarvis_action_count's own
+                                    # docstring), independent of whatever
+                                    # a previous request used.
+                                    self._jarvis_action_count = 0
                                 in_buf.append(txt)
                                 self._last_user_speech = time.monotonic()
 
@@ -5177,6 +5283,7 @@ class JarvisLive:
                     # JARVIS Mode: session-scoped, never survives a
                     # reconnect — see self._jarvis_mode's own docstring.
                     self._jarvis_mode           = False
+                    self._jarvis_action_count   = 0
                     self._interrupted          = False
                     self._pending_tool_calls   = {}
                     self._active_tool_task     = None

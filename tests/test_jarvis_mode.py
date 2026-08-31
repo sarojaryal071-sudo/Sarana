@@ -164,6 +164,22 @@ def test_build_config_jarvis_mode_desktop_vs_web_capability_text_differs() -> No
     print("test_build_config_jarvis_mode_desktop_vs_web_capability_text_differs: PASS")
 
 
+def test_build_config_jarvis_mode_desktop_section_covers_goal_reasoning_and_device_capability() -> None:
+    # Goal-oriented / autonomous-execution upgrade: the desktop JARVIS
+    # section must actually instruct reasoning about the GOAL (not a
+    # taught sequence), distinguish OS-exposed vs app-exposed vs
+    # unavailable device capability, cover strategy-change on failure,
+    # and mention the action-limit governor's own tag.
+    jarvis = JarvisLive(HeadlessSurface())  # auto_start=True (desktop)
+    d_section = jarvis._build_config().system_instruction.split("[JARVIS_MODE]")[1].split("[LOCATION]")[0]
+    lowered = d_section.lower()
+    assert "goal" in lowered
+    assert "different" in lowered  # strategy-change guidance
+    assert "os itself exposes" in lowered or "os exposes" in lowered
+    assert "[jarvis_action_limit_reached]" in lowered
+    print("test_build_config_jarvis_mode_desktop_section_covers_goal_reasoning_and_device_capability: PASS")
+
+
 # ── computer_control: new JARVIS-only actions require jarvis_mode ─────────
 
 _NEW_ACTIONS = [
@@ -449,6 +465,7 @@ if __name__ == "__main__":
     test_build_config_includes_jarvis_mode_block_off_by_default()
     test_build_config_jarvis_mode_block_reflects_current_state()
     test_build_config_jarvis_mode_desktop_vs_web_capability_text_differs()
+    test_build_config_jarvis_mode_desktop_section_covers_goal_reasoning_and_device_capability()
     test_computer_control_new_actions_blocked_without_jarvis_mode()
     test_computer_control_existing_actions_unaffected_by_jarvis_mode_off()
     test_computer_control_observe_opens_pending_vision_when_jarvis_mode_on()
