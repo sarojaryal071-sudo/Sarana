@@ -21,6 +21,8 @@ try:
 except ImportError:
     _PYPERCLIP = False
 
+from actions import result_envelope as _envelope
+
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 if _OS == "Windows":
@@ -91,15 +93,17 @@ def volume_set(value: int):
     value = max(0, min(100, int(value)))
     if _OS == "Windows":
         try:
-            import math
-            from ctypes import cast, POINTER
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-            devices   = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol       = cast(interface, POINTER(IAudioEndpointVolume))
-            vol_db    = -65.25 if value == 0 else max(-65.25, 20 * math.log10(value / 100))
-            vol.SetMasterVolumeLevel(vol_db, None)
+            # AudioDevice.EndpointVolume is the ready-to-use
+            # IAudioEndpointVolume pointer in the installed pycaw version
+            # — no manual .Activate(IAudioEndpointVolume._iid_, ...) COM
+            # dance needed (an older pycaw API shape this code used to
+            # assume; it silently failed and fell back to a keypress
+            # mute-toggle hack every time — found live while building
+            # get_volume()'s readback, which hit the exact same bug).
+            # SetMasterVolumeLevelScalar takes a 0.0-1.0 fraction, not dB.
+            from pycaw.pycaw import AudioUtilities
+            devices = AudioUtilities.GetSpeakers()
+            devices.EndpointVolume.SetMasterVolumeLevelScalar(value / 100.0, None)
             return
         except Exception as e:
             print(f"[Settings] pycaw failed, using keypress fallback: {e}")
@@ -113,6 +117,22 @@ def volume_set(value: int):
         subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{value}%"],
             capture_output=True)
         return
+
+def get_volume() -> int | None:
+    """Best-effort ground-truth readback of the current system volume
+    (0-100) via pycaw — mirrors volume_set()'s own pycaw usage/fallback
+    posture. None if pycaw/the audio endpoint isn't available, never
+    guessed."""
+    if _OS != "Windows":
+        return None
+    try:
+        from pycaw.pycaw import AudioUtilities
+        devices = AudioUtilities.GetSpeakers()
+        return round(devices.EndpointVolume.GetMasterVolumeLevelScalar() * 100)
+    except Exception as e:
+        print(f"[Settings] get_volume failed: {e}")
+        return None
+
 
 def brightness_up():
     if _OS == "Darwin":
@@ -500,6 +520,191 @@ def toggle_wifi():
         except Exception as e:
             print(f"[Settings] toggle_wifi Linux failed: {e}")
 
+def sleep_computer() -> bool:
+    """Issues a real OS suspend request — distinct from sleep_display()
+    above (which only turns the MONITOR off, the display stays on
+    standby with the system fully running). Returns True only if the OS
+    ACCEPTED the suspend request; it does NOT mean the machine is now
+    actually asleep — once a real suspend begins, the very process that
+    issued it may be suspended before anything further could be checked,
+    so "the call was accepted" is the strongest honest claim possible
+    here (see the Universal JARVIS Computer Control Architecture design's
+    own note on this exact limitation)."""
+    if _OS == "Windows":
+        try:
+            import ctypes
+            # SetSuspendState(bHibernate, bForce, bWakeupEventsDisabled) —
+            # False/False/False = a normal, cooperative suspend (the same
+            # kind clicking Start > Power > Sleep triggers), not a forced
+            # hibernate.
+            ok = ctypes.windll.powrprof.SetSuspendState(False, False, False)
+            return bool(ok)
+        except Exception as e:
+            print(f"[Settings] sleep_computer (Windows) failed: {e}")
+            return False
+    elif _OS == "Darwin":
+        try:
+            r = subprocess.run(["pmset", "sleepnow"], capture_output=True, timeout=5)
+            return r.returncode == 0
+        except Exception as e:
+            print(f"[Settings] sleep_computer (macOS) failed: {e}")
+            return False
+    else:
+        try:
+            r = subprocess.run(["systemctl", "suspend"], capture_output=True, timeout=5)
+            return r.returncode == 0
+        except Exception as e:
+            print(f"[Settings] sleep_computer (Linux) failed: {e}")
+            return False
+
+
+def _bluetooth_radio_state() -> bool | None:
+    """Best-effort ground-truth read of whether the Bluetooth radio is
+    currently ON. None means "couldn't determine" — never guessed, never
+    treated as either True or False by the caller."""
+    if _OS == "Windows":
+        try:
+            # A Bluetooth-class PnP device list also contains protocol/
+            # transport sub-devices (RFCOMM, AVRCP transports, the
+            # Enumerator itself) that all report Status "Unknown" — only
+            # the actual radio/adapter device reports a real "OK"/"Error"
+            # state. Live-verified against this machine's real device
+            # list: naively taking the first Bluetooth-class entry picked
+            # an RFCOMM protocol driver (status "Unknown") instead of the
+            # real "Intel(R) Wireless Bluetooth(R)" radio (status "OK"),
+            # silently misreporting the radio as off when it was on —
+            # filtering to OK/Error status specifically selects the radio.
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue "
+                 "| Where-Object {$_.Status -in @('OK','Error')} "
+                 "| Select-Object -First 1 -ExpandProperty Status)"],
+                capture_output=True, text=True, timeout=8, **_WIN_HIDE,
+            )
+            status = (result.stdout or "").strip()
+            if status:
+                return status.upper() == "OK"
+        except Exception as e:
+            print(f"[Settings] _bluetooth_radio_state query failed: {e}")
+    elif _OS == "Darwin":
+        try:
+            result = subprocess.run(["blueutil", "-p"], capture_output=True, text=True, timeout=5)
+            out = (result.stdout or "").strip()
+            if out in ("0", "1"):
+                return out == "1"
+        except Exception:
+            pass  # blueutil is a third-party tool; not being installed is expected, not an error
+    elif _OS == "Linux":
+        try:
+            result = subprocess.run(["rfkill", "list", "bluetooth"], capture_output=True, text=True, timeout=5)
+            out = (result.stdout or "").lower()
+            if "soft blocked: yes" in out or "hard blocked: yes" in out:
+                return False
+            if "bluetooth" in out:
+                return True
+        except Exception as e:
+            print(f"[Settings] _bluetooth_radio_state (Linux) query failed: {e}")
+    return None
+
+
+def bluetooth_radio_set(state: bool) -> bool | None:
+    """Attempts to set the Bluetooth radio on/off, then reads back the
+    ACTUAL resulting state (ground truth) rather than assuming the
+    command worked — returns that read-back value, or None if it
+    couldn't be determined either way (e.g. no admin rights for the
+    PnP-device toggle on Windows, or blueutil not installed on macOS) —
+    the caller must treat None as "couldn't verify", never as success."""
+    if _OS == "Windows":
+        try:
+            # Target ONLY the actual radio/adapter device (see
+            # _bluetooth_radio_state's own comment on why Status OK/Error
+            # identifies it) — not every Bluetooth-class sub-device
+            # (RFCOMM/AVRCP transports etc.), which the original,
+            # over-broad "not an Enumerator" filter would have also
+            # tried to toggle individually.
+            verb = "Enable-PnpDevice" if state else "Disable-PnpDevice"
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue "
+                 f"| Where-Object {{$_.Status -in @('OK','Error')}} "
+                 f"| ForEach-Object {{ {verb} -InstanceId $_.InstanceId "
+                 f"-Confirm:$false -ErrorAction SilentlyContinue }}"],
+                capture_output=True, timeout=10, **_WIN_HIDE,
+            )
+        except Exception as e:
+            print(f"[Settings] bluetooth_radio_set (Windows) failed: {e}")
+    elif _OS == "Darwin":
+        try:
+            subprocess.run(["blueutil", "-p", "1" if state else "0"], capture_output=True, timeout=5)
+        except Exception as e:
+            print(f"[Settings] bluetooth_radio_set (macOS, needs blueutil) failed: {e}")
+    elif _OS == "Linux":
+        try:
+            subprocess.run(["rfkill", "unblock" if state else "block", "bluetooth"],
+                capture_output=True, timeout=5)
+        except Exception as e:
+            print(f"[Settings] bluetooth_radio_set (Linux) failed: {e}")
+    time.sleep(1.0)  # give the OS a moment to actually apply it before reading back
+    return _bluetooth_radio_state()
+
+
+def clipboard_get() -> str | None:
+    if not _PYPERCLIP:
+        return None
+    try:
+        return pyperclip.paste()
+    except Exception as e:
+        print(f"[Settings] clipboard_get failed: {e}")
+        return None
+
+
+def clipboard_set(text: str) -> bool:
+    if not _PYPERCLIP:
+        return False
+    try:
+        pyperclip.copy(text)
+        return True
+    except Exception as e:
+        print(f"[Settings] clipboard_set failed: {e}")
+        return False
+
+
+def _wifi_state() -> bool | None:
+    """Best-effort ground-truth read of whether Wi-Fi is currently
+    enabled. None means "couldn't determine" — never guessed."""
+    if _OS == "Windows":
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-NetAdapter | Where-Object {$_.PhysicalMediaType -eq 'Native 802.11'} "
+                 "| Select-Object -First 1 -ExpandProperty Status)"],
+                capture_output=True, text=True, timeout=8, **_WIN_HIDE,
+            )
+            status = (result.stdout or "").strip()
+            if status:
+                return status.lower() == "up"
+        except Exception as e:
+            print(f"[Settings] _wifi_state query failed: {e}")
+    elif _OS == "Darwin":
+        try:
+            iface = _get_macos_wifi_interface()
+            result = subprocess.run(["networksetup", "-getairportpower", iface],
+                capture_output=True, text=True, timeout=5)
+            if result.stdout:
+                return "On" in result.stdout
+        except Exception:
+            pass
+    elif _OS == "Linux":
+        try:
+            result = subprocess.run(["nmcli", "radio", "wifi"], capture_output=True, text=True, timeout=5)
+            out = (result.stdout or "").strip().lower()
+            if out:
+                return out == "enabled"
+        except Exception:
+            pass
+    return None
+
+
 def restart_computer():
     if _OS == "Windows":
         subprocess.run(["shutdown", "/r", "/t", "10"], capture_output=True, **_WIN_HIDE)
@@ -580,9 +785,31 @@ ACTION_MAP: dict[str, callable] = {
     "toggle_wifi":         toggle_wifi,
     "restart":             restart_computer,
     "shutdown":            shutdown_computer,
+    # sleep / bluetooth_on / bluetooth_off / clipboard_get / clipboard_set
+    # are NOT here — they're handled as dedicated branches in
+    # computer_settings() below (each needs a verified Result Envelope
+    # return, not the generic "Done: x." this map's callers get), so
+    # listing them here too would be dead, unreachable code.
 }
 
+# Kept as the canonical dangerous-action list for THIS module's own
+# reference/tests; the actual confirmation decision is delegated to
+# result_envelope.is_consequential() (see computer_settings() below) so
+# the same classifier is shared with computer_control.py's accomplish()
+# rather than reimplemented here — see result_envelope.py's own
+# _CONSEQUENTIAL_ACTION_NAMES, which this set must stay in sync with.
 _DANGEROUS_ACTIONS = {"restart", "shutdown"}
+
+# volume_set / toggle_wifi / sleep / bluetooth_on / bluetooth_off /
+# clipboard_get / clipboard_set / restart / shutdown each have their own
+# dedicated branch in computer_settings() below and return a full Result
+# Envelope (see result_envelope.py) instead of a bare "Done: x." string —
+# these are the actions with a genuine, verifiable ground-truth outcome.
+# The ~50 other ACTION_MAP entries (window snapping, tab navigation,
+# zoom, etc.) are fire-and-forget UI conveniences with no meaningful
+# "verification" concept and are deliberately left returning their
+# existing bare-string behavior — rewrapping all of them is out of scope
+# and would touch working, already-tested code for no benefit.
 
 
 
@@ -649,20 +876,108 @@ def computer_settings(
     if player:
         player.write_log(f"[Settings] {action}")
 
-    if action in _DANGEROUS_ACTIONS:
-        confirmed = str(params.get("confirmed", "")).lower()
-        if confirmed not in ("yes", "true", "1", "confirm"):
-            return (
-                f"This will {action} the computer. "
-                f"Please confirm by calling again with confirmed=yes."
-            )
+    # Centralized risk/confirmation gate — the SAME classifier
+    # actions/computer_control.py's accomplish() uses (see
+    # actions/result_envelope.py), so confirmation logic is never
+    # reimplemented per action. Backward-compatible with the pre-existing
+    # confirmed="yes" string convention this function already shipped
+    # with (is_confirmed() accepts both that and a real boolean).
+    if _envelope.is_consequential(action_name=action) and not _envelope.is_confirmed(params):
+        return _envelope.envelope(
+            _envelope.STATUS_CONFIRMATION_REQUIRED,
+            f"this will {action} the computer",
+        )
 
     if action == "volume_set":
         try:
-            volume_set(int(value or 50))
-            return f"Volume set to {value}%."
+            target = max(0, min(100, int(value or 50)))
+            volume_set(target)
+            time.sleep(0.3)
+            actual = get_volume()
+            if actual is None:
+                return _envelope.envelope(
+                    _envelope.STATUS_INCONCLUSIVE,
+                    f"volume_set({target}) was issued but the resulting level could not be read back",
+                )
+            if abs(actual - target) <= 2:  # small tolerance for rounding
+                return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"volume is now {actual}%")
+            return _envelope.envelope(
+                _envelope.STATUS_VERIFIED_FAILURE,
+                f"requested {target}% but the volume now reads {actual}%",
+            )
         except Exception as e:
-            return f"Could not set volume: {e}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"could not set volume: {e}")
+
+    if action == "toggle_wifi":
+        before = _wifi_state()
+        toggle_wifi()
+        time.sleep(1.0)
+        after = _wifi_state()
+        if before is None or after is None:
+            return _envelope.envelope(
+                _envelope.STATUS_INCONCLUSIVE,
+                "Wi-Fi toggle was issued but the resulting radio state could not be read back",
+            )
+        if after != before:
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"Wi-Fi is now {'on' if after else 'off'}")
+        return _envelope.envelope(
+            _envelope.STATUS_VERIFIED_FAILURE,
+            f"Wi-Fi state did not change (still {'on' if before else 'off'})",
+        )
+
+    if action in ("bluetooth_on", "bluetooth_off"):
+        want_on = action == "bluetooth_on"
+        actual = bluetooth_radio_set(want_on)
+        if actual is None:
+            return _envelope.envelope(
+                _envelope.STATUS_INCONCLUSIVE,
+                "Bluetooth radio toggle was issued but the resulting state could not be read back "
+                "(may need administrator privileges) — try accomplish() via the Settings UI instead",
+            )
+        if actual == want_on:
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"Bluetooth radio is now {'on' if actual else 'off'}")
+        return _envelope.envelope(
+            _envelope.STATUS_VERIFIED_FAILURE,
+            f"Bluetooth radio is still {'on' if actual else 'off'}",
+        )
+
+    if action == "sleep":
+        accepted = sleep_computer()
+        if accepted:
+            # Deliberately NOT claiming the machine IS asleep — see
+            # sleep_computer()'s own docstring on why that can never be
+            # confirmed from inside the process that just suspended itself.
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, "the suspend request was accepted by the OS")
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, "the OS did not accept the suspend request")
+
+    if action in ("restart", "shutdown"):
+        func = ACTION_MAP[action]
+        try:
+            func()
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"the {action} command was issued")
+        except Exception as e:
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"could not issue {action}: {e}")
+
+    if action == "clipboard_get":
+        text = clipboard_get()
+        if text is None:
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "clipboard could not be read")
+        preview = text[:200] + ("…" if len(text) > 200 else "")
+        # Not persisted anywhere — this is the tool's own return value,
+        # same ephemeral lifetime as every other tool result.
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"clipboard contains: {preview}")
+
+    if action == "clipboard_set":
+        text = str(value or params.get("text", ""))
+        if not text:
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "no text given to place on the clipboard")
+        ok = clipboard_set(text)
+        if not ok:
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, "could not write to the clipboard")
+        after = clipboard_get()
+        if after == text:
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, "clipboard now contains the requested text")
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "clipboard was written to but could not be read back to confirm")
 
     if action in ("type_text", "write_on_screen", "type", "write"):
         text = str(value or params.get("text", "")).strip()

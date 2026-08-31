@@ -101,6 +101,15 @@ from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control, get_active_window_title
 from actions.computer_control  import INCONCLUSIVE_TAGS as _cc_INCONCLUSIVE_TAGS
+from actions import result_envelope as _envelope
+
+# Escalation tags checked by the ui_click/ui_type/accomplish branch below:
+# the pre-existing per-action tags (CLICK_AMBIGUOUS etc.) PLUS accomplish's
+# unified [INCONCLUSIVE]/[UI_AMBIGUOUS] envelope tags — same escalation
+# policy either way, just now covering both tag vocabularies.
+_cc_ESCALATABLE_TAGS = _cc_INCONCLUSIVE_TAGS | frozenset(
+    f"[{s}]" for s in _envelope.ESCALATABLE_STATUSES
+)
 from actions.game_updater      import game_updater
 from actions.system_monitor    import SystemMonitor, get_system_status
 from actions.proactive         import ProactiveEngine
@@ -666,16 +675,30 @@ TOOL_DECLARATIONS = [
         "name": "computer_settings",
         "description": (
             "Controls the computer: volume, brightness, window management, keyboard shortcuts, "
-            "typing text on screen, closing apps, fullscreen, dark mode, WiFi, restart, shutdown, "
-            "scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. "
-            "Use for ANY single computer control command."
+            "typing text on screen, closing apps, fullscreen, dark mode, WiFi on/off, Bluetooth radio "
+            "on/off (action='bluetooth_on'/'bluetooth_off'), sleep (action='sleep' — suspends the "
+            "machine; the result only confirms the OS accepted the request, never that the machine is "
+            "now actually asleep — it can't be checked from inside a process that may itself get "
+            "suspended), clipboard read/write (action='clipboard_get'/'clipboard_set'), restart, "
+            "shutdown, scrolling, tab management, zoom, screenshots, lock screen, refresh/reload page. "
+            "Use for ANY single, deterministic computer-level command — this is preferred over "
+            "computer_control's accomplish() whenever the goal is one of these, since these are "
+            "directly verified against the real OS/hardware state, not a UI guess. Verifiable actions "
+            "(volume_set, toggle_wifi, sleep, bluetooth_on/off, clipboard_get/set, restart, shutdown) "
+            "return a tagged result — [VERIFIED_SUCCESS]/[VERIFIED_FAILURE]/[INCONCLUSIVE]/"
+            "[CONFIRMATION_REQUIRED] — read it honestly, never assume success. restart/shutdown "
+            "(and any other action the user didn't explicitly and unambiguously ask for) return "
+            "[CONFIRMATION_REQUIRED] the first time — do not call again with confirmed=true until the "
+            "user has explicitly said yes to THIS specific action; never infer confirmation from the "
+            "original request or unrelated speech."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "The action to perform"},
-                "description": {"type": "STRING", "description": "Natural language description of what to do"},
-                "value":       {"type": "STRING", "description": "Optional value: volume level, text to type, etc."}
+                "action":      {"type": "STRING", "description": "The action to perform, e.g. volume_set | toggle_wifi | sleep | bluetooth_on | bluetooth_off | clipboard_get | clipboard_set | restart | shutdown | minimize | maximize | ..."},
+                "description": {"type": "STRING", "description": "Natural language description of what to do (used only when action is omitted)"},
+                "value":       {"type": "STRING", "description": "Optional value: volume level (0-100), text to type/clipboard_set, etc."},
+                "confirmed":   {"type": "BOOLEAN", "description": "Set true only after the user has explicitly confirmed a consequential action (restart/shutdown) in THIS conversation — never infer it"}
             },
             "required": []
         }
@@ -803,32 +826,40 @@ TOOL_DECLARATIONS = [
         "name": "computer_control",
         "description": (
             "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen. "
-            "The observe/verify/list_ui_elements/ui_find/ui_click/ui_type/get_active_window_title actions are "
+            "PREFER action='accomplish' for any 'make this application show/do something' request — give it the "
+            "GOAL (e.g. goal='open the conversation with Saroj', target='Saroj', expected_state='the conversation "
+            "header shows Saroj') and it handles discovery, targeting, the real click/type, and verification "
+            "internally in ONE call; you should not need to reason step-by-step about ui_find vs ui_click vs "
+            "coordinates for ordinary UI tasks anymore. It always returns one clear tagged result — "
+            "[VERIFIED_SUCCESS] / [VERIFIED_FAILURE] / [INCONCLUSIVE] / [UI_AMBIGUOUS] / [CONFIRMATION_REQUIRED] "
+            "— each with an instruction attached: only [VERIFIED_SUCCESS] may be reported as success; "
+            "[INCONCLUSIVE] means try again with more context, call action='verify' directly, or ask the user — "
+            "never assume it worked; [UI_AMBIGUOUS] means more than one real element matched — narrow with "
+            "target/constraints/control_type or ask the user, never guess; [CONFIRMATION_REQUIRED] means the "
+            "action was NOT performed — it needs an explicit user yes, then call again with confirmed=true "
+            "(never infer confirmation from the original request or unrelated speech). "
+            "accomplish/observe/verify/list_ui_elements/ui_find/ui_click/ui_type/get_active_window_title are "
             "JARVIS-mode-only (desktop) — they need jarvis_mode='on' first, and return [JARVIS_MODE_REQUIRED] "
             "otherwise. observe/verify capture the CURRENT screen and send it back to you as a later message in "
             "this same conversation (same [VISION_ACTIVE] pattern as screen_process) — say one short line, then "
-            "wait, never guess what you'll see. This is a GENERAL computer-control toolkit, not app-specific: for "
-            "an application you've never automated before, do NOT guess at its UI — call list_ui_elements first "
-            "to see what's actually interactive in the active window (control type + name + state, no vision call "
-            "needed), THEN ui_find/ui_click/ui_type using names you actually saw there. ui_find/ui_click/ui_type "
-            "use the OS accessibility tree (not raw pixel coordinates) to locate a described element by name — "
-            "prefer these over screen_find/screen_click/raw x,y clicks for native desktop apps whenever JARVIS "
-            "mode is on; fall back to screen_find/observe only if the accessibility tree can't find or resolve "
-            "the element. If ui_find/ui_click/ui_type reports [UI_AMBIGUOUS], more than one distinct element "
-            "matched — call list_ui_elements for more context or ask the user which one, never guess which to "
-            "click. ui_click/ui_type automatically verify their own result locally (a tag in the returned text "
-            "tells you: verified success, verified failure, ambiguous, or no observable change — read it "
-            "honestly) and escalate to a real screen look automatically when that local check is inconclusive; "
-            "you never need to remember to call verify after every click, but you still can — and for anything "
-            "the user actually asked to confirm (e.g. 'is Bluetooth on now', 'did the message send'), verify "
-            "against THAT requested outcome specifically, not merely that a click was performed. Never claim an "
+            "wait, never guess what you'll see. This is a GENERAL computer-control toolkit, not app-specific — "
+            "accomplish/list_ui_elements/ui_find/ui_click/ui_type work identically for any application, known or "
+            "unfamiliar; never assume what buttons an app has, discover them. The lower-level ui_find/ui_click/"
+            "ui_type/list_ui_elements actions remain available for the rare case a task genuinely needs step-by-"
+            "step reasoning (e.g. inspecting several candidates before deciding) — fall back to screen_find/"
+            "observe only if the accessibility tree can't find or resolve something at all. Never claim an "
             "action worked when the result says otherwise."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data | observe | verify | list_ui_elements | ui_find | ui_click | ui_type | get_active_window_title"},
-                "text":        {"type": "STRING", "description": "Text to type or paste"},
+                "action":      {"type": "STRING", "description": "accomplish | type | smart_type | click | double_click | right_click | hotkey | press | scroll | move | copy | paste | screenshot | wait | clear_field | focus_window | screen_find | screen_click | random_data | user_data | observe | verify | list_ui_elements | ui_find | ui_click | ui_type | get_active_window_title"},
+                "goal":        {"type": "STRING",  "description": "For action='accomplish': the outcome in the user's own words, e.g. 'open the conversation with Saroj'. Required for accomplish."},
+                "target":      {"type": "STRING",  "description": "For action='accomplish': the specific named thing to find (a contact, button, device, file) — more precise than letting it parse `goal` as prose"},
+                "expected_state": {"type": "STRING", "description": "For action='accomplish': how to recognize success in your own words, e.g. 'the conversation header shows Saroj' or 'the device shows Connected'"},
+                "constraints": {"type": "STRING", "description": "For action='accomplish': extra context that narrows an ambiguous target"},
+                "confirmed":   {"type": "BOOLEAN", "description": "For action='accomplish' on a consequential goal (send/delete/purchase/security/disconnect): set true only after the user has explicitly confirmed THIS action — never infer it"},
+                "text":        {"type": "STRING", "description": "Text to type or paste (also used by accomplish to type into the resolved target instead of clicking it)"},
                 "x":           {"type": "INTEGER", "description": "X coordinate"},
                 "y":           {"type": "INTEGER", "description": "Y coordinate"},
                 "keys":        {"type": "STRING", "description": "Key combination e.g. 'ctrl+c'"},
@@ -838,7 +869,7 @@ TOOL_DECLARATIONS = [
                 "seconds":     {"type": "NUMBER",  "description": "Seconds to wait"},
                 "title":       {"type": "STRING",  "description": "Window title for focus_window"},
                 "description": {"type": "STRING",  "description": "Element description for screen_find/screen_click/ui_find/ui_click/ui_type, or what to look for/verify for observe/verify"},
-                "control_type": {"type": "STRING", "description": "Optional UI Automation control type filter for list_ui_elements/ui_find/ui_click/ui_type, e.g. 'button', 'edit', 'checkbox' — narrows a search when the same label appears on more than one kind of control"},
+                "control_type": {"type": "STRING", "description": "Optional UI Automation control type filter for accomplish/list_ui_elements/ui_find/ui_click/ui_type, e.g. 'button', 'edit', 'checkbox' — narrows a search when the same label appears on more than one kind of control"},
                 "type":        {"type": "STRING",  "description": "Data type for random_data"},
                 "field":       {"type": "STRING",  "description": "Field for user_data: name|email|city"},
                 "clear_first": {"type": "BOOLEAN", "description": "Clear field before typing (default: true)"},
@@ -2776,6 +2807,13 @@ class JarvisLive:
                 if _mode_action == "on":
                     self._jarvis_mode = True
                     self.ui.write_log("SYS: JARVIS mode ON")
+                    # Desktop identity fix: previously the HUD had no
+                    # visual reflection of JARVIS mode at all (the web
+                    # frontend already gets its Orb/SaranaFace switch from
+                    # the broadcast_jarvis_mode call below) — this is the
+                    # local counterpart, same mechanism main.py already
+                    # uses for state/log updates (self.ui.set_state()).
+                    self.ui.set_jarvis_mode(True)
                     if self._dashboard:
                         asyncio.create_task(self._dashboard.broadcast_jarvis_mode(True))
                     result = (
@@ -2815,6 +2853,7 @@ class JarvisLive:
                 elif _mode_action == "off":
                     self._jarvis_mode = False
                     self.ui.write_log("SYS: JARVIS mode OFF")
+                    self.ui.set_jarvis_mode(False)
                     if self._dashboard:
                         asyncio.create_task(self._dashboard.broadcast_jarvis_mode(False))
                     result = (
@@ -3085,7 +3124,7 @@ class JarvisLive:
                 # relying on computer_control regresses.
                 _cc_action = (args.get("action") or "").lower().strip()
                 _cc_jarvis_only = {
-                    "observe", "verify", "list_ui_elements", "ui_find", "ui_click", "ui_type",
+                    "accomplish", "observe", "verify", "list_ui_elements", "ui_find", "ui_click", "ui_type",
                     "get_active_window_title",
                 }
                 if _cc_action in _cc_jarvis_only and not self._jarvis_mode:
@@ -3150,28 +3189,37 @@ class JarvisLive:
                             "wait — the actual view arrives in the next "
                             "message. Do NOT guess what you'll see."
                         )
-                elif _cc_action in ("ui_click", "ui_type"):
+                elif _cc_action in ("ui_click", "ui_type", "accomplish"):
                     # These already self-verify LOCALLY (no Gemini call) —
                     # see actions/computer_control.py's _classify_click_
-                    # result/_classify_type_result. Only when that local
-                    # check comes back genuinely inconclusive
-                    # (computer_control.INCONCLUSIVE_TAGS) do we escalate,
-                    # and only ONCE, by reusing the EXACT same observe/
-                    # verify _pending_vision mechanism above — never a
-                    # second Gemini session, never on every click (that
-                    # would be slow/expensive — see the project brief).
-                    # Still gated by the same cooldown/busy guard as
-                    # observe/verify so this can't stack into a loop.
+                    # result/_classify_type_result (ui_click/ui_type) and
+                    # accomplish()'s own Result Envelope. Only when that
+                    # local check comes back genuinely inconclusive
+                    # (_cc_ESCALATABLE_TAGS — the old per-action tags PLUS
+                    # accomplish's unified [INCONCLUSIVE]/[UI_AMBIGUOUS])
+                    # do we escalate, and only ONCE, by reusing the EXACT
+                    # same observe/verify _pending_vision mechanism above
+                    # — never a second Gemini session, never on every
+                    # click (that would be slow/expensive — see the
+                    # project brief). Still gated by the same cooldown/
+                    # busy guard as observe/verify so this can't stack
+                    # into a loop. [CONFIRMATION_REQUIRED] is deliberately
+                    # NOT in this set — a confirmation gate must never be
+                    # bypassed by "let's just look and decide"; it needs
+                    # an actual user yes, not a vision guess.
                     r = await loop.run_in_executor(None, lambda: computer_control(parameters=args, player=self.ui))
                     result = r or "Done."
-                    _inconclusive = any(tag in result for tag in _cc_INCONCLUSIVE_TAGS)
+                    _inconclusive = any(tag in result for tag in _cc_ESCALATABLE_TAGS)
                     if _inconclusive:
                         _now = time.monotonic()
                         _cooldown = 3.0
                         if not self._vision_busy and (_now - self._vision_last_time) >= _cooldown:
                             self._vision_busy      = True
                             self._vision_last_time = _now
-                            desc  = (args.get("description") or "").strip()
+                            desc  = (
+                                args.get("description") or args.get("target")
+                                or args.get("goal") or ""
+                            ).strip()
                             title = await loop.run_in_executor(None, get_active_window_title)
                             img_b, mime_t = await loop.run_in_executor(None, _capture_screen)
                             question = (
@@ -5283,6 +5331,7 @@ class JarvisLive:
                     # JARVIS Mode: session-scoped, never survives a
                     # reconnect — see self._jarvis_mode's own docstring.
                     self._jarvis_mode           = False
+                    self.ui.set_jarvis_mode(False)  # revert the HUD too, in case a prior connection left it showing JARVIS
                     self._jarvis_action_count   = 0
                     self._interrupted          = False
                     self._pending_tool_calls   = {}

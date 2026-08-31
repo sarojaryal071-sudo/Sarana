@@ -1846,6 +1846,7 @@ class MainWindow(QMainWindow):
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
     _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
+    _jarvis_mode_sig = pyqtSignal(bool)      # main.py's self._jarvis_mode changed (thread-safe)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1988,6 +1989,7 @@ class MainWindow(QMainWindow):
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._clipboard_sig.connect(self._show_clipboard_panel)
+        self._jarvis_mode_sig.connect(self._apply_jarvis_mode)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -3338,6 +3340,41 @@ class MainWindow(QMainWindow):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
 
+    def _apply_jarvis_mode(self, active: bool):
+        """Desktop HUD's counterpart to the web frontend's Orb/SaranaFace
+        switch (see App.jsx's jarvis_mode_changed handling) — the gap
+        this closes: this window previously had NO visual reflection of
+        main.py's self._jarvis_mode at all (confirmed by inspection
+        before this method existed), so JARVIS mode was invisible on
+        desktop even though it changes the assistant's whole persona.
+
+        Deliberately presentation-only and session-scoped, mirroring
+        self._jarvis_mode's own reset-every-reconnect lifecycle: never
+        writes to config, never touches self._assistant_name (the user's
+        actual configured identity — restored exactly on active=False),
+        and reuses the EXACT same widgets/update path the existing
+        "customize assistant name" flow (_apply_name_update) already
+        uses for this same "change the displayed name" concept — no new
+        UI elements, no HUD/waveform redesign, no change to the JARVIS
+        toggle's own on/off lifecycle (that stays main.py's job)."""
+        base = self._assistant_name.upper()
+        if active:
+            display = "JARVIS"
+            self._sub_lbl.setText("Just A Rather Very Intelligent System")
+        else:
+            display = base
+            if base in ("JARVIS", "J.A.R.V.I.S"):
+                self._sub_lbl.setText("Just A Rather Very Intelligent System")
+            else:
+                self._sub_lbl.setText("Personal AI Assistant")
+        # "— SARANA" suffix always fixed to the product name, matching
+        # _apply_name_update's own existing convention (only the
+        # persona-facing `display` half changes).
+        self.setWindowTitle(f"{display} — SARANA")
+        self._title_lbl.setText(display)
+        self.hud._assistant_name = display
+        self.hud.update()
+
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
         try:
@@ -3440,6 +3477,9 @@ class JarvisUI:
 
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
+
+    def set_jarvis_mode(self, active: bool):
+        self._win._jarvis_mode_sig.emit(bool(active))
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)

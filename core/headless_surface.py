@@ -55,6 +55,14 @@ class HeadlessSurface:
     def set_state(self, state: str) -> None:
         print(f"[Headless] state={state}")
 
+    def set_jarvis_mode(self, active: bool) -> None:
+        # No HUD to update headlessly (web/server sessions get their
+        # identity switch from the dashboard's jarvis_mode_changed
+        # broadcast -> the React frontend instead — see App.jsx) — this
+        # exists purely so JarvisLive can call self.ui.set_jarvis_mode()
+        # unconditionally without needing to know which surface it's on.
+        print(f"[Headless] jarvis_mode={active}")
+
     def show_content(self, title: str, text: str) -> None:
         print(f"[Headless] content: {title}\n{text}")
 

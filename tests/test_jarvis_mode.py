@@ -26,6 +26,7 @@ import main as main_module
 from actions.computer_control import (
     VERIFY_TAG_SUCCESS, VERIFY_TAG_AMBIGUOUS, VERIFY_TAG_NO_CHANGE, TYPE_TAG_FAILURE,
 )
+from actions import result_envelope as _envelope
 
 
 class _RecordingDashboard:
@@ -101,6 +102,24 @@ def test_jarvis_mode_off_clears_flag_broadcasts_and_returns_directive() -> None:
         assert jarvis._dashboard.jarvis_mode_calls == [False]
     asyncio.run(_run())
     print("test_jarvis_mode_off_clears_flag_broadcasts_and_returns_directive: PASS")
+
+
+def test_jarvis_mode_on_off_updates_the_desktop_ui_identity() -> None:
+    # Phase 6 — the desktop HUD gap: previously self.ui had NO call
+    # reflecting JARVIS mode at all (confirmed by inspection: ui.py had
+    # zero references to jarvis_mode before this). Verifies JarvisLive
+    # actually calls self.ui.set_jarvis_mode(...) with the right value on
+    # both transitions, not just that the tool result string looks right.
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        with patch.object(jarvis.ui, "set_jarvis_mode") as m:
+            await jarvis._execute_tool(_fc("jarvis_mode", action="on"))
+            m.assert_called_once_with(True)
+            m.reset_mock()
+            await jarvis._execute_tool(_fc("jarvis_mode", action="off"))
+            m.assert_called_once_with(False)
+    asyncio.run(_run())
+    print("test_jarvis_mode_on_off_updates_the_desktop_ui_identity: PASS")
 
 
 def test_jarvis_mode_invalid_action_leaves_state_unchanged() -> None:
@@ -183,7 +202,7 @@ def test_build_config_jarvis_mode_desktop_section_covers_goal_reasoning_and_devi
 # ── computer_control: new JARVIS-only actions require jarvis_mode ─────────
 
 _NEW_ACTIONS = [
-    "observe", "verify", "list_ui_elements", "ui_find", "ui_click", "ui_type",
+    "accomplish", "observe", "verify", "list_ui_elements", "ui_find", "ui_click", "ui_type",
     "get_active_window_title",
 ]
 
@@ -444,6 +463,104 @@ def test_ui_click_success_never_reads_computer_control_args_as_desktop_only_bloc
     print("test_ui_click_success_never_reads_computer_control_args_as_desktop_only_block: PASS")
 
 
+# ── accomplish(): unified Result Envelope escalation wiring ────────────
+#   (accomplish shares the SAME escalation branch/mechanism as ui_click/
+#   ui_type — see main.py's _cc_ESCALATABLE_TAGS, which combines the
+#   legacy per-action tags with accomplish's unified
+#   [INCONCLUSIVE]/[UI_AMBIGUOUS] envelope tags.)
+
+def test_accomplish_verified_success_does_not_escalate_to_vision() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        jarvis._jarvis_mode = True
+        fake_result = f"[{_envelope.STATUS_VERIFIED_SUCCESS}] acted on 'Saroj' — matched."
+        with patch.object(main_module, "computer_control", lambda **kw: fake_result):
+            fr = await jarvis._execute_tool(
+                _fc("computer_control", action="accomplish", goal="open Saroj's chat", target="Saroj")
+            )
+        assert fr.response["result"] == fake_result
+        assert jarvis._pending_vision is None
+        assert jarvis._vision_busy is False
+    asyncio.run(_run())
+    print("test_accomplish_verified_success_does_not_escalate_to_vision: PASS")
+
+
+def test_accomplish_inconclusive_escalates_to_vision_exactly_once() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        jarvis._jarvis_mode = True
+        fake_result = f"[{_envelope.STATUS_INCONCLUSIVE}] could not find 'Saroj'."
+        with patch.object(main_module, "computer_control", lambda **kw: fake_result), \
+             patch.object(main_module, "_capture_screen", _fake_capture_screen), \
+             patch.object(main_module, "get_active_window_title", lambda: "WhatsApp"):
+            fr = await jarvis._execute_tool(
+                _fc("computer_control", action="accomplish", goal="open Saroj's chat", target="Saroj")
+            )
+        result = fr.response["result"]
+        assert fake_result in result
+        assert "[VISION_ACTIVE]" in result
+        assert jarvis._pending_vision is not None
+        img_b, mime_t, question, angle = jarvis._pending_vision
+        assert angle == "screen"
+        assert "Saroj" in question  # falls back to target/goal when description is absent
+    asyncio.run(_run())
+    print("test_accomplish_inconclusive_escalates_to_vision_exactly_once: PASS")
+
+
+def test_accomplish_ui_ambiguous_escalates_to_vision() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        jarvis._jarvis_mode = True
+        fake_result = f"[{_envelope.STATUS_UI_AMBIGUOUS}] 2 distinct elements match."
+        with patch.object(main_module, "computer_control", lambda **kw: fake_result), \
+             patch.object(main_module, "_capture_screen", _fake_capture_screen), \
+             patch.object(main_module, "get_active_window_title", lambda: "File Explorer"):
+            fr = await jarvis._execute_tool(
+                _fc("computer_control", action="accomplish", goal="open Downloads", target="Downloads")
+            )
+        assert "[VISION_ACTIVE]" in fr.response["result"]
+        assert jarvis._pending_vision is not None
+    asyncio.run(_run())
+    print("test_accomplish_ui_ambiguous_escalates_to_vision: PASS")
+
+
+def test_accomplish_confirmation_required_never_escalates_to_vision() -> None:
+    # The safety-critical case: a confirmation gate must NEVER be
+    # bypassed by "let's just look and decide" — it requires an actual
+    # user yes, not a vision guess. Confirmed both by result_envelope's
+    # own ESCALATABLE_STATUSES (unit-tested separately) and here, at the
+    # actual dispatch wiring level.
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        jarvis._jarvis_mode = True
+        fake_result = f"[{_envelope.STATUS_CONFIRMATION_REQUIRED}] requested: delete this file."
+        with patch.object(main_module, "computer_control", lambda **kw: fake_result), \
+             patch.object(main_module, "_capture_screen", _fake_capture_screen), \
+             patch.object(main_module, "get_active_window_title", lambda: "File Explorer"):
+            fr = await jarvis._execute_tool(
+                _fc("computer_control", action="accomplish", goal="delete this file", confirmed=False)
+            )
+        assert fr.response["result"] == fake_result
+        assert "[VISION_ACTIVE]" not in fr.response["result"]
+        assert jarvis._pending_vision is None
+        assert jarvis._vision_busy is False
+    asyncio.run(_run())
+    print("test_accomplish_confirmation_required_never_escalates_to_vision: PASS")
+
+
+def test_accomplish_blocked_without_jarvis_mode() -> None:
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        assert jarvis._jarvis_mode is False
+        fr = await jarvis._execute_tool(
+            _fc("computer_control", action="accomplish", goal="open Word")
+        )
+        assert "[JARVIS_MODE_REQUIRED]" in fr.response["result"]
+        assert jarvis._pending_vision is None
+    asyncio.run(_run())
+    print("test_accomplish_blocked_without_jarvis_mode: PASS")
+
+
 # ── reconnect reset (source-level — a full reconnect isn't easily driven
 # in a unit test; the reset block itself is a fixed, reviewable statement) ─
 
@@ -460,6 +577,7 @@ if __name__ == "__main__":
     test_computer_control_is_still_desktop_only()
     test_jarvis_mode_on_sets_flag_broadcasts_and_returns_directive()
     test_jarvis_mode_off_clears_flag_broadcasts_and_returns_directive()
+    test_jarvis_mode_on_off_updates_the_desktop_ui_identity()
     test_jarvis_mode_invalid_action_leaves_state_unchanged()
     test_jarvis_mode_on_message_differs_between_desktop_and_web()
     test_build_config_includes_jarvis_mode_block_off_by_default()
@@ -479,5 +597,10 @@ if __name__ == "__main__":
     test_ui_type_failure_escalates_to_vision()
     test_ui_click_escalation_respects_shared_vision_busy_guard()
     test_ui_click_success_never_reads_computer_control_args_as_desktop_only_block()
+    test_accomplish_verified_success_does_not_escalate_to_vision()
+    test_accomplish_inconclusive_escalates_to_vision_exactly_once()
+    test_accomplish_ui_ambiguous_escalates_to_vision()
+    test_accomplish_confirmation_required_never_escalates_to_vision()
+    test_accomplish_blocked_without_jarvis_mode()
     test_reconnect_reset_block_resets_jarvis_mode()
     print("\nAll JARVIS mode tests passed.")

@@ -15,6 +15,8 @@ import time
 import random
 from pathlib import Path
 
+from actions import result_envelope as _envelope
+
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
@@ -747,6 +749,27 @@ def _snapshot(ctrl) -> dict:
     }
 
 
+def _settle_poll(read_fn, max_reads: int = 4, interval: float = 0.1):
+    """Generic settle-detection: calls read_fn() repeatedly (bounded),
+    stopping as soon as two CONSECUTIVE reads agree, instead of a fixed
+    time.sleep(N) before every post-action verification read. Same idea
+    as a fixed sleep (give a UI transition a moment to actually finish)
+    but adaptive — returns as soon as things look stable rather than
+    always waiting the full duration, and never exceeds
+    max_reads * interval seconds either way, so this stays exactly as
+    bounded as the fixed sleep it replaces. `read_fn` must be CHEAP (a
+    window-title/rect read, never a full tree walk) — this is called in
+    a tight loop."""
+    prev = None
+    for _ in range(max_reads):
+        cur = read_fn()
+        if prev is not None and cur == prev:
+            return cur
+        prev = cur
+        time.sleep(interval)
+    return prev
+
+
 def _classify_click_result(description: str, before: dict, after: dict) -> tuple[str, str]:
     """Pure classifier — no live UI calls, fully unit-testable with plain
     dicts shaped like _snapshot()'s output (see tests/test_computer_control.py).
@@ -817,11 +840,11 @@ def _ui_click_by_description(description: str, control_type: str | None = None) 
         ctrl.click_input()
     except Exception as e:
         return f"Found '{description}' but click failed: {e}"
-    # Brief, bounded settle so a UI transition (a pane changing, a dialog
-    # appearing) has a moment to actually happen before the check below —
-    # matches this file's existing convention for post-action pauses
-    # (_focus_window() etc.), not a new pattern.
-    time.sleep(0.3)
+    # Bounded settle-poll (not a fixed sleep) so a UI transition (a pane
+    # changing, a dialog appearing) has a moment to actually finish before
+    # the check below — stops early once the active window title is
+    # stable across two reads, capped at 4×0.1s regardless.
+    _settle_poll(get_active_window_title)
     after = _snapshot(ctrl)
     tag, reason = _classify_click_result(description, before, after)
 
@@ -935,7 +958,7 @@ def _ui_type_by_description(description: str, text: str, control_type: str | Non
             pyautogui.typewrite(text, interval=0.03)
     except Exception as e:
         return f"Found '{description}' but type failed: {e}"
-    time.sleep(0.2)
+    _settle_poll(get_active_window_title)
     note = _new_window_note(before, _top_level_window_titles())
     after_val = _read_control_value(ctrl)
     tag, reason = _classify_type_result(text, before_val, after_val)
@@ -948,6 +971,198 @@ def _ui_type_by_description(description: str, text: str, control_type: str | Non
         f"Typed (UI Automation) into '{description}': {preview}. "
         f"{tag} — {reason}{note}"
     )
+
+
+# ── JARVIS Mode: accomplish() — the universal goal-oriented entry point ──
+#
+# Upgrades JARVIS from "Gemini picks a mechanism (ui_find vs ui_click vs
+# coordinates) every step" to "Gemini states a GOAL; this function picks
+# the mechanism." See the Universal JARVIS Computer Control Architecture
+# design: goal-mapped operations (sleep, volume, Bluetooth radio — a
+# small, enumerable list) stay individually-named Tier 1/2 actions
+# because Gemini choosing between THOSE is genuine goal reasoning;
+# mechanism-shaped operations ("make this app show a state") are NOT
+# enumerable, which is why they collapse behind this ONE action instead
+# of being exposed as a menu of primitives to re-decide between per step.
+#
+# Deliberately NOT a second reasoning loop — every step is a fixed,
+# bounded Python sequence over the SAME primitives ui_click/ui_type
+# already use. No LLM call happens inside this function.
+
+def _expected_state_recheck(
+    search_term: str, control_type: str | None, expected_state: str | None
+) -> tuple[bool | None, str]:
+    """Bounded, targeted post-action re-check for accomplish() — reuses
+    the SAME _ui_find() tree walk any accomplish() call already pays for
+    (never a SECOND full-tree rescan on top of it), just called again
+    AFTER acting to see if the target now resolves MORE precisely (an
+    EXACT match, where before it was only a startswith/substring match)
+    — a real, live-observed signal: a real WhatsApp conversation header
+    shows the contact's name as an EXACT match ('Saroj'), while the
+    sidebar list item is a longer compound string ('Saroj Thursday'), so
+    a click that actually opened the conversation measurably changes
+    WHICH match tier resolves. Only meaningful when `search_term` is a
+    real, short entity name (i.e. accomplish()'s `target` was actually
+    given — never called against raw `goal` prose, which can't match
+    real UI text this way). Returns (matched, detail); matched=None
+    means "couldn't tell", never treated as a false negative."""
+    needle = (search_term or "").strip()
+    if not needle:
+        return None, ""
+    status, ctrl, note = _ui_find(needle, control_type=control_type)
+    if status == "found" and "exact match" in note:
+        detail = f"'{needle}' now resolves as an exact match ({note})"
+        if expected_state:
+            detail += f" — matches the expected state: {expected_state}"
+        return True, detail
+    return None, note
+
+
+def accomplish(
+    goal: str,
+    target: str | None = None,
+    expected_state: str | None = None,
+    control_type: str | None = None,
+    constraints: str | None = None,
+    text: str | None = None,
+    confirmed: bool = False,
+) -> str:
+    """The single goal-oriented entry point for 'make this application
+    show some state' requests. See this section's own module comment.
+
+    goal           : (required) the outcome in the user's own terms —
+                      used as the search term when `target` is omitted,
+                      and checked by the risk classifier.
+    target         : the specific named thing to find/act on (a contact,
+                      button, device, file) — when given, this is what's
+                      actually searched for (more precise than parsing
+                      `goal` as prose) and is what the post-action
+                      exact-match recheck uses.
+    expected_state : how to recognize success, in the user's own words —
+                      informs evidence phrasing; the mechanical signal
+                      itself is still the target's own state/match-tier
+                      change (_expected_state_recheck), not a full parse
+                      of this prose — a deliberate, honest scope limit,
+                      not a claim of general natural-language state
+                      verification.
+    control_type   : optional UI Automation control-type filter, same
+                      parameter ui_find/ui_click already accept.
+    constraints    : optional extra context; if it names a recognized
+                      control type and control_type wasn't given
+                      separately, used as an implicit control_type.
+    text           : if given, TYPES this into the resolved target
+                      instead of clicking it.
+    confirmed      : must be True for goals the risk classifier flags as
+                      consequential (send/delete/purchase/security/
+                      disconnect) — see result_envelope.is_consequential.
+    """
+    goal = (goal or "").strip()
+    target = (target or "").strip()
+    if not goal and not target:
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "no goal or target given")
+
+    if _envelope.is_consequential(goal=goal) and not confirmed:
+        return _envelope.envelope(
+            _envelope.STATUS_CONFIRMATION_REQUIRED,
+            f"requested: {goal or target}",
+        )
+
+    effective_control_type = (control_type or "").strip().lower() or None
+    if not effective_control_type and constraints:
+        for token in re.findall(r"[a-zA-Z]+", constraints.lower()):
+            if token in _LIST_UI_INTERESTING_TYPES:
+                effective_control_type = token
+                break
+
+    search_term = target or goal
+    status, ctrl, note = _ui_find(search_term, control_type=effective_control_type)
+
+    if status == "unavailable":
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, note)
+    if status == "ambiguous":
+        return _envelope.envelope(_envelope.STATUS_UI_AMBIGUOUS, f"'{search_term}': {note}")
+    if status == "not_found" or ctrl is None:
+        return _envelope.envelope(
+            _envelope.STATUS_INCONCLUSIVE,
+            f"could not find '{search_term}' in the active window — {note}",
+        )
+
+    # Pre-action re-check (the UFO2-inspired idea from the architecture
+    # research): confirm the resolved target is STILL there and enabled
+    # immediately before acting — cheap (one control, not a tree walk),
+    # catches a target that went stale in the brief window between
+    # resolution and action.
+    try:
+        if hasattr(ctrl, "is_enabled") and not ctrl.is_enabled():
+            return _envelope.envelope(
+                _envelope.STATUS_INCONCLUSIVE,
+                f"'{search_term}' was found but is disabled — cannot act on it",
+            )
+    except Exception:
+        return _envelope.envelope(
+            _envelope.STATUS_INCONCLUSIVE,
+            f"'{search_term}' became unavailable just before acting",
+        )
+
+    before = _snapshot(ctrl)
+    before_val = _read_control_value(ctrl) if text else None
+    try:
+        if text:
+            ctrl.click_input()
+            time.sleep(0.1)
+            try:
+                ctrl.set_text(text)
+            except Exception:
+                _require_pyautogui()
+                pyautogui.typewrite(text, interval=0.03)
+        else:
+            ctrl.click_input()
+    except Exception as e:
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"the action itself raised: {e}")
+
+    _settle_poll(get_active_window_title)
+    after = _snapshot(ctrl)
+
+    if text:
+        after_val = _read_control_value(ctrl)
+        tag, reason = _classify_type_result(text, before_val, after_val)
+        # Discard immediately — never persisted/logged/echoed (privacy:
+        # typed content must never become remembered activity history).
+        before_val = after_val = None
+        tag_map = {
+            TYPE_TAG_SUCCESS:   _envelope.STATUS_VERIFIED_SUCCESS,
+            TYPE_TAG_FAILURE:   _envelope.STATUS_VERIFIED_FAILURE,
+            TYPE_TAG_AMBIGUOUS: _envelope.STATUS_INCONCLUSIVE,
+        }
+    else:
+        tag, reason = _classify_click_result(search_term, before, after)
+        tag_map = {
+            VERIFY_TAG_SUCCESS:   _envelope.STATUS_VERIFIED_SUCCESS,
+            VERIFY_TAG_FAILURE:   _envelope.STATUS_VERIFIED_FAILURE,
+            # A dialog appearing is genuinely uncertain (might be the
+            # intended target, might be an unrelated interception) — not
+            # treated as a target ambiguity, which means something else.
+            VERIFY_TAG_AMBIGUOUS: _envelope.STATUS_INCONCLUSIVE,
+            VERIFY_TAG_NO_CHANGE: _envelope.STATUS_INCONCLUSIVE,
+        }
+
+    new_status = tag_map.get(tag, _envelope.STATUS_INCONCLUSIVE)
+
+    # Targeted expected_state check — only when local signals didn't
+    # already conclude, and only when `target` was explicitly given (a
+    # real entity name a match-tier check can be meaningful against —
+    # raw `goal` prose can't be, see _expected_state_recheck's docstring).
+    if new_status == _envelope.STATUS_INCONCLUSIVE and target and not text:
+        matched, detail = _expected_state_recheck(target, effective_control_type, expected_state)
+        if matched is True:
+            new_status = _envelope.STATUS_VERIFIED_SUCCESS
+            reason = detail
+
+    action_word = "typed into" if text else "acted on"
+    evidence = f"{action_word} '{search_term}' — {reason}"
+    if expected_state and new_status != _envelope.STATUS_VERIFIED_SUCCESS:
+        evidence += f" (expected: {expected_state})"
+    return _envelope.envelope(new_status, evidence)
 
 
 # ── JARVIS Mode: general-purpose UI discovery ─────────────────────────────
@@ -1155,6 +1370,23 @@ def computer_control(
 
       JARVIS Mode only (gated by main.py's _execute_tool(), not here —
       this module has no notion of JARVIS mode itself):
+      accomplish    — THE PREFERRED action for "make this application show
+                       some state" goals. Takes goal (required),
+                       target/expected_state/control_type/constraints/text
+                       (all optional), confirmed (required=true for
+                       consequential goals). Internally does discovery +
+                       ambiguity-aware targeting + a pre-action re-check +
+                       the real click/type + targeted verification — ONE
+                       call, not a per-step sequence of ui_find/ui_click/
+                       ui_type. Always returns a Result Envelope
+                       ([VERIFIED_SUCCESS]/[VERIFIED_FAILURE]/
+                       [INCONCLUSIVE]/[UI_AMBIGUOUS]/
+                       [CONFIRMATION_REQUIRED] — see actions/
+                       result_envelope.py) — never a bare "Clicked"
+                       string. The lower-level ui_find/ui_click/ui_type/
+                       list_ui_elements actions below remain available
+                       for cases that genuinely need step-by-step
+                       reasoning; they are not removed or deprecated.
       get_active_window_title — title of the currently foreground window
       list_ui_elements — GENERAL discovery: a bounded, deduplicated text
                        list of every interactive control (type + name +
@@ -1275,6 +1507,17 @@ def computer_control(
         if action == "get_active_window_title":
             title = get_active_window_title()
             return title if title else "(could not determine the active window title)"
+
+        if action == "accomplish":
+            return accomplish(
+                goal=params.get("goal", ""),
+                target=params.get("target"),
+                expected_state=params.get("expected_state"),
+                control_type=params.get("control_type"),
+                constraints=params.get("constraints"),
+                text=params.get("text"),
+                confirmed=_envelope.is_confirmed(params),
+            )
 
         if action == "list_ui_elements":
             return list_ui_elements(params.get("control_type"))
