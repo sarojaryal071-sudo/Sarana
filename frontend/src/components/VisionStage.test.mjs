@@ -112,13 +112,17 @@ test("flip calls flipCameraFacing() and re-attaches the preview on success, neve
 
 // ── App.jsx wiring: camera and screen both replace the orb, never sit beside it ─
 
-test("App.jsx mounts exactly ONE of <VisionStage> or <Orb> at a time (a single conditional slot)", () => {
+test("App.jsx mounts exactly ONE of <VisionStage> or <SaranaFace> at a time (a single conditional slot)", () => {
+  // Stage 1 (see core/prompt.txt): the normal-mode sibling of VisionStage
+  // in this conditional is now SaranaFace, not Orb directly — see
+  // SaranaFace.test.mjs for the "Orb.jsx still exists, untouched, for a
+  // future JARVIS mode" checks.
   const usages = appSrc.match(/<VisionStage\b/g) || [];
   assert.equal(usages.length, 1, "VisionStage must be rendered from exactly one place in App.jsx");
   assert.match(
     appSrc,
-    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,400}<Orb/,
-    "VisionStage and Orb must be the two branches of the SAME conditional, not two independently-rendered elements",
+    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,400}<SaranaFace/,
+    "VisionStage and SaranaFace must be the two branches of the SAME conditional, not two independently-rendered elements",
   );
 });
 

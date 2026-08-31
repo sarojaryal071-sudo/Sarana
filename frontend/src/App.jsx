@@ -15,7 +15,7 @@ import { stopCameraVision } from "./lib/cameraVision";
 import { stopScreenVision } from "./lib/screenVision";
 import LoginScreen, { readStoredSession, clearStoredToken } from "./components/LoginScreen";
 import Header from "./components/Header";
-import Orb from "./components/Orb";
+import SaranaFace from "./components/SaranaFace";
 import SidePanel from "./components/SidePanel";
 import ContentPanel from "./components/ContentPanel";
 import Controls from "./components/Controls";
@@ -78,8 +78,8 @@ export default function App() {
   // control (see handleInterrupt) — no separate Stop button exists for
   // this. Deliberately separate state from `pendingImage` (Controls.jsx)
   // — an entirely different feature. While non-null, VisionStage renders
-  // in place of Orb (see the render below) — the two are never both
-  // mounted at once.
+  // in place of SaranaFace (see the render below) — the two are never
+  // both mounted at once.
   const [visionRequest, setVisionRequest] = useState(null);
 
   // ── GET /api/session — unauthenticated, works before any login ─────────
@@ -697,10 +697,15 @@ export default function App() {
         </div>
         <div className="panel-center">
           {/* Web visual context (camera or screen): the live preview
-              replaces the animated orb in its own slot — never a second,
-              separate floating box (see VisionStage.jsx, which renders
-              into the identical "orb-stage" area Orb.jsx itself uses).
-              Exactly one of the two is ever mounted. */}
+              replaces the normal-mode face in its own slot — never a
+              second, separate floating box (see VisionStage.jsx, which
+              renders into the identical "orb-stage" area SaranaFace itself
+              uses). Exactly one of the two is ever mounted.
+              Stage 1 (see core/prompt.txt): SaranaFace — a minimal
+              expressive AI face — is SARANA's normal-mode visual identity
+              now. Orb.jsx still exists untouched, reserved for a future
+              JARVIS mode (not wired up yet — see SaranaFace.jsx's own
+              header note on the intended orb-stage/mode relationship). */}
           {authenticated && visionRequest ? (
             <VisionStage
               source={visionRequest.source}
@@ -710,7 +715,7 @@ export default function App() {
               onStopped={handleVisionStopped}
             />
           ) : (
-            <Orb status={displayStatus} assistantName={state.assistantName} />
+            <SaranaFace status={displayStatus} assistantName={state.assistantName} />
           )}
           <ContentPanel content={state.content} onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })} />
           <Controls

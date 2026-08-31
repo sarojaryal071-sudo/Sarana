@@ -241,6 +241,250 @@ input {
   display: block;
 }
 
+/* ── SaranaFace — minimal expressive AI face (normal SARANA mode) ────────
+   Renders into the SAME .orb-stage slot Orb.jsx's canvas normally
+   occupies (see components/SaranaFace.jsx's own header note) — this is
+   the visual centerpiece for normal mode now; Orb.jsx/its CSS above is
+   left completely untouched, reserved for a future JARVIS mode.
+   All sizing is relative (clamp()/vmin) so the face scales with the
+   viewport instead of a hardcoded canvas resolution — no ResizeObserver
+   needed. vmin (the smaller of viewport width/height) is used rather than
+   vw alone so the face stays well-proportioned on both a tall narrow phone
+   and a short wide desktop window, not just a wide one. */
+.sarana-face {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(18px, 5vmin, 46px);
+  animation: face-breathe 6s ease-in-out infinite;
+}
+
+.face-eyes {
+  display: flex;
+  align-items: center;
+  gap: clamp(36px, 10vmin, 110px);
+}
+
+.face-eye {
+  display: block;
+  width: clamp(30px, 7vmin, 68px);
+  height: clamp(40px, 9.5vmin, 92px);
+  border-radius: 999px;
+  background: var(--pri);
+  box-shadow: 0 0 26px 4px var(--pri-ghost), 0 0 8px 0 var(--pri);
+  transform-origin: center;
+  transition: height 340ms ease, transform 340ms ease, background 340ms ease,
+    border-radius 340ms ease, opacity 340ms ease;
+}
+
+/* Blinking: both eyes collapse to a thin line briefly — a real timer-driven
+   toggle (see SaranaFace.jsx), not a fixed CSS `infinite` loop, so it never
+   reads as a metronome. !important only overrides the per-expression eye
+   height rules below for the instant of the blink itself. */
+.sarana-face-blink .face-eye {
+  height: 4px !important;
+  border-radius: 4px;
+}
+
+.face-mouth {
+  display: block;
+  width: clamp(58px, 15vmin, 140px);
+  height: clamp(10px, 2.6vmin, 24px);
+  border-radius: 0 0 999px 999px;
+  border-bottom: clamp(3px, 0.9vmin, 6px) solid var(--pri);
+  transition: width 380ms ease, height 380ms ease, border-radius 380ms ease,
+    border-color 380ms ease, transform 380ms ease, background 380ms ease,
+    opacity 380ms ease;
+}
+
+/* neutral — calm, relaxed: default eye/mouth values above already ARE
+   neutral, this rule just makes that explicit/overridable on its own. */
+[data-expression="neutral"] .face-mouth {
+  height: clamp(4px, 1vmin, 8px);
+  border-radius: 6px;
+  border-bottom-width: clamp(3px, 0.7vmin, 4px);
+}
+
+/* listening — narrower, attentive eyes; a slightly more open mouth line */
+[data-expression="listening"] .face-eye {
+  height: clamp(34px, 8vmin, 78px);
+  transform: scaleX(0.92);
+}
+[data-expression="listening"] .face-mouth {
+  height: clamp(7px, 1.6vmin, 14px);
+  border-radius: 0 0 40% 40%;
+}
+
+/* thinking — asymmetric focus (one eye narrows/lifts, the other settles),
+   mouth becomes a small pursed, softly pulsing dot rather than a line. */
+[data-expression="thinking"] .face-eye-left {
+  transform: translateY(-4px) rotate(-4deg);
+}
+[data-expression="thinking"] .face-eye-right {
+  transform: translateY(4px) rotate(6deg) scaleY(0.82);
+}
+[data-expression="thinking"] .face-mouth {
+  width: clamp(28px, 6vmin, 46px);
+  height: clamp(10px, 2.4vmin, 18px);
+  border-radius: 999px;
+  border-bottom: none;
+  background: var(--acc-2);
+  animation: face-think-pulse 2.4s ease-in-out infinite;
+}
+
+/* speaking — mouth animates with irregular timing/amplitude (see
+   face-speak below) so it never looks like a robotic open-close-open-close
+   loop; eyes stay put, alive rather than static. */
+[data-expression="speaking"] .face-mouth {
+  border-radius: 40%;
+  border-bottom: none;
+  background: var(--acc);
+  animation: face-speak 640ms ease-in-out infinite;
+}
+
+/* happy — softened, brighter crescent eyes and a fuller smile */
+[data-expression="happy"] .face-eye {
+  height: clamp(18px, 5vmin, 34px);
+  border-radius: 0 0 999px 999px;
+  background: var(--green);
+  box-shadow: 0 0 26px 4px var(--pri-ghost), 0 0 8px 0 var(--green);
+}
+[data-expression="happy"] .face-mouth {
+  height: clamp(18px, 5vmin, 34px);
+  border-bottom-width: clamp(4px, 1vmin, 7px);
+  border-color: var(--green);
+}
+
+/* concerned — eyes angled inward/down like lowered brows, a subtle frown */
+[data-expression="concerned"] .face-eye-left {
+  transform: rotate(10deg);
+}
+[data-expression="concerned"] .face-eye-right {
+  transform: rotate(-10deg);
+}
+[data-expression="concerned"] .face-mouth {
+  border-radius: 999px 999px 0 0;
+  border-bottom: none;
+  border-top: clamp(3px, 1vmin, 6px) solid var(--muted-c);
+  transform: translateY(6px);
+}
+
+/* sad — a gentle, deliberately UNexaggerated downward expression */
+[data-expression="sad"] .face-eye {
+  height: clamp(28px, 6.5vmin, 62px);
+  opacity: 0.85;
+}
+[data-expression="sad"] .face-eye-left {
+  transform: rotate(6deg);
+}
+[data-expression="sad"] .face-eye-right {
+  transform: rotate(-6deg);
+}
+[data-expression="sad"] .face-mouth {
+  width: clamp(34px, 8vmin, 64px);
+  border-radius: 999px 999px 0 0;
+  border-bottom: none;
+  border-top: clamp(2px, 0.7vmin, 4px) solid var(--text-dim);
+  transform: translateY(4px);
+}
+
+/* curious — a small, asymmetric eye/mouth shift, nothing exaggerated */
+[data-expression="curious"] .face-eye-right {
+  transform: translateY(-7px) scaleY(1.1);
+}
+[data-expression="curious"] .face-mouth {
+  width: clamp(24px, 5.5vmin, 42px);
+  border-radius: 999px;
+  border-bottom-width: clamp(3px, 0.8vmin, 5px);
+  transform: translateX(8px);
+}
+
+/* confused — small asymmetric wobble across both eyes and the mouth */
+[data-expression="confused"] .face-eye-left {
+  transform: rotate(-8deg) translateY(3px);
+}
+[data-expression="confused"] .face-eye-right {
+  transform: rotate(10deg) translateY(-3px);
+}
+[data-expression="confused"] .face-mouth {
+  width: clamp(28px, 6.5vmin, 50px);
+  border-radius: 8px;
+  height: clamp(4px, 1vmin, 8px);
+  transform: rotate(-4deg);
+}
+
+/* reassuring — soft, steady eyes and a gentle, calm smile */
+[data-expression="reassuring"] .face-eye {
+  opacity: 0.92;
+}
+[data-expression="reassuring"] .face-mouth {
+  height: clamp(14px, 4vmin, 28px);
+  border-bottom-width: clamp(4px, 1vmin, 6px);
+}
+
+.sarana-face-status {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+@keyframes face-breathe {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.015);
+  }
+}
+
+@keyframes face-speak {
+  0% {
+    height: clamp(8px, 2vmin, 18px);
+  }
+  18% {
+    height: clamp(26px, 6.5vmin, 58px);
+  }
+  37% {
+    height: clamp(14px, 3.5vmin, 32px);
+  }
+  55% {
+    height: clamp(32px, 8vmin, 72px);
+  }
+  78% {
+    height: clamp(12px, 3vmin, 26px);
+  }
+  100% {
+    height: clamp(8px, 2vmin, 18px);
+  }
+}
+
+@keyframes face-think-pulse {
+  0%, 100% {
+    opacity: 0.7;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sarana-face,
+  .face-eye,
+  .face-mouth {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
 /* ── content panel (dismissible) ───────────────────────────────────── */
 .content-panel {
   flex-shrink: 0;
