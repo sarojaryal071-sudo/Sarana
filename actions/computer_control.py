@@ -397,24 +397,79 @@ def get_active_window_title() -> str:
     return ""
 
 
-_UI_FIND_MAX_CANDIDATES = 400  # bound — never walk an unbounded control tree
+# Bounds the Python-side text-matching loop below, NOT the UIA fetch
+# itself — win.descendants() always walks and marshals the WHOLE subtree
+# before returning regardless of this cap (see its own module's
+# implementation; there is no cheap way to short-circuit that fetch from
+# here without scoping to a specific sub-container, which isn't generic
+# across arbitrary apps). Live-measured against a real, large WhatsApp
+# Desktop chat list (~24,800 total descendants): the fetch itself costs
+# several seconds no matter what; raised from an earlier, too-tight 400
+# to 2000 so a contact further down a long list is still reachable by
+# the matching loop — the incremental per-candidate cost is small
+# (sub-millisecond) relative to the fixed fetch cost either way.
+_UI_FIND_MAX_CANDIDATES = 2000
+
+
+def _pick_best_match(description: str, candidates, max_candidates: int = _UI_FIND_MAX_CANDIDATES):
+    """Pure matching logic, deliberately separated from _ui_find() below so
+    it's testable with plain fake objects (anything with a .window_text()
+    method) rather than a real pywinauto/UIA session — see
+    tests/test_computer_control.py.
+
+    Matching priority — fixed after a real, live-reproduced bug: a naive
+    "first substring match wins" scan can match an INCIDENTAL occurrence
+    of the needle buried inside unrelated text (e.g. a WhatsApp message
+    PREVIEW that happens to mention the contact's name mid-sentence,
+    appearing earlier in tree-walk order than the real contact's own
+    entry) instead of the actual target, silently clicking the wrong
+    thing. A real "this control IS the thing" label (a contact name, a
+    button caption) almost always STARTS WITH what was asked for; an
+    incidental mention never does — so a startswith match is always
+    preferred over a substring-anywhere match, and ties are broken by
+    preferring the SHORTEST matching name (closer to a precise label than
+    a long compound string that merely begins the same way)."""
+    needle = (description or "").strip().lower()
+    if not needle:
+        return None
+
+    best_startswith, best_startswith_len = None, None
+    best_substring, best_substring_len = None, None
+    for i, ctrl in enumerate(candidates):
+        if i >= max_candidates:
+            break
+        try:
+            name = (ctrl.window_text() or "").strip().lower()
+        except Exception:
+            continue
+        if not name:
+            continue
+        if needle == name:
+            return ctrl  # exact match — stop immediately, no ambiguity
+        if name.startswith(needle):
+            if best_startswith is None or len(name) < best_startswith_len:
+                best_startswith, best_startswith_len = ctrl, len(name)
+        elif needle in name:
+            if best_substring is None or len(name) < best_substring_len:
+                best_substring, best_substring_len = ctrl, len(name)
+    return best_startswith or best_substring
 
 
 def _ui_find(description: str):
     """Best-effort, BOUNDED search of the ACTIVE window's UI Automation
     tree (Windows only — see _PYWINAUTO above) for a control whose visible
-    text loosely matches `description`. Returns the matched pywinauto
-    control wrapper, or None — never raises, never falls back to a
-    coordinate guess itself (that's screen_find's job, a deliberately
-    separate/distinct tool action — see this tool's own declaration).
-    Only ever inspects the single foreground window, never the whole
-    desktop, and only a bounded number of its descendants, so a huge or
-    pathological control tree can't hang the tool call."""
+    text loosely matches `description`, using _pick_best_match()'s
+    priority order above. Returns the matched pywinauto control wrapper,
+    or None — never raises, never falls back to a coordinate guess itself
+    (that's screen_find's job, a deliberately separate/distinct tool
+    action — see this tool's own declaration). Only ever inspects the
+    single foreground window, never the whole desktop, and only a bounded
+    number of its descendants, so a huge or pathological control tree
+    can't hang the tool call."""
     if not _PYWINAUTO or _get_os() != "windows":
         return None
 
-    needle = (description or "").strip().lower()
-    if not needle:
+    if not (description or "").strip():
         return None
 
     hwnd = _foreground_hwnd()
@@ -435,21 +490,7 @@ def _ui_find(description: str):
         print(f"[ComputerControl] ⚠️ ui_find: could not enumerate controls ({e})")
         return None
 
-    best = None
-    for i, ctrl in enumerate(candidates):
-        if i >= _UI_FIND_MAX_CANDIDATES:
-            break
-        try:
-            name = (ctrl.window_text() or "").strip().lower()
-        except Exception:
-            continue
-        if not name:
-            continue
-        if needle == name:
-            return ctrl  # exact match — stop immediately, no ambiguity
-        if best is None and needle in name:
-            best = ctrl
-    return best
+    return _pick_best_match(description, candidates)
 
 
 def _ui_find_report(description: str) -> str:
@@ -464,17 +505,64 @@ def _ui_find_report(description: str) -> str:
         return f"Found (UI Automation): '{description}'"
 
 
+def _top_level_window_titles() -> set[str]:
+    """Cheap (~50ms live-measured — see this function's own call sites),
+    SHALLOW top-level window enumeration (not a deep descendants() walk).
+    Used only as a generic "did something unexpected pop up" signal
+    around a click — see _new_window_note() below for why this exists:
+    a real, live-reproduced bug where an unrelated modal error dialog
+    silently absorbed a click that was otherwise correctly targeted and
+    physically performed (found the right element, clicked the right
+    coordinate, click_input() raised no exception) — 'no exception' is
+    NOT sufficient evidence the click actually did what was intended."""
+    if not _PYWINAUTO:
+        return set()
+    try:
+        from pywinauto import Desktop
+        return {w.window_text() for w in Desktop(backend="uia").windows()}
+    except Exception:
+        return set()
+
+
+def _new_window_note(before: set[str], after: set[str]) -> str:
+    new_titles = after - before
+    if not new_titles:
+        return ""
+    listed = ", ".join(repr(t) for t in sorted(new_titles) if t.strip())
+    if not listed:
+        return ""
+    return (
+        f" NOTE: a new window appeared right after this click: {listed} — "
+        f"this may be an unrelated dialog that intercepted the click "
+        f"rather than the intended target; check it before assuming the "
+        f"expected result happened."
+    )
+
+
 def _ui_click_by_description(description: str) -> str:
     if not _PYWINAUTO or _get_os() != "windows":
         return "UI Automation is only available on Windows here — use screen_click instead."
     ctrl = _ui_find(description)
     if ctrl is None:
         return f"UI element not found via accessibility tree: '{description}' — try screen_click instead."
+    before = _top_level_window_titles()
     try:
         ctrl.click_input()
-        return f"Clicked (UI Automation): '{description}'"
     except Exception as e:
         return f"Found '{description}' but click failed: {e}"
+    # Brief, bounded settle so a UI transition (a pane changing, a dialog
+    # appearing) has a moment to actually happen before the check below —
+    # matches this file's existing convention for post-action pauses
+    # (_focus_window() etc.), not a new pattern.
+    time.sleep(0.3)
+    note = _new_window_note(before, _top_level_window_titles())
+    return (
+        f"Clicked (UI Automation): '{description}'. This confirms the "
+        f"click was physically performed at the right target — it does "
+        f"NOT by itself confirm the expected result happened. Call "
+        f"action='verify' to actually confirm it before telling the "
+        f"user it worked.{note}"
+    )
 
 
 def _ui_type_by_description(description: str, text: str) -> str:
@@ -483,6 +571,7 @@ def _ui_type_by_description(description: str, text: str) -> str:
     ctrl = _ui_find(description)
     if ctrl is None:
         return f"UI input not found via accessibility tree: '{description}' — try smart_type instead."
+    before = _top_level_window_titles()
     try:
         ctrl.click_input()
         time.sleep(0.1)
@@ -491,10 +580,12 @@ def _ui_type_by_description(description: str, text: str) -> str:
         except Exception:
             _require_pyautogui()
             pyautogui.typewrite(text, interval=0.03)
-        preview = text[:60] + ("…" if len(text) > 60 else "")
-        return f"Typed (UI Automation) into '{description}': {preview}"
     except Exception as e:
         return f"Found '{description}' but type failed: {e}"
+    time.sleep(0.2)
+    note = _new_window_note(before, _top_level_window_titles())
+    preview = text[:60] + ("…" if len(text) > 60 else "")
+    return f"Typed (UI Automation) into '{description}': {preview}{note}"
 
 
 def _screen_find(description: str) -> tuple[int, int] | None:
