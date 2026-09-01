@@ -984,6 +984,232 @@ class SaranaFaceCanvas(QWidget):
             p.fillRect(QRectF(wx0 + i * bw, wy + 20 - hgt, bw - 1, hgt), cl)
 
 
+# ── IdentityTransitionOverlay — "HUD rebuild" transition ────────────────
+# Desktop counterpart to frontend/src/components/IdentityTransition.jsx
+# (see that file's own header for the full design brief this answers: a
+# direct request for "not a plain cinematic transition... like in an AI
+# technological movie where the current UI goes through a fast rebuild of
+# another UI with moving neons and a cinematic building process"). Same
+# two-phase timeline, same durations, same visual techniques (scanline
+# sweeps, a flickering grid, a particle burst/converge, self-drawing
+# rings+spokes) reimplemented in QPainter since this file has no SVG/CSS
+# to lean on — drawArc() with a growing sweep angle gives an even more
+# direct "ring draws itself" effect here than CSS stroke-dashoffset does
+# on the web (a native arc sweep, not an approximation of one).
+#
+# Purely decorative, additive, and temporary: a plain QWidget shown as a
+# floating child of _hud_cam_stack for the ~1.4s the transition plays,
+# then hidden — it never touches HudCanvas or SaranaFaceCanvas, and
+# MainWindow's own _apply_jarvis_mode is the only thing that ever starts
+# it (see that method's own docstring).
+_IT_DECONSTRUCT_MS = 500
+_IT_REBUILD_MS = 900
+_IT_SPOKE_COUNT = 8
+_IT_SPOKE_DELAYS_MS = [0, 420, 460, 500, 540, 580, 620, 660]
+_IT_PARTICLE_COUNT = 10
+_IT_PARTICLE_R = 92
+_IT_RING_R1, _IT_RING_R2 = 62, 78
+_IT_SPOKE_INNER, _IT_SPOKE_OUTER = _IT_RING_R2 + 4, _IT_RING_R2 + 14
+# Opacity envelope at each of the CSS original's 7 keyframe stops (0, 15,
+# 30, 45, 60, 75, 100%) — matches index.css's own it-grid-glitch exactly.
+_IT_GLITCH_STEPS = [0.0, 0.5, 0.05, 0.4, 0.1, 0.3, 0.0]
+
+
+class IdentityTransitionOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.hide()
+
+        self._phase: str | None = None  # None | "deconstruct" | "rebuild"
+        self._phase_start = 0.0
+        self._target_jarvis = True
+        self._on_rebuild_start = None  # one-shot callback — see start()'s own docstring
+
+        self._tmr = QTimer(self)
+        self._tmr.timeout.connect(self._step)
+
+    def start(self, target_jarvis: bool, on_rebuild_start) -> None:
+        """Begins the transition. `on_rebuild_start` is called exactly
+        once, at the deconstruct->rebuild boundary — the same moment
+        App.jsx's own version actually swaps which component is mounted
+        (see IdentityTransition.jsx's own header) — so the real HudCanvas/
+        SaranaFaceCanvas swap happens mid-transition, not at the very
+        start or end of it."""
+        self._target_jarvis = target_jarvis
+        self._on_rebuild_start = on_rebuild_start
+        self._phase = "deconstruct"
+        self._phase_start = time.time()
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect())
+        self.raise_()
+        self.show()
+        if not self._tmr.isActive():
+            self._tmr.start(16)
+
+    def _step(self) -> None:
+        elapsed_ms = (time.time() - self._phase_start) * 1000
+        if self._phase == "deconstruct" and elapsed_ms >= _IT_DECONSTRUCT_MS:
+            self._phase = "rebuild"
+            self._phase_start = time.time()
+            cb, self._on_rebuild_start = self._on_rebuild_start, None
+            if cb:
+                cb()
+        elif self._phase == "rebuild" and elapsed_ms >= _IT_REBUILD_MS:
+            self._phase = None
+            self._tmr.stop()
+            self.hide()
+            return
+        self.update()
+
+    def paintEvent(self, _):
+        if self._phase is None:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        W, H = self.width(), self.height()
+        if W < 10 or H < 10:
+            return
+        elapsed_ms = (time.time() - self._phase_start) * 1000
+        scale = min(W, H) / 200 * 0.9
+        cx, cy = W / 2, H / 2
+        accent_hex = C.ACC if self._target_jarvis else _FACE_GLOW
+
+        if self._phase == "rebuild" and elapsed_ms > 600:
+            p.setOpacity(max(0.0, 1 - (elapsed_ms - 600) / 300))
+
+        if self._phase == "deconstruct":
+            t = min(1.0, elapsed_ms / _IT_DECONSTRUCT_MS)
+            self._paint_grid(p, cx, cy, scale, t)
+            self._paint_particles_burst(p, cx, cy, scale, accent_hex, elapsed_ms)
+            self._paint_scanline(p, W, H, elapsed_ms, 0, "down", accent_hex)
+            self._paint_scanline(p, W, H, elapsed_ms, 90, "down", accent_hex)
+        else:
+            self._paint_flash(p, cx, cy, scale, accent_hex, elapsed_ms)
+            self._paint_particles_converge(p, cx, cy, scale, accent_hex, elapsed_ms)
+            self._paint_scanline(p, W, H, elapsed_ms, 120, "up", accent_hex)
+            self._paint_scanline(p, W, H, elapsed_ms, 220, "up", accent_hex)
+            self._paint_rings(p, cx, cy, scale, accent_hex, elapsed_ms)
+            self._paint_spokes(p, cx, cy, scale, elapsed_ms)
+
+    # ── deconstruct-phase pieces ─────────────────────────────────────────
+
+    def _paint_grid(self, p, cx, cy, scale, t):
+        idx = min(len(_IT_GLITCH_STEPS) - 1, int(t * len(_IT_GLITCH_STEPS)))
+        alpha = _IT_GLITCH_STEPS[idx]
+        if alpha <= 0:
+            return
+        p.setPen(QPen(qcol(C.PRI, int(255 * alpha)), 1))
+        ox, oy = cx - 100 * scale, cy - 100 * scale
+        for g in range(25, 200, 25):
+            x = ox + g * scale
+            p.drawLine(QPointF(x, oy), QPointF(x, oy + 200 * scale))
+            y = oy + g * scale
+            p.drawLine(QPointF(ox, y), QPointF(ox + 200 * scale, y))
+
+    def _paint_particles_burst(self, p, cx, cy, scale, accent_hex, elapsed_ms):
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(_IT_PARTICLE_COUNT):
+            delay = 40 if i % 2 == 1 else 0  # matches :nth-child(odd) { animation-delay: 40ms }
+            t = max(0.0, min(1.0, (elapsed_ms - delay) / _IT_DECONSTRUCT_MS))
+            if elapsed_ms < delay:
+                continue
+            opacity = (t / 0.3) if t < 0.3 else max(0.0, 1 - (t - 0.3) / 0.7)
+            s = 0.4 + t * (2.2 - 0.4)
+            self._draw_particle(p, cx, cy, scale, i, accent_hex, opacity, s)
+
+    # ── rebuild-phase pieces ─────────────────────────────────────────────
+
+    def _paint_flash(self, p, cx, cy, scale, accent_hex, elapsed_ms):
+        t = elapsed_ms / 260
+        if t > 1:
+            return
+        opacity = (t / 0.4 * 0.55) if t < 0.4 else max(0.0, (1 - (t - 0.4) / 0.6) * 0.55)
+        s = 0.7 + t * (1.3 - 0.7)
+        r = 130 * scale * s
+        grad = QRadialGradient(cx, cy, max(1.0, r))
+        grad.setColorAt(0.0, qcol(C.PRI, int(255 * opacity)))
+        grad.setColorAt(0.35, qcol(accent_hex, int(255 * opacity * 0.7)))
+        grad.setColorAt(0.7, qcol(C.PRI, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(grad))
+        p.drawEllipse(QPointF(cx, cy), r, r)
+
+    def _paint_particles_converge(self, p, cx, cy, scale, accent_hex, elapsed_ms):
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(_IT_PARTICLE_COUNT):
+            delay = 60 + (140 if i % 2 == 0 else 0)  # matches :nth-child(even) { animation-delay: 140ms }
+            if elapsed_ms < delay:
+                continue
+            t = min(1.0, (elapsed_ms - delay) / 800)
+            opacity = (t / 0.4) if t < 0.4 else (1 - (t - 0.4) / 0.6 * 0.1)
+            s = 2.4 - t * (2.4 - 0.9)
+            self._draw_particle(p, cx, cy, scale, i, accent_hex, opacity, s)
+
+    def _paint_rings(self, p, cx, cy, scale, accent_hex, elapsed_ms):
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for radius, color_hex, delay in ((_IT_RING_R1, C.PRI, 150), (_IT_RING_R2, accent_hex, 260)):
+            if elapsed_ms < delay:
+                continue
+            t = min(1.0, (elapsed_ms - delay) / 650)
+            opacity = min(1.0, t / 0.1) * 0.9
+            rr = radius * scale
+            p.setPen(QPen(qcol(color_hex, int(255 * opacity)), max(1.0, 1.2 * scale)))
+            span = int(t * 360 * 16)
+            p.drawArc(QRectF(cx - rr, cy - rr, rr * 2, rr * 2), 90 * 16, -span)
+
+    def _paint_spokes(self, p, cx, cy, scale, elapsed_ms):
+        for i in range(_IT_SPOKE_COUNT):
+            delay = _IT_SPOKE_DELAYS_MS[i]
+            if elapsed_ms < delay:
+                continue
+            t = min(1.0, (elapsed_ms - delay) / 350)
+            opacity = t * 0.8
+            angle = (i / _IT_SPOKE_COUNT) * 2 * math.pi
+            inner, outer = _IT_SPOKE_INNER * scale, _IT_SPOKE_OUTER * scale
+            x1, y1 = cx + inner * math.cos(angle), cy + inner * math.sin(angle)
+            x2, y2 = cx + outer * math.cos(angle), cy + outer * math.sin(angle)
+            p.setPen(QPen(qcol(C.PRI, int(255 * opacity)), max(1.0, 1.6 * scale), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+    # ── shared ────────────────────────────────────────────────────────────
+
+    def _paint_scanline(self, p, W, H, elapsed_ms, delay_ms, direction, accent_hex):
+        duration_ms = 500 if direction == "down" else 700
+        t = (elapsed_ms - delay_ms) / duration_ms
+        if t < 0 or t > 1:
+            return
+        base_opacity = 0.9 if direction == "down" else 0.8
+        if t < 0.15:
+            opacity = base_opacity * (t / 0.15)
+        elif t > 0.85:
+            opacity = base_opacity * ((1 - t) / 0.15)
+        else:
+            opacity = base_opacity
+        y = ((t * 1.05 - 0.025) if direction == "down" else ((1 - t) * 1.05 - 0.025)) * H
+        grad = QLinearGradient(0, 0, W, 0)
+        grad.setColorAt(0.0, qcol(C.PRI, 0))
+        grad.setColorAt(0.3, qcol(C.PRI, int(255 * opacity)))
+        grad.setColorAt(0.5, qcol(accent_hex, int(255 * opacity)))
+        grad.setColorAt(0.7, qcol(C.PRI, int(255 * opacity)))
+        grad.setColorAt(1.0, qcol(C.PRI, 0))
+        p.fillRect(QRectF(0, y, W, 3), QBrush(grad))
+
+    def _draw_particle(self, p, cx, cy, scale, index, accent_hex, opacity, size_factor) -> None:
+        opacity = max(0.0, min(1.0, opacity))
+        if opacity <= 0:
+            return
+        angle = (index / _IT_PARTICLE_COUNT) * 2 * math.pi
+        r = _IT_PARTICLE_R * scale
+        px, py = cx + r * math.cos(angle), cy + r * math.sin(angle)
+        p.setBrush(QBrush(qcol(accent_hex, int(255 * opacity))))
+        dot_r = max(0.3, 1.6 * scale * size_factor)
+        p.drawEllipse(QPointF(px, py), dot_r, dot_r)
+
+
 class MetricBar(QWidget):
 
     def __init__(self, label: str, color: str = C.PRI, parent=None):
@@ -2350,6 +2576,12 @@ class MainWindow(QMainWindow):
         self._hud_cam_stack.addWidget(_cam_cont)
         self._hud_cam_stack.addWidget(self.sarana_face)
         self._hud_cam_stack.setCurrentIndex(2)
+
+        # "HUD rebuild" transition (see IdentityTransitionOverlay's own
+        # header) — a floating child of the stack itself so it can sit on
+        # top of whichever HUD widget is current without touching either
+        # one; hidden until _apply_jarvis_mode() calls .start() on it.
+        self._identity_transition = IdentityTransitionOverlay(self._hud_cam_stack)
 
         self._center_split = QSplitter(Qt.Orientation.Vertical)
         self._center_split.setStyleSheet(f"""
@@ -3797,7 +4029,15 @@ class MainWindow(QMainWindow):
         the camera is currently showing (_hud_cam_stack index 1),
         _jarvis_active is updated so _on_cam_stream restores the RIGHT
         identity once the camera stops, but the visible stack index
-        itself is left alone until then."""
+        itself is left alone until then.
+
+        The actual widget swap is no longer instant — it now plays
+        through IdentityTransitionOverlay's "HUD rebuild" animation (see
+        that class's own header), the desktop counterpart of the web
+        build's IdentityTransition.jsx. The real setCurrentIndex() call
+        happens via the overlay's on_rebuild_start callback, at the same
+        deconstruct->rebuild boundary the web version swaps its own
+        component at — not before the overlay starts, not after it ends."""
         base = self._assistant_name.upper()
         if active:
             display = "JARVIS"
@@ -3818,7 +4058,9 @@ class MainWindow(QMainWindow):
 
         self._jarvis_active = active
         if self._hud_cam_stack.currentIndex() != 1:  # camera isn't active — safe to switch now
-            self._hud_cam_stack.setCurrentIndex(0 if active else 2)
+            self._identity_transition.start(
+                active, lambda: self._hud_cam_stack.setCurrentIndex(0 if active else 2)
+            )
 
     def _apply_expression_override(self, expression: str, duration_seconds: float):
         """SARANA Face UI — desktop counterpart to the web frontend's
