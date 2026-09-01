@@ -1,6 +1,10 @@
-// src/lib/faceMesh.test.mjs — real unit tests for the pure procedural
-// mesh geometry (see faceMesh.js's own header note). No DOM, no
-// rendering — just the point/edge generation math.
+// src/lib/faceMesh.test.mjs — real unit tests for the face geometry (see
+// faceMesh.js's own header note: this is now baked data extracted from
+// Face Cloner's canonical face mesh, not procedurally-generated ellipse
+// math — the earlier procedural version's maxDist/maxPerNode
+// nearest-neighbor tests no longer apply and are replaced below with
+// tests against what a real triangulated mesh actually guarantees). No
+// DOM, no rendering — just the point/edge data.
 //
 // Run with:
 //   cd frontend && node --test src/lib/*.test.mjs
@@ -20,6 +24,16 @@ test("buildFacePoints returns a non-trivial set of points, each with a valid gro
     assert.ok(!ids.has(p.id), `duplicate point id: ${p.id}`);
     ids.add(p.id);
   }
+});
+
+test("returns the real dense Face Cloner-derived mesh, not the old sparse ellipse schematic", () => {
+  // The old procedural generator topped out around 70 points (a handful of
+  // ellipse arcs). This is baked from Face Cloner's actual 468-point
+  // canonical face mesh (+2 synthesized pupils) — asserting a much higher
+  // floor is the direct regression test for "the geometry actually
+  // changed", not just "some geometry exists".
+  const pts = buildFacePoints();
+  assert.ok(pts.length > 400, `expected the real ~470-point Face Cloner mesh, got only ${pts.length} points`);
 });
 
 test("every declared FACE_GROUPS entry actually has at least one point", () => {
@@ -65,31 +79,34 @@ test("buildFaceEdges never connects a point to itself and never duplicates an ed
   }
 });
 
-test("buildFaceEdges respects the maxDist cutoff — no edge spans further than requested", () => {
+test("buildFaceEdges resolves to the SAME point objects passed in, by identity", () => {
   const pts = buildFacePoints();
-  const maxDist = 25;
-  const edges = buildFaceEdges(pts, maxDist, 3);
+  const edges = buildFaceEdges(pts);
   for (const [a, b] of edges) {
-    const d = Math.hypot(a.x - b.x, a.y - b.y);
-    assert.ok(d < maxDist, `edge ${a.id}-${b.id} spans ${d}, exceeding maxDist ${maxDist}`);
+    assert.strictEqual(pts[a.id], a, "edge endpoint must be the exact same object as pts[id], not a copy");
+    assert.strictEqual(pts[b.id], b);
   }
 });
 
-test("buildFaceEdges respects the maxPerNode bound — no point ends up with far more edges than requested", () => {
+test("returns a real dense triangulation, not a sparse nearest-neighbor approximation", () => {
+  // The old generator connected each point to at most a handful of
+  // nearest neighbors (~1.5 edges/point). A real triangulated mesh runs
+  // much denser (Euler's formula for a disk-topology mesh puts it near
+  // 3 edges/point) — this is the geometry-density regression test.
   const pts = buildFacePoints();
-  const maxPerNode = 3;
-  const edges = buildFaceEdges(pts, 30, maxPerNode);
-  const degree = new Map();
+  const edges = buildFaceEdges(pts);
+  assert.ok(edges.length > 800, `expected a dense flowing wireframe topology, got only ${edges.length} edges for ${pts.length} points`);
+});
+
+test("every edge endpoint lies within FACE_VIEWBOX", () => {
+  const [vx, vy, vw, vh] = FACE_VIEWBOX.trim().split(/\s+/).map(Number);
+  const pts = buildFacePoints();
+  const edges = buildFaceEdges(pts);
   for (const [a, b] of edges) {
-    degree.set(a.id, (degree.get(a.id) || 0) + 1);
-    degree.set(b.id, (degree.get(b.id) || 0) + 1);
-  }
-  // A point can pick up extra edges from being chosen as someone ELSE's
-  // nearest neighbor even after it has already picked its own quota, so
-  // the true bound is roughly 2x, not maxPerNode itself — this test
-  // guards against genuinely unbounded growth, not the exact constant.
-  for (const [, count] of degree) {
-    assert.ok(count <= maxPerNode * 3, `a point ended up with ${count} edges — looks unbounded`);
+    for (const p of [a, b]) {
+      assert.ok(p.x >= vx && p.x <= vx + vw, `point ${p.id} x=${p.x} outside viewBox`);
+      assert.ok(p.y >= vy && p.y <= vy + vh, `point ${p.id} y=${p.y} outside viewBox`);
+    }
   }
 });
 
