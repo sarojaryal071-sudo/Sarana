@@ -923,6 +923,40 @@ class _SessionRegistry:
 
 _registry = _SessionRegistry()
 
+
+def open_media_url(url: str, browser: str | None = None) -> str:
+    """Public helper for other action modules (currently only
+    actions/youtube_video.py) that need to open/navigate to a URL inside
+    a REAL, TRACKED automation session — deliberately bypassing this
+    file's own "navigation is always native" default (see
+    browser_control()'s own comment on why THAT default exists for plain
+    web browsing: the user's real profile/logged-in accounts, no
+    automation window unless one is already needed).
+
+    Root cause this exists to fix (a real bug report, not a guess): a
+    module that instead shells out to the OS directly for every single
+    open (subprocess.Popen(["...", "start", url]), youtube_video.py's
+    former _open_url()) gets a BRAND NEW, completely untracked browser
+    window every single call — Python holds no reference to it at all —
+    so (1) "play another song" always opens a second/third/fourth window
+    instead of continuing in the same tab, and (2) 'close browser'
+    afterward truthfully has nothing it can find to close, since a plain
+    OS-level launch was never registered anywhere. Routing through
+    _registry.get()/sess.go_to() instead means every call after the
+    first reuses the SAME persistent Playwright session (real navigation
+    within the same tab, not a new window) and close/close_all can
+    actually act on it afterward, exactly like any other browser_control
+    session.
+    """
+    try:
+        sess = _registry.get(browser)
+        return sess.run(sess.go_to(url))
+    except concurrent.futures.TimeoutError:
+        return f"Opening '{url}' timed out (60s)."
+    except Exception as e:
+        return f"Could not open: {e}"
+
+
 def browser_control(
     parameters:    dict = None,
     response=None,

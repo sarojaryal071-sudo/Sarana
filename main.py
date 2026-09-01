@@ -526,7 +526,15 @@ TOOL_DECLARATIONS = [
         "name": "youtube_video",
         "description": (
             "Controls YouTube. Use for: playing videos, summarizing a video's content, "
-            "getting video info, or showing trending videos."
+            "getting video info, or showing trending videos. Reuses the SAME browser tab "
+            "across repeated play/search calls in one conversation — you never need to "
+            "close or reopen anything between them, just call this again with the new query. "
+            "If the user asks to play something but doesn't say what yet (e.g. 'open YouTube "
+            "and play my favorite song'), ask them what to play — then, the moment they "
+            "answer, call THIS SAME TOOL again with action='play' and their answer as the "
+            "query. Never hand a YouTube request off to web_search or any other tool once "
+            "it's started, even across a clarifying question — a YouTube request stays a "
+            "YouTube request until it's actually done."
         ),
         "parameters": {
             "type": "OBJECT",

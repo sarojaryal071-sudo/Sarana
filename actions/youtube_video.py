@@ -34,6 +34,7 @@ except ImportError:
     _TRANSCRIPT_OK = False
 
 from config import get_os, is_windows, is_mac, is_linux
+from actions.browser_control import open_media_url
 
 
 def _get_base_dir() -> Path:
@@ -61,17 +62,6 @@ def _get_api_key() -> str:
     with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)["gemini_api_key"]
 
-
-def _open_url(url: str) -> None:
-    try:
-        if is_mac():
-            subprocess.Popen(["open", url])
-        elif is_linux():
-            subprocess.Popen(["xdg-open", url])
-        else:
-            subprocess.Popen(["cmd", "/c", "start", "", url], shell=False)
-    except Exception as e:
-        print(f"[YouTube] ⚠️ open_url failed: {e}")
 
 def _scrape_first_video_url(query: str) -> str | None:
 
@@ -291,7 +281,13 @@ def _handle_play(parameters: dict, player) -> str:
 
     if video_url:
         print(f"[YouTube] ▶️ Opening: {video_url}")
-        _open_url(video_url)
+        # Real, TRACKED navigation (see open_media_url's own docstring
+        # for the bug this fixes) — reuses the SAME browser tab across
+        # repeated play/search calls in one conversation instead of
+        # spawning a brand new, untracked window every time, and means
+        # a later browser_control(action="close") can actually find and
+        # close it.
+        open_media_url(video_url)
         return f"Playing: {query}"
 
     print(f"[YouTube] ⚠️ Scrape failed, opening filtered search page")
@@ -300,7 +296,7 @@ def _handle_play(parameters: dict, player) -> str:
         f"?search_query={quote_plus(query)}"
         f"&sp={_YT_VIDEO_FILTER}"
     )
-    _open_url(fallback_url)
+    open_media_url(fallback_url)
     return f"Opened YouTube search for: {query} (manual selection required)"
 
 
