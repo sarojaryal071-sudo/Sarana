@@ -356,19 +356,21 @@ def _run_loop(cap, stop_event: threading.Event) -> None:
                 ring_up = _finger_up(right_hand, _RING_TIP, _RING_PIP)
                 pinky_up = _finger_up(right_hand, _PINKY_TIP, _PINKY_PIP)
 
-                # Target point: the pinch midpoint while pinching (feels
-                # like "grabbing" that exact point), the PALM CENTER
-                # otherwise. Cursor movement is no longer gated behind an
-                # "index finger up, others down" gesture at all — it
-                # simply always follows the palm whenever the right hand
-                # is visible and not pinching/scrolling (see
-                # _palm_center()'s own note on why: that gate was the
-                # actual source of the reported movement inconsistency).
-                if pinch:
-                    tx = (right_hand[_THUMB_TIP].x + right_hand[_INDEX_TIP].x) / 2
-                    ty = (right_hand[_THUMB_TIP].y + right_hand[_INDEX_TIP].y) / 2
-                else:
-                    tx, ty = _palm_center(right_hand)
+                # Target point: ALWAYS the palm center, pinching or not.
+                # An earlier version switched to the thumb+index midpoint
+                # while pinching (to feel like "grabbing" that exact
+                # point) — real-world result, reported directly: the
+                # instant you pinch, the tracked point jumps from the
+                # palm to a DIFFERENT physical spot on the hand (the
+                # fingertips, well away from the palm centroid), so the
+                # cursor visibly teleports away right as you try to
+                # click, making accurate clicking impossible. Clicking
+                # must happen wherever the cursor already IS — the pinch
+                # is a trigger, not a repositioning — so this now uses
+                # the exact same point in both states. See
+                # _palm_center()'s own note on why palm tracking replaced
+                # fingertip tracking in the first place.
+                tx, ty = _palm_center(right_hand)
 
                 # Map the control-box-inset frame to full screen coordinates.
                 nx = min(1.0, max(0.0, (tx - m) / (1 - 2 * m)))

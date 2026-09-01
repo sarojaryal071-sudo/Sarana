@@ -134,19 +134,19 @@ def test_palm_center_is_the_centroid_of_wrist_and_all_four_mcp_knuckles() -> Non
     print("test_palm_center_is_the_centroid_of_wrist_and_all_four_mcp_knuckles: PASS")
 
 
-def test_cursor_movement_tracks_the_palm_not_the_index_fingertip() -> None:
+def test_cursor_movement_tracks_the_palm_unconditionally_pinching_or_not() -> None:
+    # An earlier version switched the tracked point to the thumb+index
+    # midpoint while pinching — real-world result: the cursor visibly
+    # jumped to a different spot the instant a pinch/click started,
+    # making accurate clicking impossible (reported directly). Fixed by
+    # using _palm_center() unconditionally — the (tx, ty) assignment
+    # must not be gated behind any pinch check at all anymore.
     import inspect
     src = inspect.getsource(gc._run_loop)
-    # The specific line that sets (tx, ty) for the non-pinching case must
-    # call _palm_center(), never read the index fingertip directly. The
-    # pinch branch legitimately still uses _INDEX_TIP (thumb+index
-    # midpoint, for the drag target) — only the "else:" (not-pinching,
-    # ordinary cursor movement) branch is what changed.
-    if_pinch_block = src.split("if pinch:")[1].split("# Map the control-box")[0]
-    else_branch = if_pinch_block.split("else:")[1]
-    assert "_palm_center(right_hand)" in else_branch
-    assert "_INDEX_TIP" not in else_branch
-    print("test_cursor_movement_tracks_the_palm_not_the_index_fingertip: PASS")
+    target_line = [ln for ln in src.splitlines() if "tx, ty = " in ln]
+    assert len(target_line) == 1, "expected exactly one (tx, ty) assignment for cursor tracking"
+    assert "_palm_center(right_hand)" in target_line[0]
+    print("test_cursor_movement_tracks_the_palm_unconditionally_pinching_or_not: PASS")
 
 
 # ── model cache (_ensure_model) ──────────────────────────────────────────
@@ -285,7 +285,7 @@ if __name__ == "__main__":
     test_pinch_ratio_is_hand_size_normalized()
     test_pinch_ratio_below_threshold_when_fingers_touch()
     test_palm_center_is_the_centroid_of_wrist_and_all_four_mcp_knuckles()
-    test_cursor_movement_tracks_the_palm_not_the_index_fingertip()
+    test_cursor_movement_tracks_the_palm_unconditionally_pinching_or_not()
     test_ensure_model_skips_download_when_already_cached()
     test_ensure_model_reports_honest_failure_without_crashing()
     test_start_stop_lifecycle_never_touches_the_real_camera_or_mouse()
