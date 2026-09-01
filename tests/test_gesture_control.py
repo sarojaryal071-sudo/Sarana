@@ -113,6 +113,43 @@ def test_pinch_ratio_below_threshold_when_fingers_touch() -> None:
     print("test_pinch_ratio_below_threshold_when_fingers_touch: PASS")
 
 
+def test_lerp_clamped_interpolates_and_clamps_at_both_ends() -> None:
+    # Adaptive smoothing (stabilization fix — reported directly: hand
+    # tremor was reaching the cursor almost 1:1) relies on this to map
+    # per-frame speed to a smoothing alpha. Below the low bound -> the
+    # low output; above the high bound -> the high output; midpoint ->
+    # the midpoint output.
+    assert gc._lerp_clamped(-5, 4, 45, 0.10, 0.55) == 0.10
+    assert gc._lerp_clamped(4, 4, 45, 0.10, 0.55) == 0.10
+    assert gc._lerp_clamped(45, 4, 45, 0.10, 0.55) == 0.55
+    assert gc._lerp_clamped(999, 4, 45, 0.10, 0.55) == 0.55
+    mid = gc._lerp_clamped(24.5, 4, 45, 0.10, 0.55)  # halfway between 4 and 45
+    assert abs(mid - 0.325) < 1e-9  # halfway between 0.10 and 0.55
+    print("test_lerp_clamped_interpolates_and_clamps_at_both_ends: PASS")
+
+
+def test_cursor_smoothing_is_a_moving_average_followed_by_adaptive_exponential_smoothing() -> None:
+    # Source-level guarantee that BOTH stabilization stages exist and are
+    # wired together, not just one or the other — this is the actual fix
+    # for the reported hand-tremor jitter, not a cosmetic rename.
+    import inspect
+    src = inspect.getsource(gc._run_loop)
+    assert "state.avg_buf_x.append" in src and "state.avg_buf_y.append" in src
+    assert "dynamic_alpha = _lerp_clamped(" in src
+    assert "state.smoothed_x += (avg_x - state.smoothed_x) * dynamic_alpha" in src
+    print("test_cursor_smoothing_is_a_moving_average_followed_by_adaptive_exponential_smoothing: PASS")
+
+
+def test_moving_average_buffers_are_bounded_not_unbounded_growth() -> None:
+    state = gc._GestureState()
+    for i in range(50):
+        state.avg_buf_x.append(float(i))
+        state.avg_buf_y.append(float(i))
+    assert len(state.avg_buf_x) == gc._MOVING_AVG_WINDOW
+    assert len(state.avg_buf_y) == gc._MOVING_AVG_WINDOW
+    print("test_moving_average_buffers_are_bounded_not_unbounded_growth: PASS")
+
+
 def test_palm_center_is_the_centroid_of_wrist_and_all_four_mcp_knuckles() -> None:
     # Cursor tracking was switched from the index fingertip to this —
     # see _palm_center()'s own docstring for why (the fingertip-based
@@ -284,6 +321,9 @@ if __name__ == "__main__":
     test_finger_up_detects_extended_vs_curled()
     test_pinch_ratio_is_hand_size_normalized()
     test_pinch_ratio_below_threshold_when_fingers_touch()
+    test_lerp_clamped_interpolates_and_clamps_at_both_ends()
+    test_cursor_smoothing_is_a_moving_average_followed_by_adaptive_exponential_smoothing()
+    test_moving_average_buffers_are_bounded_not_unbounded_growth()
     test_palm_center_is_the_centroid_of_wrist_and_all_four_mcp_knuckles()
     test_cursor_movement_tracks_the_palm_unconditionally_pinching_or_not()
     test_ensure_model_skips_download_when_already_cached()

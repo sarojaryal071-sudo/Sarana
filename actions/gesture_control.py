@@ -53,6 +53,7 @@ at one specific camera resolution/hand-to-camera distance; a normalized
 ratio behaves consistently regardless of how close the user's hand is to
 the webcam.
 """
+import collections
 import threading
 import time
 from pathlib import Path
@@ -142,8 +143,33 @@ _PINCH_RATIO_THRESHOLD = 0.35   # thumb-tip↔index-tip distance / wrist↔middl
 _DRAG_HOLD_S = 0.35             # how long a pinch must be held before it becomes a drag
 _CLICK_COOLDOWN_S = 0.35        # minimum time between two left-clicks
 _RIGHT_CLICK_COOLDOWN_S = 0.6   # minimum time between two right-clicks
-_SMOOTH_ALPHA = 0.35            # exponential smoothing factor for cursor position (0..1, higher = snappier)
-_DEAD_ZONE_PX = 3               # ignore cursor moves smaller than this many screen pixels
+_DEAD_ZONE_PX = 4               # ignore cursor moves smaller than this many screen pixels
+# Two-stage cursor stabilization — reported directly: natural hand tremor
+# (a few px of involuntary shake, not a real movement) was reaching the
+# cursor almost 1:1, making precise clicking hard. A single fixed-alpha
+# exponential filter can't fix this without also feeling laggy during
+# real, fast, deliberate movement — the SAME alpha that's needed to kill
+# tremor at rest makes intentional movement feel sluggish. Two stages,
+# same idea the reference project uses (see this module's own header):
+#   1. A short moving-average window smooths out raw per-frame noise
+#      before anything else sees it.
+#   2. Exponential smoothing on TOP of that, with an ADAPTIVE alpha:
+#      near-stationary (tremor-range) motion gets heavy smoothing
+#      (ALPHA_MIN), fast real motion gets light smoothing (ALPHA_MAX) so
+#      the cursor still keeps up with an intentional swipe across the
+#      screen.
+_MOVING_AVG_WINDOW = 5
+_ALPHA_MIN = 0.10               # smoothing factor while nearly still — kills tremor
+_ALPHA_MAX = 0.55               # smoothing factor while moving fast — stays responsive
+_SPEED_LOW_PX = 4               # per-frame movement (screen px) at/below which ALPHA_MIN applies
+_SPEED_HIGH_PX = 45             # per-frame movement (screen px) at/above which ALPHA_MAX applies
+
+
+def _lerp_clamped(value: float, lo: float, hi: float, out_lo: float, out_hi: float) -> float:
+    if hi <= lo:
+        return out_lo
+    t = max(0.0, min(1.0, (value - lo) / (hi - lo)))
+    return out_lo + t * (out_hi - out_lo)
 _SCROLL_SENSITIVITY = 900       # normalized-y-delta -> scroll "clicks" multiplier
 
 # MediaPipe Hands landmark indices used below (see mediapipe's own hand
@@ -163,6 +189,10 @@ class _GestureState:
     def __init__(self):
         self.smoothed_x: float | None = None
         self.smoothed_y: float | None = None
+        self.avg_buf_x: "collections.deque[float]" = collections.deque(maxlen=_MOVING_AVG_WINDOW)
+        self.avg_buf_y: "collections.deque[float]" = collections.deque(maxlen=_MOVING_AVG_WINDOW)
+        self.last_avg_x: float | None = None
+        self.last_avg_y: float | None = None
         self.last_moved_x: float | None = None
         self.last_moved_y: float | None = None
         self.pinching = False
@@ -377,11 +407,30 @@ def _run_loop(cap, stop_event: threading.Event) -> None:
                 ny = min(1.0, max(0.0, (ty - m) / (1 - 2 * m)))
                 raw_x, raw_y = nx * screen_w, ny * screen_h
 
-                if state.smoothed_x is None:
-                    state.smoothed_x, state.smoothed_y = raw_x, raw_y
+                # Stage 1 — moving average: absorbs raw per-frame noise
+                # before anything else sees it.
+                state.avg_buf_x.append(raw_x)
+                state.avg_buf_y.append(raw_y)
+                avg_x = sum(state.avg_buf_x) / len(state.avg_buf_x)
+                avg_y = sum(state.avg_buf_y) / len(state.avg_buf_y)
+
+                # Stage 2 — adaptive exponential smoothing: how far the
+                # averaged point moved since last frame decides how much
+                # to trust it. Barely-there movement (tremor) gets
+                # smoothed away hard; a real fast swipe gets smoothed
+                # lightly so the cursor still keeps up with it.
+                if state.last_avg_x is None:
+                    speed = 0.0
                 else:
-                    state.smoothed_x += (raw_x - state.smoothed_x) * _SMOOTH_ALPHA
-                    state.smoothed_y += (raw_y - state.smoothed_y) * _SMOOTH_ALPHA
+                    speed = ((avg_x - state.last_avg_x) ** 2 + (avg_y - state.last_avg_y) ** 2) ** 0.5
+                state.last_avg_x, state.last_avg_y = avg_x, avg_y
+                dynamic_alpha = _lerp_clamped(speed, _SPEED_LOW_PX, _SPEED_HIGH_PX, _ALPHA_MIN, _ALPHA_MAX)
+
+                if state.smoothed_x is None:
+                    state.smoothed_x, state.smoothed_y = avg_x, avg_y
+                else:
+                    state.smoothed_x += (avg_x - state.smoothed_x) * dynamic_alpha
+                    state.smoothed_y += (avg_y - state.smoothed_y) * dynamic_alpha
 
                 moved = (
                     state.last_moved_x is None
