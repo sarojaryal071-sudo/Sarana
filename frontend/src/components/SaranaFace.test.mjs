@@ -40,26 +40,27 @@ test("the face graphic is purely presentational (aria-hidden) — no interactive
   assert.doesNotMatch(src, /onClick/);
 });
 
-test("renders the procedural wireframe mesh from lib/faceMesh.js — not hand-authored SVG paths or an image asset", () => {
+test("renders the glowing eyes/brows/mouth geometry from lib/faceMesh.js — hand-authored SVG paths, not a dense mesh or an image asset", () => {
   assert.match(src, /from ["']\.\.\/lib\/faceMesh["']/);
-  assert.match(src, /buildFacePoints/);
-  assert.match(src, /buildFaceEdges/);
+  assert.match(src, /EYE_PATHS/);
+  assert.match(src, /BROW_PATHS/);
+  assert.match(src, /MOUTH_PATH/);
   assert.doesNotMatch(src, /<img/i, "no image asset for the face");
 });
 
-test("geometry is computed ONCE at module load, not inside the component function (no per-render/per-frame recomputation)", () => {
-  // The buildFacePoints()/buildFaceEdges() calls must appear at the top
-  // level of the module, before the exported component function starts —
-  // never inside it, which would recompute the same fixed geometry on
-  // every render for no reason.
-  const componentStart = src.indexOf("export default function SaranaFace");
-  const pointsCallIdx = src.indexOf("buildFacePoints()");
-  assert.ok(pointsCallIdx > -1 && pointsCallIdx < componentStart, "buildFacePoints() must run at module scope, before the component");
+test("geometry is static, imported data — never recomputed per-render", () => {
+  // Every geometry constant (paths, iris/highlight specs, the head
+  // circle) is imported directly from lib/faceMesh.js and referenced as
+  // plain data in JSX — there is no build*() call to recompute, so this
+  // just guards against a future regression reintroducing one inside the
+  // component body.
+  const componentBody = src.slice(src.indexOf("export default function SaranaFace"));
+  assert.doesNotMatch(componentBody, /function build[A-Z]/, "geometry must stay static imported data, not a recomputed build*() call");
 });
 
-test("has all thirteen anatomical mesh groups referenced (eyes, brows, pupils, nose, cheeks, mouth, jaw, head)", () => {
-  for (const group of ["head", "browL", "browR", "eyeL", "eyeR", "pupilL", "pupilR", "nose", "cheekL", "cheekR", "mouthTop", "mouthBottom", "jaw"]) {
-    assert.match(faceMeshSrc, new RegExp(`"${group}"`), `mesh group "${group}" missing from faceMesh.js`);
+test("has all seven anatomical groups referenced (brows, eyes, pupils, mouth)", () => {
+  for (const group of ["browL", "browR", "eyeL", "eyeR", "pupilL", "pupilR", "mouth"]) {
+    assert.match(faceMeshSrc, new RegExp(`"${group}"`), `group "${group}" missing from faceMesh.js`);
   }
 });
 
