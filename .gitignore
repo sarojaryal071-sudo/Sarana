@@ -37,6 +37,12 @@ data/*.db-journal
 # user-uploaded files (dashboard/server.py's /api/upload target)
 uploads/
 
+# Gesture Mode's MediaPipe hand-landmark model — downloaded and cached on
+# first use (actions/gesture_control.py's own _ensure_model()), never
+# committed: it's a ~7.8MB binary asset, and shipping it in git would
+# bloat every clone whether or not gesture mode is ever used.
+config/models/
+
 # ── frontend (Vite/React) ───────────────────────────────────────────────
 # Mirrors frontend/.gitignore — listed here too since a root .gitignore is
 # also what protects these before `git init` even reaches the frontend/

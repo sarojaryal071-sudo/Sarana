@@ -101,6 +101,7 @@ from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control, get_active_window_title
+from actions import gesture_control
 from actions.computer_control  import INCONCLUSIVE_TAGS as _cc_INCONCLUSIVE_TAGS
 from actions import result_envelope as _envelope
 
@@ -873,6 +874,34 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "gesture_mode",
+        "description": (
+            "Turns hand-gesture mouse control on or off, desktop only. "
+            "While on, the user's real mouse cursor is controlled by "
+            "their own hand seen through the webcam: moving their index "
+            "finger moves the cursor, a thumb-to-index pinch clicks "
+            "(held briefly, it drags), and two fingers up scrolls. NO "
+            "preview window is shown — the webcam runs silently in the "
+            "background and nothing about the existing UI changes. "
+            "NEVER call this yourself, and NEVER let it turn on or off "
+            "except from an explicit, direct user request (e.g. 'turn "
+            "on gesture mode', 'activate hand gesture control', "
+            "'gesture mode off', 'stop controlling with my hand') — not "
+            "merely because a computer-control task is happening. "
+            "Moving the real mouse to a screen corner always instantly "
+            "aborts whatever gesture action was in progress (a built-in "
+            "physical safety override, always available regardless of "
+            "this mode)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "'on' to activate, 'off' to deactivate."},
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "computer_control",
         "description": (
             "Direct computer control: type, click, hotkeys, scroll, move mouse, screenshots, find elements on screen. "
@@ -1198,7 +1227,7 @@ DESKTOP_ONLY_TOOLS = frozenset({
     "reminder", "youtube_video", "screen_process", "close_camera",
     "computer_settings", "desktop_control", "code_helper", "dev_agent",
     "file_processor", "computer_control", "game_updater", "flight_finder",
-    "system_status", "shutdown_jarvis",
+    "system_status", "shutdown_jarvis", "gesture_mode",
 })
 
 # Bounded autonomous-execution governor (self._jarvis_action_count, its
@@ -2986,6 +3015,25 @@ class JarvisLive:
                         f"Done: face now showing '{_expr}' for about {_dur:.0f}s, "
                         "then returns to normal automatically — you don't need to reset it."
                     )
+
+            elif name == "gesture_mode":
+                # Desktop-only (see DESKTOP_ONLY_TOOLS) — controls the
+                # REAL local mouse via actions/gesture_control.py, so a
+                # web session could never meaningfully run this anyway.
+                # start()/stop() open a real camera / join a background
+                # thread — run off the event loop the same way
+                # browser_control below does, not awaited inline.
+                _g_action = (args.get("action") or "").strip().lower()
+                if _g_action == "on":
+                    _g_msg = await loop.run_in_executor(None, gesture_control.start)
+                    self.ui.write_log(f"SYS: Gesture mode — {_g_msg}")
+                    result = f"[GESTURE_MODE] {_g_msg}"
+                elif _g_action == "off":
+                    _g_msg = await loop.run_in_executor(None, gesture_control.stop)
+                    self.ui.write_log(f"SYS: Gesture mode — {_g_msg}")
+                    result = f"[GESTURE_MODE] {_g_msg}"
+                else:
+                    result = "gesture_mode requires action='on' or action='off'."
 
             elif name == "browser_control":
                 r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
