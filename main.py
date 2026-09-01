@@ -223,6 +223,17 @@ def _voice_name_for_preference(preference: str | None) -> str:
     return _VOICE_PREFERENCE_MAP.get(preference.strip().lower(), _DEFAULT_VOICE_NAME)
 
 
+# SARANA Face UI — mirrors frontend/src/lib/faceExpressions.js's
+# FACE_EXPRESSIONS and ui.py's own expression vocabulary exactly (the same
+# 15-word set every rendering surface understands). Kept as one module-
+# level constant so the set_expression tool's dispatch validation and its
+# own declared JSON-schema enum (below) can't silently drift apart.
+_VALID_FACE_EXPRESSIONS = frozenset({
+    "neutral", "listening", "thinking", "speaking", "happy",
+    "concerned", "sad", "curious", "confused", "reassuring",
+    "empathetic", "surprised", "calm", "focused", "excited",
+})
+
 TOOL_DECLARATIONS = [
     {
         "name": "open_app",
@@ -821,6 +832,44 @@ TOOL_DECLARATIONS = [
                 "action": {"type": "STRING", "description": "'on' to activate JARVIS mode, 'off' to deactivate."},
             },
             "required": ["action"],
+        },
+    },
+    {
+        "name": "set_expression",
+        "description": (
+            "Changes SARANA's visual facial expression on the SARANA face "
+            "UI (web and desktop) for a short time — e.g. when the user "
+            "explicitly asks you to look happy/sad/curious/surprised/etc., "
+            "or as a genuine, warranted reaction to something in the "
+            "conversation. Purely visual/presentational — it has no effect "
+            "on your reasoning, memory, tools, or actual behavior, only "
+            "what your face looks like. It reverts to your normal "
+            "listening/thinking/speaking look on its own after "
+            "duration_seconds (or immediately if you start actually "
+            "speaking/thinking, since those need their own visual "
+            "treatment) — you never need a separate call to reset it. Only "
+            "call this when it's genuinely warranted (an explicit request, "
+            "or a clear emotional beat) — not on every turn, and never as "
+            "a substitute for actually answering what was asked."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "expression": {
+                    "type": "STRING",
+                    "enum": [
+                        "neutral", "listening", "thinking", "speaking", "happy",
+                        "concerned", "sad", "curious", "confused", "reassuring",
+                        "empathetic", "surprised", "calm", "focused", "excited",
+                    ],
+                    "description": "Which expression to show.",
+                },
+                "duration_seconds": {
+                    "type": "NUMBER",
+                    "description": "How long to hold it before reverting to normal (default 6, max 20).",
+                },
+            },
+            "required": ["expression"],
         },
     },
     {
@@ -2867,6 +2916,50 @@ class JarvisLive:
                     )
                 else:
                     result = "jarvis_mode requires action='on' or action='off'."
+
+            elif name == "set_expression":
+                # SARANA Face UI — the gap the user directly hit: they
+                # asked "show me a sad expression" and got told it
+                # couldn't be done, because nothing gave the model a way
+                # to actually drive the face's mood expressions (happy/
+                # sad/curious/etc. — they existed in CSS/QPainter, fully
+                # built, but had no real signal ever wired to them; only
+                # mechanical status (listening/thinking/speaking/muted)
+                # could reach the face at all). This tool is that signal.
+                # Purely visual/presentational — same reasoning as
+                # jarvis_mode's own UI-only nature above, just for the
+                # face instead of the whole persona — so no confirmation
+                # gate (see result_envelope.py's is_consequential(), which
+                # this deliberately never goes through).
+                _expr = (args.get("expression") or "").strip().lower()
+                if _expr not in _VALID_FACE_EXPRESSIONS:
+                    result = (
+                        f"[INVALID_EXPRESSION] '{_expr}' is not a supported expression. "
+                        f"Use one of: {', '.join(sorted(_VALID_FACE_EXPRESSIONS))}."
+                    )
+                else:
+                    # `or 6` would be wrong here — 0 is a real, falsy
+                    # value the caller might genuinely send, and "or"
+                    # would silently replace it with the default instead
+                    # of letting the clamp below floor it to 1.0 (caught
+                    # by tests/test_set_expression.py's own duration-
+                    # clamping test before this ever shipped).
+                    _raw_dur = args.get("duration_seconds")
+                    if _raw_dur is None:
+                        _dur = 6.0
+                    else:
+                        try:
+                            _dur = float(_raw_dur)
+                        except (TypeError, ValueError):
+                            _dur = 6.0
+                    _dur = max(1.0, min(20.0, _dur))
+                    self.ui.set_expression(_expr, _dur)
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast_expression_override(_expr, _dur))
+                    result = (
+                        f"Done: face now showing '{_expr}' for about {_dur:.0f}s, "
+                        "then returns to normal automatically — you don't need to reset it."
+                    )
 
             elif name == "browser_control":
                 r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))

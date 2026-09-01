@@ -66,6 +66,13 @@ class HeadlessSurface:
         # unconditionally without needing to know which surface it's on.
         print(f"[Headless] jarvis_mode={active}")
 
+    def set_expression(self, expression: str, duration_seconds: float) -> None:
+        # Same reasoning as set_jarvis_mode above — no face to animate
+        # headlessly; web sessions get this from the dashboard's
+        # expression_override broadcast instead (see main.py's
+        # set_expression tool dispatch).
+        print(f"[Headless] expression={expression} for {duration_seconds:.0f}s")
+
     def show_content(self, title: str, text: str) -> None:
         print(f"[Headless] content: {title}\n{text}")
 

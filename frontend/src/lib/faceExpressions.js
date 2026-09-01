@@ -63,3 +63,34 @@ const STATUS_TO_EXPRESSION = {
 export function mapStatusToExpression(status) {
   return STATUS_TO_EXPRESSION[status] || "neutral";
 }
+
+// SARANA Face UI — the gap a real user directly hit: they asked SARANA
+// "show me a sad expression" and got told it couldn't be done, because
+// nothing gave the model a way to actually reach the ten mood
+// expressions above — they existed in CSS, fully built, but had no real
+// signal driving them (see this module's own header on why
+// mapStatusToExpression() alone deliberately never returns them). This
+// is that signal: main.py's set_expression tool broadcasts an
+// expression_override the App.jsx WS handler stores; this pure function
+// decides whether it's actually allowed to show right now.
+//
+// The override wins ONLY while the mechanical state is otherwise idle
+// (listening/neutral) — speaking needs its real-audio mouth treatment
+// and muted needs to stay visibly "concerned" (a real functional signal,
+// not a mood), so those always take priority. The override re-applies
+// the instant the mechanical state returns to idle, as long as it
+// hasn't expired yet (checked by the CALLER passing `now`, so this stays
+// a pure function with no Date.now() call buried inside it — see
+// App.jsx's own effect for how `now` gets recomputed).
+export function resolveExpression(status, override, now) {
+  const mechanical = mapStatusToExpression(status);
+  if (
+    override &&
+    typeof override.until === "number" &&
+    now < override.until &&
+    (mechanical === "listening" || mechanical === "neutral")
+  ) {
+    return override.expression;
+  }
+  return mechanical;
+}

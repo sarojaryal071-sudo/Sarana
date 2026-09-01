@@ -52,6 +52,16 @@ const initialState = {
   // false, exactly mirroring the backend's own reconnect reset.
   jarvisMode: false,
 
+  // SARANA Face UI: a temporary, explicit mood override from main.py's
+  // set_expression tool (see App.jsx's "expression_override" WS case) —
+  // {expression, until} | null. `until` is a Date.now()-comparable
+  // timestamp computed by the CALLER at dispatch time (same precedent as
+  // LOG_MESSAGE/SYS_MESSAGE's own `ts` below), not inside this reducer.
+  // Only ever read via lib/faceExpressions.js's resolveExpression(), which
+  // additionally never lets it override the mechanical speaking/thinking/
+  // muted states — see that function's own header.
+  expressionOverride: null,
+
   messages: [], // {speaker: "user"|"jarvis"|"sys", text, ts}
   content: null, // {title, text} | null
 
@@ -87,6 +97,13 @@ function reducer(state, action) {
       return { ...state, microphoneState: action.value };
     case "JARVIS_MODE":
       return { ...state, jarvisMode: !!action.value };
+    case "EXPRESSION_OVERRIDE":
+      // action.expression is null to explicitly CLEAR the override (see
+      // App.jsx's own expiry timer) — a real expression name to set one.
+      return {
+        ...state,
+        expressionOverride: action.expression ? { expression: action.expression, until: action.until } : null,
+      };
     case "STATUS_MESSAGE": {
       // Web UI state fix: msg.state is now main.py's real, granular state
       // string (LISTENING | THINKING | SPEAKING | SLEEPING) — see

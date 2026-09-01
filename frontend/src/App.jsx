@@ -282,6 +282,19 @@ export default function App() {
             // conditional below (Orb replaces SaranaFace while active).
             dispatch({ type: "JARVIS_MODE", value: msg.active });
             break;
+          case "expression_override":
+            // SARANA Face UI: main.py's set_expression tool call (see
+            // that tool's own docstring) — `until` is computed HERE, not
+            // in the reducer (same precedent as LOG_MESSAGE/SYS_MESSAGE's
+            // own `ts`, see AssistantContext.jsx), so the reducer stays a
+            // pure function of its arguments. The actual expiry/revert is
+            // handled by the effect below, not here.
+            dispatch({
+              type: "EXPRESSION_OVERRIDE",
+              expression: msg.expression,
+              until: Date.now() + (Number(msg.duration_ms) || 6000),
+            });
+            break;
           case "device_action":
             // Reserved for Phase 6's desktop-agent dispatch — nothing sends
             // this yet (see dashboard/server.py). Logged, not acted on.
@@ -728,6 +741,27 @@ export default function App() {
     return () => clearTimeout(identityTimerRef.current);
   }, [targetIdentity, identity]);
 
+  // SARANA Face UI: an active expression_override (see the WS handler
+  // above) clears itself on a real timer rather than being silently
+  // "expired" by resolveExpression() alone — resolveExpression is a pure
+  // function of whatever `now` it's given, so without this effect
+  // nothing would ever RE-RENDER SaranaFace once `until` passes if no
+  // other state happened to change around the same moment. One
+  // scheduled dispatch per override set, cleaned up on the next one
+  // (or unmount) — never a polling interval.
+  useEffect(() => {
+    if (!state.expressionOverride) return undefined;
+    const msLeft = state.expressionOverride.until - Date.now();
+    if (msLeft <= 0) {
+      dispatch({ type: "EXPRESSION_OVERRIDE", expression: null });
+      return undefined;
+    }
+    const t = setTimeout(() => {
+      dispatch({ type: "EXPRESSION_OVERRIDE", expression: null });
+    }, msLeft);
+    return () => clearTimeout(t);
+  }, [state.expressionOverride, dispatch]);
+
   return (
     <div className="app-shell">
       <Header
@@ -770,7 +804,7 @@ export default function App() {
               {identity === "jarvis" ? (
                 <Orb status={displayStatus} assistantName={state.assistantName} />
               ) : (
-                <SaranaFace status={displayStatus} assistantName={state.assistantName} />
+                <SaranaFace status={displayStatus} assistantName={state.assistantName} expressionOverride={state.expressionOverride} />
               )}
             </div>
           )}

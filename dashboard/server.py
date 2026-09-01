@@ -1095,6 +1095,22 @@ class DashboardServer:
         defaulting to "off" until told otherwise is correct, not a gap)."""
         await self._send_to_clients({"type": "jarvis_mode_changed", "active": bool(active)})
 
+    async def broadcast_expression_override(self, expression: str, duration_seconds: float) -> None:
+        """SARANA Face UI: server -> client signal that main.py's
+        set_expression tool was just called (see main.py's own dispatch
+        branch) — a temporary, explicit mood override on top of whatever
+        SaranaFace.jsx's mechanical status->expression mapping would
+        otherwise show (see lib/faceExpressions.js's resolveExpression()).
+        Same non-history reasoning as broadcast_jarvis_mode() above: a
+        client that connects later gets no replay of this — a stale
+        "sad" override from a session nobody's watching anymore is not a
+        state a fresh connection should inherit."""
+        await self._send_to_clients({
+            "type": "expression_override",
+            "expression": expression,
+            "duration_ms": int(max(0.0, duration_seconds) * 1000),
+        })
+
     async def broadcast_content(self, title: str, text: str) -> None:
         """Server→client "content" message — mirrors JarvisUI.show_content's
         shape for a future web client. Nothing calls this yet (main.py is

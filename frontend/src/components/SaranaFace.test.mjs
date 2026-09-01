@@ -102,16 +102,20 @@ test("cheeks render first in FACE_GROUPS so the blush glow paints BEHIND the eye
   assert.match(faceMeshSrc, /FACE_GROUPS = \[\s*"cheekL",\s*"cheekR"/, "cheekL/cheekR must be the first two entries in FACE_GROUPS");
 });
 
-test("delegates ALL status->expression logic to lib/faceExpressions.js — never reimplements the mapping inline", () => {
+test("delegates ALL status/override->expression logic to lib/faceExpressions.js's resolveExpression() — never reimplements the mapping or the override-priority rules inline", () => {
   assert.match(src, /from ["']\.\.\/lib\/faceExpressions["']/);
-  assert.match(src, /mapStatusToExpression/);
+  assert.match(src, /resolveExpression/);
   // None of the expression vocabulary words should be hardcoded as a
   // literal in this file — the component must only ever obtain them
-  // dynamically via mapStatusToExpression(status), never duplicate the
-  // lookup table itself.
+  // dynamically via resolveExpression(status, override, now), never
+  // duplicate the lookup table or the override-priority logic itself.
   for (const word of ["neutral", "listening", "thinking", "speaking", "concerned", "empathetic", "surprised", "calm", "focused"]) {
     assert.doesNotMatch(src, new RegExp(`["']${word}["']`), `"${word}" must not be hardcoded in SaranaFace.jsx`);
   }
+});
+
+test("passes a real Date.now() as resolveExpression's `now` — never a stale/cached timestamp", () => {
+  assert.match(src, /resolveExpression\([^)]*Date\.now\(\)/);
 });
 
 test("the expression drives rendering via a data-expression attribute (styled entirely in CSS, not inline styles)", () => {
@@ -168,8 +172,8 @@ test("no literal emoji characters used to represent an expression (status glyphs
   assert.doesNotMatch(statusLine, emojiRange);
 });
 
-test("accepts the same prop shape as Orb ({ status, assistantName }) for interchangeability in the same slot", () => {
-  assert.match(src, /\{\s*status\s*,\s*assistantName\s*\}/);
+test("accepts every prop Orb does ({ status, assistantName }), plus one optional expressionOverride Orb doesn't need — interchangeable in the same slot either way", () => {
+  assert.match(src, /\{\s*status\s*,\s*assistantName\s*,\s*expressionOverride\s*\}/);
   assert.match(orbSrc, /\{\s*status\s*,\s*assistantName\s*\}/);
 });
 
@@ -194,10 +198,41 @@ test("Orb.jsx contains no reference to the new face-mesh system — the two visu
 
 // ── App.jsx integration ────────────────────────────────────────────────────
 
-test("App.jsx renders SaranaFace in the normal-identity branch, exactly once", () => {
+test("App.jsx renders SaranaFace in the normal-identity branch, exactly once, wired to state.expressionOverride", () => {
   assert.match(appSrc, /import SaranaFace from ["']\.\/components\/SaranaFace["']/);
   const usages = appSrc.match(/<SaranaFace\b/g) || [];
   assert.equal(usages.length, 1, "SaranaFace must be rendered from exactly one place in App.jsx");
+  const tagMatch = appSrc.match(/<SaranaFace\b[^>]*\/>/);
+  assert.ok(tagMatch, "could not locate the <SaranaFace ... /> element");
+  assert.match(tagMatch[0], /expressionOverride=\{state\.expressionOverride\}/);
+});
+
+// ── SARANA Face UI: set_expression tool override (real bug fix — a user
+// directly asked SARANA to "show a sad expression" and was told it
+// couldn't be done) ─────────────────────────────────────────────────────
+
+test("App.jsx handles the backend's expression_override WS message and dispatches EXPRESSION_OVERRIDE with a real Date.now()-based `until`", () => {
+  assert.match(appSrc, /case "expression_override":/);
+  const caseBlock = appSrc.match(/case "expression_override":[\s\S]{0,700}/)[0];
+  assert.match(caseBlock, /type:\s*"EXPRESSION_OVERRIDE"/);
+  assert.match(caseBlock, /expression:\s*msg\.expression/);
+  assert.match(caseBlock, /Date\.now\(\)\s*\+/, "until must be computed from the real clock, not hardcoded");
+});
+
+test("an active override clears itself via a real scheduled timer (not a polling interval), cleaned up on change/unmount", () => {
+  const effectBlock = appSrc.match(/if \(!state\.expressionOverride\) return undefined;[\s\S]{0,500}/)[0];
+  assert.match(effectBlock, /setTimeout/);
+  assert.doesNotMatch(effectBlock, /setInterval/);
+  assert.match(effectBlock, /return \(\) => clearTimeout/);
+  assert.match(effectBlock, /dispatch\(\{\s*type:\s*"EXPRESSION_OVERRIDE"\s*,\s*expression:\s*null/);
+});
+
+test("AssistantContext.jsx's reducer treats expression:null as an explicit clear, and resets expressionOverride on logout via ...initialState", () => {
+  const contextSrc = fs.readFileSync(path.join(__dirname, "..", "state", "AssistantContext.jsx"), "utf8");
+  assert.match(contextSrc, /expressionOverride:\s*null/);
+  assert.match(contextSrc, /case "EXPRESSION_OVERRIDE":/);
+  const caseBlock = contextSrc.match(/case "EXPRESSION_OVERRIDE":[\s\S]{0,300}/)[0];
+  assert.match(caseBlock, /action\.expression\s*\?/, "must branch on action.expression to support an explicit null-clear");
 });
 
 test("App.jsx imports and renders Orb exactly once, as the JARVIS-identity branch (not alongside SaranaFace)", () => {

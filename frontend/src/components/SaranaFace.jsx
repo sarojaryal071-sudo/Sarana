@@ -21,16 +21,20 @@
 // file (the mouth's real-audio drive is an event-driven subscription, see
 // below, not a polling loop).
 //
-// Expression mapping lives in lib/faceExpressions.js (a pure, separately
-// unit-tested function) — this component only turns "what expression"
+// Expression logic lives in lib/faceExpressions.js (pure, separately
+// unit-tested functions) — this component only turns "what expression"
 // into "what shows on screen"; it never invents its own status logic.
+// `expressionOverride` (optional, {expression, until} | null/undefined)
+// is App.jsx's mirror of main.py's set_expression tool — see that
+// module's resolveExpression() for the actual priority rules (mechanical
+// speaking/thinking/muted always win over a requested mood).
 //
 // Purely presentational: aria-hidden on the visual face itself, no
 // interactive elements. State is still announced via the same
 // role="status"/aria-live text label every earlier generation had — the
 // face must never be the ONLY indication of state.
 import { useEffect, useRef, useState } from "react";
-import { mapStatusToExpression } from "../lib/faceExpressions";
+import { resolveExpression } from "../lib/faceExpressions";
 import { FACE_GROUPS, FACE_VIEWBOX, EYE_PATHS, IRIS, BROW_PATHS, MOUTH_PATH, CHEEKS } from "../lib/faceMesh";
 import { subscribeMouthLevel } from "../lib/mouthLevel";
 
@@ -54,8 +58,14 @@ const BLINK_MIN_MS = 2400;
 const BLINK_MAX_MS = 5600;
 const BLINK_DURATION_MS = 160;
 
-export default function SaranaFace({ status, assistantName }) {
-  const expression = mapStatusToExpression(status);
+export default function SaranaFace({ status, assistantName, expressionOverride }) {
+  // resolveExpression() itself is a pure function of (status, override,
+  // now) — see lib/faceExpressions.js's own header — Date.now() is only
+  // ever read HERE, at the one call site that actually needs the real
+  // clock; App.jsx's own expiry effect guarantees a re-render happens
+  // again the moment an active override's `until` passes, so this stays
+  // correct without a per-frame timer of its own.
+  const expression = resolveExpression(status, expressionOverride, Date.now());
   const [blinking, setBlinking] = useState(false);
   const timerRef = useRef(null);
   const faceRef = useRef(null);

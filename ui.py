@@ -620,15 +620,49 @@ class HudCanvas(QWidget):
 # spark decoration, matching the web build's own simplification.
 _FACE_GLOW = "#74dcff"  # matches frontend's --face-glow token exactly
 
-# Expression parameters for the 5 states real app status can honestly
-# reach today (see frontend/src/lib/faceExpressions.js's own "honest
-# mapping" note, which applies identically here — main.py's status
-# precedence is shared by both platforms). Desktop deliberately doesn't
-# pre-wire the web build's other ten presets — nothing on EITHER platform
-# can reach them from real signal yet, so porting them here would be
-# exactly the unused weight this project's own "don't over-engineer"
-# guidance warns against.
+# Mechanical states — the five real app status can drive directly (see
+# frontend/src/lib/faceExpressions.js's own "honest mapping" note; main.py's
+# status precedence is shared by both platforms). SaranaFaceCanvas._expression()
+# always returns one of these when the mechanical state isn't idle
+# (speaking/thinking/muted always win — see that method's own note).
 _SARANA_FACE_EXPRESSIONS = {"neutral", "listening", "thinking", "speaking", "concerned"}
+
+# Full render parameters for all fifteen expressions — mirrors index.css's
+# own per-expression rules (same shared vocabulary as
+# frontend/src/lib/faceExpressions.js's FACE_EXPRESSIONS). The five above
+# are reachable from real mechanical status; the other ten are reachable
+# ONLY via main.py's set_expression tool (an explicit request or a
+# genuine reaction — see that tool's own docstring) while the mechanical
+# state is otherwise idle (see _expression()) — never guessed, never
+# randomly cycled. Each entry overrides a subset of these defaults:
+#   brow_dy (px, both brows), brow_tilt (px, mirrored L/R), eye_sx/eye_sy
+#   (scale), mouth_sy (scale; negative flips into a frown), mouth_fill
+#   (0..1 opacity when the mouth is filled rather than just stroked),
+#   color ("muted"/"green"/"acc2"/None=default), cheek (extra alpha added
+#   to the baseline blush), fade (overall opacity multiplier on the
+#   glowing shapes, for a dimmer/quieter read).
+_SARANA_EXPR_DEFAULTS = {
+    "brow_dy": 0, "brow_tilt": 0, "eye_sx": 1.0, "eye_sy": 1.0,
+    "mouth_sy": 1.0, "mouth_fill": 0.0, "color": None, "cheek": 0, "fade": 1.0,
+}
+_SARANA_EXPRESSIONS = {
+    "neutral": {},
+    "listening": {"eye_sx": 0.94, "eye_sy": 1.04},
+    "thinking": {"brow_dy": -2, "brow_tilt": 2, "mouth_sy": 0.85},
+    "speaking": {},  # mouth is driven live by real audio_level — see paintEvent
+    "concerned": {"brow_tilt": -3, "mouth_sy": -0.7, "color": "muted", "cheek": 14},
+    "happy": {"brow_dy": -2, "mouth_sy": 1.25, "mouth_fill": 0.75, "color": "green", "cheek": 26},
+    "sad": {"brow_tilt": 3, "mouth_sy": -0.6, "cheek": -8, "fade": 0.75},
+    "curious": {"brow_dy": -3, "eye_sy": 1.05, "cheek": 6},
+    "confused": {"brow_tilt": 3, "mouth_sy": 0.9},
+    "reassuring": {"mouth_sy": 1.1, "cheek": 4},
+    "empathetic": {"brow_tilt": 2, "eye_sy": 0.96, "cheek": 2},
+    "surprised": {"brow_dy": -5, "eye_sx": 1.1, "eye_sy": 1.15, "mouth_sy": 1.7, "mouth_fill": 0.7, "cheek": 16},
+    "calm": {"eye_sy": 0.98},
+    "focused": {"eye_sx": 0.9, "eye_sy": 0.96, "brow_tilt": 2},
+    "excited": {"brow_dy": -4, "eye_sx": 1.06, "eye_sy": 1.1, "mouth_sy": 1.5, "mouth_fill": 0.8, "color": "acc2", "cheek": 36},
+}
+_SARANA_EXPR_COLORS = {"muted": C.MUTED_C, "green": C.GREEN, "acc2": C.ACC2}
 
 
 class SaranaFaceCanvas(QWidget):
@@ -669,11 +703,24 @@ class SaranaFaceCanvas(QWidget):
         self._blink_until   = 0.0
         self._gaze_phase    = 0.0
 
+        # SARANA Face UI: an explicit, temporary mood override from
+        # main.py's set_expression tool (see MainWindow._apply_expression_
+        # override()) — None/expired means "no override, use the
+        # mechanical mapping below". See _expression()'s own note on why
+        # this only ever wins over "listening"/"neutral", never over
+        # speaking/thinking/muted.
+        self._expr_override: str | None = None
+        self._expr_override_until: float = 0.0
+
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
 
-    def _expression(self) -> str:
+    def set_expression_override(self, expression: str, duration_seconds: float) -> None:
+        self._expr_override = expression
+        self._expr_override_until = time.time() + max(0.0, duration_seconds)
+
+    def _mechanical_expression(self) -> str:
         # Mirrors lib/faceExpressions.js's mapStatusToExpression() exactly
         # (same status precedence, same five reachable outcomes) — kept
         # as a small local method rather than a shared cross-language
@@ -688,6 +735,24 @@ class SaranaFaceCanvas(QWidget):
         if self.state == "SLEEPING":
             return "neutral"
         return "listening"
+
+    def _expression(self) -> str:
+        # An active override wins ONLY while the mechanical state is
+        # otherwise idle (listening/neutral) — mirrors
+        # lib/faceExpressions.js's resolveExpression() exactly. Speaking
+        # needs its own real-audio mouth treatment and muted needs to
+        # stay visibly "concerned" (a real functional signal, not a
+        # mood), so those always take priority over a requested mood; the
+        # override still applies again the moment the mechanical state
+        # returns to idle, as long as it hasn't expired yet.
+        mechanical = self._mechanical_expression()
+        if (
+            self._expr_override
+            and time.time() < self._expr_override_until
+            and mechanical in ("listening", "neutral")
+        ):
+            return self._expr_override
+        return mechanical
 
     def _step(self):
         # Performance: this widget only needs to animate while it's the
@@ -751,7 +816,15 @@ class SaranaFaceCanvas(QWidget):
 
         expr = self._expression()
         muted = self.muted
-        main_color = qcol(C.MUTED_C) if muted else qcol(_FACE_GLOW)
+        params = dict(_SARANA_EXPR_DEFAULTS)
+        params.update(_SARANA_EXPRESSIONS.get(expr, {}))
+        # muted always tints red regardless of what the params dict says —
+        # a real functional signal (the mic really is off), never
+        # overridden by a cosmetic mood (see _expression()'s own note on
+        # why muted/speaking/thinking always win over an override anyway,
+        # so in practice this only ever matters for expr=="concerned").
+        color_hex = C.MUTED_C if muted else _SARANA_EXPR_COLORS.get(params["color"], _FACE_GLOW)
+        fade = int(255 * params["fade"])
 
         # whole-face breathing scale — matches .sarana-face-mesh's
         # face-breathe keyframe (applied to the ENTIRE face)
@@ -765,9 +838,10 @@ class SaranaFaceCanvas(QWidget):
         # cheeks — a soft blush glow, faintly visible at baseline (never
         # opacity 0 — see index.css's own note on why: the reference shows
         # blush constantly, not just on a "happy" expression), warmer for
-        # a genuinely positive/engaged read, dimmer+red-tinted when muted.
-        cheek_a = 70 if muted else (56 if self.speaking else 36)
-        cheek_color = qcol(C.MUTED_C, cheek_a) if muted else qcol(_FACE_GLOW, cheek_a)
+        # a genuinely positive/engaged read, dimmer+red-tinted when muted,
+        # further adjusted per-expression via params["cheek"].
+        cheek_a = max(0, min(255, (70 if muted else (56 if self.speaking else 36)) + params["cheek"]))
+        cheek_color = qcol(C.MUTED_C, cheek_a) if muted else qcol(color_hex, cheek_a)
         p.setPen(Qt.PenStyle.NoPen)
         grad_l = QRadialGradient(to_screen(36, 132), 20 * scale)
         grad_l.setColorAt(0, cheek_color)
@@ -783,27 +857,30 @@ class SaranaFaceCanvas(QWidget):
         # brows — thick round-capped strokes, a real gap between them
         # (same fix faceMesh.js's own header documents — two distinct
         # brows, never a fused unibrow)
-        brow_dy = -3 if expr == "thinking" else 0
-        pen = QPen(main_color, 9 * scale, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        brow_dy = params["brow_dy"]
+        brow_tilt = params["brow_tilt"]
+        pen = QPen(qcol(color_hex, fade), 9 * scale, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        for path_pts, tilt in (
-            ([(44, 66), (72, 48), (92, 60)], 1 if expr == "thinking" else 0),
-            ([(108, 60), (128, 48), (156, 66)], -1 if expr == "thinking" else 0),
+        for path_pts, tilt_sign in (
+            ([(44, 66), (72, 48), (92, 60)], 1),
+            ([(108, 60), (128, 48), (156, 66)], -1),
         ):
+            dy = brow_dy + tilt_sign * brow_tilt
             brow_path = QPainterPath()
             (x0, y0), (cxp, cyp), (x1, y1) = path_pts
-            brow_path.moveTo(to_screen(x0, y0 + brow_dy + tilt * 2))
-            brow_path.quadTo(to_screen(cxp, cyp + brow_dy - tilt * 2), to_screen(x1, y1 + brow_dy))
+            brow_path.moveTo(to_screen(x0, y0 + dy))
+            brow_path.quadTo(to_screen(cxp, cyp + dy), to_screen(x1, y1 + dy))
             p.drawPath(brow_path)
 
         # eyes — the dominant feature, big bold filled shapes; blink
-        # squashes them to a thin line at their own center, listening
-        # narrows them slightly, same idiom the web build's CSS uses.
-        eye_scale_y = 0.06 if self._blink else (1.04 if expr == "listening" else 1.0)
-        eye_scale_x = 1.0 if self._blink else (0.94 if expr == "listening" else 1.0)
+        # squashes them to a thin line at their own center, otherwise
+        # scaled per params["eye_sx"/"eye_sy"] (same idiom the web
+        # build's CSS uses per expression).
+        eye_scale_y = 0.06 if self._blink else params["eye_sy"]
+        eye_scale_x = 1.0 if self._blink else params["eye_sx"]
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(main_color))
+        p.setBrush(QBrush(qcol(color_hex, fade)))
         for cx in (74, 126):
             center = to_screen(cx, 108)
             eye_path = self._eye_path(center.x(), center.y(), 24 * scale, 30 * scale)
@@ -819,7 +896,7 @@ class SaranaFaceCanvas(QWidget):
         # own single most important detail)
         gx = 1.2 * math.sin(self._gaze_phase)
         gy = 0.5 * math.cos(self._gaze_phase * 1.4)
-        p.setBrush(QBrush(qcol(C.MUTED_C, 140) if muted else qcol(_FACE_GLOW, 140)))
+        p.setBrush(QBrush(qcol(color_hex, 140)))
         for cx in (74, 126):
             p.drawEllipse(to_screen(cx + gx, 108 + gy), 11 * scale, 11 * scale)
         p.setBrush(QBrush(qcol("#ffffff", 242)))
@@ -829,19 +906,19 @@ class SaranaFaceCanvas(QWidget):
         # mouth — one curve; a bold stroke at rest, filled in for
         # speaking (scaled by REAL playback amplitude — self.audio_level,
         # set by MainWindow._apply_audio_level() from main.py's actual PCM
-        # batches, not a random guess) and for the flipped-into-a-frown
-        # concerned/muted state.
+        # batches, not a random guess) and for whatever
+        # params["mouth_sy"/"mouth_fill"] the current expression declares
+        # otherwise (negative mouth_sy flips it into a frown, e.g. sad/
+        # concerned — same trick, just data-driven now instead of a
+        # special-cased elif).
         mouth_pts = [(68, 164), (100, 184), (132, 164)]
         if expr == "speaking":
             lvl = max(0.0, min(1.0, self.audio_level))
             sy = 1 + lvl * 1.6
             fill_a = int(255 * (0.25 + lvl * 0.6))
-        elif muted:
-            sy = -0.7
-            fill_a = 0
         else:
-            sy = 1.0
-            fill_a = 0
+            sy = params["mouth_sy"]
+            fill_a = int(255 * params["mouth_fill"])
         mouth_origin = to_screen(100, 174)
         p.save()
         p.translate(mouth_origin)
@@ -849,17 +926,20 @@ class SaranaFaceCanvas(QWidget):
         p.translate(-mouth_origin)
         mouth_path = QPainterPath()
         (mx0, my0), (mcx, mcy), (mx1, my1) = mouth_pts
-        if muted:
+        if sy < 0:
+            # A flipped (frown) mouth also nudges up slightly, same as
+            # index.css's own translateY paired with its scaleY(-N) rules
+            # for concerned/sad — keeps the frown from reading as too low.
             my0 -= 8; my1 -= 8; mcy -= 8
         mouth_path.moveTo(to_screen(mx0, my0))
         mouth_path.quadTo(to_screen(mcx, mcy), to_screen(mx1, my1))
         if fill_a > 0:
             fill_path = QPainterPath(mouth_path)
             fill_path.closeSubpath()  # same auto-close-on-fill trick as the web build
-            p.setBrush(QBrush(qcol(_FACE_GLOW, fill_a)))
+            p.setBrush(QBrush(qcol(color_hex, fill_a)))
             p.setPen(Qt.PenStyle.NoPen)
             p.drawPath(fill_path)
-        p.setPen(QPen(main_color, 7 * scale, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setPen(QPen(qcol(color_hex, fade), 7 * scale, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(mouth_path)
         p.restore()
@@ -2156,6 +2236,7 @@ class MainWindow(QMainWindow):
     _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _jarvis_mode_sig = pyqtSignal(bool)      # main.py's self._jarvis_mode changed (thread-safe)
+    _expression_sig  = pyqtSignal(str, float)  # main.py's set_expression tool call (expression, duration_seconds)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -2320,6 +2401,7 @@ class MainWindow(QMainWindow):
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._jarvis_mode_sig.connect(self._apply_jarvis_mode)
+        self._expression_sig.connect(self._apply_expression_override)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -3738,6 +3820,18 @@ class MainWindow(QMainWindow):
         if self._hud_cam_stack.currentIndex() != 1:  # camera isn't active — safe to switch now
             self._hud_cam_stack.setCurrentIndex(0 if active else 2)
 
+    def _apply_expression_override(self, expression: str, duration_seconds: float):
+        """SARANA Face UI — desktop counterpart to the web frontend's
+        expression_override WS message (see App.jsx's own handler and
+        lib/faceExpressions.js's resolveExpression()). The gap this
+        closes: a user directly asked SARANA to "show a sad expression"
+        and got told it couldn't be done — the mood expressions existed
+        in SaranaFaceCanvas already, fully built, but nothing ever gave
+        main.py's set_expression tool a way to actually reach them.
+        JARVIS's orb has no mood concept, so only self.sarana_face is
+        updated here — this never touches self.hud."""
+        self.sarana_face.set_expression_override(expression, duration_seconds)
+
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
         try:
@@ -3850,6 +3944,12 @@ class JarvisUI:
 
     def set_jarvis_mode(self, active: bool):
         self._win._jarvis_mode_sig.emit(bool(active))
+
+    def set_expression(self, expression: str, duration_seconds: float):
+        """SARANA Face UI: main.py's set_expression tool call, thread-safe
+        — same pattern as set_jarvis_mode() above, just for the face's
+        mood instead of the whole persona."""
+        self._win._expression_sig.emit(str(expression), float(duration_seconds))
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)

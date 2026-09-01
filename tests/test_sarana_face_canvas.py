@@ -62,14 +62,79 @@ def test_expression_mapping_matches_the_web_build_precedence_exactly() -> None:
     print("test_expression_mapping_matches_the_web_build_precedence_exactly: PASS")
 
 
-def test_only_the_five_reachable_expressions_are_wired_up_desktop_side() -> None:
-    # Desktop deliberately doesn't pre-wire the web build's other ten
-    # presets (happy/curious/sad/etc.) — nothing on EITHER platform can
-    # reach them from real signal yet, so porting them here would be
-    # dead code. This just guards that the set stays exactly the five
-    # real app state can honestly justify.
+def test_only_five_expressions_are_reachable_from_mechanical_status_alone() -> None:
+    # _SARANA_FACE_EXPRESSIONS is specifically the set _mechanical_expression()
+    # can return from real app status with NO override involved — the
+    # other ten (happy/curious/sad/etc.) are fully rendered (see
+    # _SARANA_EXPRESSIONS below) but only reachable via an explicit
+    # set_expression tool call (see test_expression_override_* below),
+    # never guessed from status alone.
     assert ui._SARANA_FACE_EXPRESSIONS == {"neutral", "listening", "thinking", "speaking", "concerned"}
-    print("test_only_the_five_reachable_expressions_are_wired_up_desktop_side: PASS")
+    print("test_only_five_expressions_are_reachable_from_mechanical_status_alone: PASS")
+
+
+def test_all_fifteen_expressions_have_real_render_parameters() -> None:
+    # SARANA Face UI (set_expression tool) — the gap a real user hit
+    # directly: they asked for "sad" and were told it couldn't be shown.
+    # Every word in the shared vocabulary must have an actual params
+    # entry here, not just exist as a string somewhere.
+    expected = {
+        "neutral", "listening", "thinking", "speaking", "concerned", "happy",
+        "sad", "curious", "confused", "reassuring", "empathetic", "surprised",
+        "calm", "focused", "excited",
+    }
+    assert set(ui._SARANA_EXPRESSIONS.keys()) == expected
+    print("test_all_fifteen_expressions_have_real_render_parameters: PASS")
+
+
+# ── expression override (set_expression tool) — priority + expiry ────────
+
+def test_expression_override_wins_only_while_mechanical_state_is_idle() -> None:
+    face = ui.SaranaFaceCanvas("SARANA")
+    face.set_expression_override("sad", 10.0)
+    face.state, face.speaking, face.muted = "LISTENING", False, False
+    assert face._expression() == "sad"
+    face.speaking = True
+    assert face._expression() == "speaking", "speaking must win over a requested mood"
+    face.speaking = False
+    face.muted = True
+    assert face._expression() == "concerned", "muted must win — it's a real functional signal"
+    face.muted = False
+    face.state = "THINKING"
+    assert face._expression() == "thinking", "thinking must win over a requested mood"
+    face.state = "LISTENING"
+    assert face._expression() == "sad", "override re-applies once mechanical state returns to idle"
+    print("test_expression_override_wins_only_while_mechanical_state_is_idle: PASS")
+
+
+def test_expression_override_expires_on_its_own_and_reverts_to_mechanical() -> None:
+    import time
+    face = ui.SaranaFaceCanvas("SARANA")
+    face.state, face.speaking, face.muted = "LISTENING", False, False
+    face.set_expression_override("excited", 0.01)
+    assert face._expression() == "excited"
+    time.sleep(0.05)
+    assert face._expression() == "listening"
+    print("test_expression_override_expires_on_its_own_and_reverts_to_mechanical: PASS")
+
+
+def test_no_override_set_behaves_exactly_like_before() -> None:
+    face = ui.SaranaFaceCanvas("SARANA")
+    face.state, face.speaking, face.muted = "LISTENING", False, False
+    assert face._expression() == "listening"
+    print("test_no_override_set_behaves_exactly_like_before: PASS")
+
+
+def test_paints_without_crashing_for_every_override_only_expression() -> None:
+    for expr in sorted(ui._SARANA_EXPRESSIONS.keys() - ui._SARANA_FACE_EXPRESSIONS):
+        face = ui.SaranaFaceCanvas("SARANA")
+        face.resize(360, 420)
+        face.set_expression_override(expr, 10.0)
+        assert face._expression() == expr
+        face._step()
+        pm = face.grab()
+        assert not pm.isNull(), f"grab() produced a null pixmap for override expression={expr}"
+    print("test_paints_without_crashing_for_every_override_only_expression: PASS")
 
 
 # ── real offscreen render coverage — no real window, no display needed ──
@@ -200,9 +265,28 @@ def test_apply_name_update_mirrors_onto_sarana_face_too() -> None:
     print("test_apply_name_update_mirrors_onto_sarana_face_too: PASS")
 
 
+def test_expression_override_signal_wiring_exists() -> None:
+    assert "_expression_sig  = pyqtSignal(str, float)" in _UI_SRC
+    assert "self._expression_sig.connect(self._apply_expression_override)" in _UI_SRC
+    block = _UI_SRC[_UI_SRC.index("def _apply_expression_override("):][:900]
+    assert "self.sarana_face.set_expression_override(expression, duration_seconds)" in block
+    print("test_expression_override_signal_wiring_exists: PASS")
+
+
+def test_jarvisui_set_expression_emits_the_signal() -> None:
+    block = _UI_SRC[_UI_SRC.index("def set_expression(self, expression: str, duration_seconds: float):"):][:400]
+    assert "self._win._expression_sig.emit(str(expression), float(duration_seconds))" in block
+    print("test_jarvisui_set_expression_emits_the_signal: PASS")
+
+
 if __name__ == "__main__":
     test_expression_mapping_matches_the_web_build_precedence_exactly()
-    test_only_the_five_reachable_expressions_are_wired_up_desktop_side()
+    test_only_five_expressions_are_reachable_from_mechanical_status_alone()
+    test_all_fifteen_expressions_have_real_render_parameters()
+    test_expression_override_wins_only_while_mechanical_state_is_idle()
+    test_expression_override_expires_on_its_own_and_reverts_to_mechanical()
+    test_no_override_set_behaves_exactly_like_before()
+    test_paints_without_crashing_for_every_override_only_expression()
     test_paints_without_crashing_across_every_reachable_state_and_audio_level()
     test_audio_level_is_clamped_defensively_even_if_a_caller_sends_an_out_of_range_value()
     test_blink_and_degenerate_size_do_not_crash_paintevent()
@@ -216,4 +300,6 @@ if __name__ == "__main__":
     test_apply_audio_level_mirrors_onto_sarana_face_too()
     test_toggle_mute_mirrors_onto_sarana_face_too()
     test_apply_name_update_mirrors_onto_sarana_face_too()
+    test_expression_override_signal_wiring_exists()
+    test_jarvisui_set_expression_emits_the_signal()
     print("\nAll sarana_face_canvas tests passed.")
