@@ -17,6 +17,7 @@ import { stopScreenVision } from "./lib/screenVision";
 import LoginScreen, { readStoredSession, clearStoredToken } from "./components/LoginScreen";
 import Header from "./components/Header";
 import SaranaFace from "./components/SaranaFace";
+import IdentityTransition from "./components/IdentityTransition";
 import Orb from "./components/Orb";
 import SidePanel from "./components/SidePanel";
 import ContentPanel from "./components/ContentPanel";
@@ -727,19 +728,34 @@ export default function App() {
   // "always wins" instantly and isn't part of the identity switch.
   const targetIdentity = state.jarvisMode ? "jarvis" : "sarana";
   const [identity, setIdentity] = useState(targetIdentity);
-  const [identityFading, setIdentityFading] = useState(false);
+  const [identityPhase, setIdentityPhase] = useState(null); // null | "deconstruct" | "rebuild"
   const identityTimerRef = useRef(null);
-  const IDENTITY_FADE_MS = 260;
+  // "not a plain cinematic transition... like in an AI technological
+  // movie where the current UI goes through a fast rebuild of another UI
+  // with moving neons and a cinematic building process" — a real,
+  // direct request. DECONSTRUCT_MS mirrors what .identity-stage's own
+  // CSS transition duration below now uses (the REAL Orb/SaranaFace
+  // fade), REBUILD_MS is purely the decorative IdentityTransition
+  // overlay continuing its "HUD constructing" flourish a bit longer on
+  // top, after the real content has already settled in — see
+  // components/IdentityTransition.jsx's own header for the full design.
+  const DECONSTRUCT_MS = 500;
+  const REBUILD_MS = 900;
 
   useEffect(() => {
     if (targetIdentity === identity) return undefined;
-    setIdentityFading(true);
+    setIdentityPhase("deconstruct");
     identityTimerRef.current = setTimeout(() => {
       setIdentity(targetIdentity);
-      setIdentityFading(false);
-    }, IDENTITY_FADE_MS);
+      setIdentityPhase("rebuild");
+      identityTimerRef.current = setTimeout(() => {
+        setIdentityPhase(null);
+      }, REBUILD_MS);
+    }, DECONSTRUCT_MS);
     return () => clearTimeout(identityTimerRef.current);
   }, [targetIdentity, identity]);
+
+  const identityFading = identityPhase === "deconstruct";
 
   // SARANA Face UI: an active expression_override (see the WS handler
   // above) clears itself on a real timer rather than being silently
@@ -806,6 +822,7 @@ export default function App() {
               ) : (
                 <SaranaFace status={displayStatus} assistantName={state.assistantName} expressionOverride={state.expressionOverride} />
               )}
+              {identityPhase && <IdentityTransition phase={identityPhase} targetIdentity={targetIdentity} />}
             </div>
           )}
           <ContentPanel content={state.content} onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })} />
