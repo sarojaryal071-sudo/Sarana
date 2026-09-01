@@ -40,12 +40,46 @@ test("the face graphic is purely presentational (aria-hidden) — no interactive
   assert.doesNotMatch(src, /onClick/);
 });
 
-test("renders the glowing eyes/brows/mouth geometry from lib/faceMesh.js — hand-authored SVG paths, not a dense mesh or an image asset", () => {
+test("renders the bold-filled eyes/brows/mouth/cheeks geometry from lib/faceMesh.js — hand-authored SVG paths, not a dense mesh or an image asset", () => {
   assert.match(src, /from ["']\.\.\/lib\/faceMesh["']/);
   assert.match(src, /EYE_PATHS/);
   assert.match(src, /BROW_PATHS/);
   assert.match(src, /MOUTH_PATH/);
+  assert.match(src, /CHEEKS/);
   assert.doesNotMatch(src, /<img/i, "no image asset for the face");
+});
+
+test("eyes render as a filled solid shape (face-eye), not a stroked outline — matches the reference image's bold solid eyes", () => {
+  assert.match(src, /className="face-eye"/);
+  const rule = css.match(/\.face-eye\s*\{[\s\S]*?\}/);
+  assert.ok(rule, ".face-eye rule not found");
+  assert.match(rule[0], /fill:\s*var\(--face-glow\)/);
+});
+
+test("the mouth is ONE path, styled as a bold stroke by default with fill toggled on per-expression (auto-close-on-fill), never two separate open/closed path strings", () => {
+  const mouthCount = (src.match(/MOUTH_PATH/g) || []).length;
+  assert.ok(mouthCount >= 1);
+  assert.doesNotMatch(faceMeshSrc, /MOUTH_PATH_OPEN|MOUTH_OPEN_PATH/, "must not have grown a second mouth path for the open state");
+  const rule = css.match(/\.face-mouth\s*\{[\s\S]*?\}/);
+  assert.match(rule[0], /fill:\s*none/, "the mouth must default to an unfilled stroke — fill is a per-expression override");
+});
+
+test("no outer head-ring/frame — the previous generation's HEAD_CIRCLE is gone, matching the reference image's own lack of a face outline", () => {
+  assert.doesNotMatch(faceMeshSrc, /HEAD_CIRCLE/);
+  assert.doesNotMatch(src, /HEAD_CIRCLE|face-outline/);
+});
+
+test("no decorative sparks/scanline layer — this generation simplifies, it doesn't add ambient decoration on top of the face", () => {
+  assert.doesNotMatch(src, /mesh-spark|sarana-face-scanline/);
+  assert.doesNotMatch(css, /mesh-spark|sarana-face-scanline/);
+});
+
+test("cheeks (blush) are present at a non-zero baseline opacity, not opacity:0 by default — the reference shows blush constantly, not only on a 'happy' expression", () => {
+  const rule = css.match(/\.face-cheek\s*\{[\s\S]*?\}/);
+  assert.ok(rule, ".face-cheek rule not found");
+  const opacityMatch = rule[0].match(/opacity:\s*([\d.]+)/);
+  assert.ok(opacityMatch, "no baseline opacity declared on .face-cheek");
+  assert.ok(Number(opacityMatch[1]) > 0, "cheeks must not default to fully invisible");
 });
 
 test("geometry is static, imported data — never recomputed per-render", () => {
@@ -58,10 +92,14 @@ test("geometry is static, imported data — never recomputed per-render", () => 
   assert.doesNotMatch(componentBody, /function build[A-Z]/, "geometry must stay static imported data, not a recomputed build*() call");
 });
 
-test("has all seven anatomical groups referenced (brows, eyes, pupils, mouth)", () => {
-  for (const group of ["browL", "browR", "eyeL", "eyeR", "pupilL", "pupilR", "mouth"]) {
+test("has all nine anatomical groups referenced (cheeks, brows, eyes, pupils, mouth)", () => {
+  for (const group of ["cheekL", "cheekR", "browL", "browR", "eyeL", "eyeR", "pupilL", "pupilR", "mouth"]) {
     assert.match(faceMeshSrc, new RegExp(`"${group}"`), `group "${group}" missing from faceMesh.js`);
   }
+});
+
+test("cheeks render first in FACE_GROUPS so the blush glow paints BEHIND the eyes/brows/mouth, not on top of them", () => {
+  assert.match(faceMeshSrc, /FACE_GROUPS = \[\s*"cheekL",\s*"cheekR"/, "cheekL/cheekR must be the first two entries in FACE_GROUPS");
 });
 
 test("delegates ALL status->expression logic to lib/faceExpressions.js — never reimplements the mapping inline", () => {

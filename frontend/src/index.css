@@ -272,22 +272,32 @@ input {
   display: block;
 }
 
-/* ── SaranaFace — minimal glowing eyes/brows/mouth face (normal SARANA
-   mode) ───────────────────────────────────────────────────────────────
+/* ── SaranaFace — simple bold-filled face (normal SARANA mode) ───────────
    Renders into the SAME .orb-stage slot Orb.jsx's canvas normally
    occupies (see components/SaranaFace.jsx's own header note) — the
    visual centerpiece for normal mode; Orb.jsx/its CSS above is left
-   completely untouched, reserved for JARVIS mode. This is the THIRD
-   generation of this component (see git history for the earlier dense
-   wireframe-mesh version this replaced, per the task's own reference
-   image: an "eyes + mouth only" glowing outline face inside a circular
-   frame, no nose/cheek/jaw/dense mesh at all). Geometry lives in an SVG
+   completely untouched, reserved for JARVIS mode. This is the FOURTH
+   generation of this component (git history has every earlier one) —
+   built directly from the user's own reference image: two big solid
+   glowing eyes with a bright catch-light, thick simple brows, one mouth
+   curve, two soft blush glows. No outer head-ring, no dense mesh, no
+   scanline/spark decoration — this generation REMOVES decoration the
+   previous one had, it doesn't add more. Geometry lives in an SVG
    viewBox (see FACE_VIEWBOX) that scales via `width/height: 100%`, not a
    hardcoded canvas resolution. --face-glow is a dedicated token (not
    reusing Orb's --pri directly) so SARANA's luminous quality can read as
    distinct from JARVIS's harder-edged technical cyan, while still drawn
    from the same overall palette family — the two are meant to feel like
-   "two forms of the same intelligence", not unrelated UIs. */
+   "two forms of the same intelligence", not unrelated UIs.
+
+   Color translation from the reference image (its literal black/white/
+   red/peach have no place on a dark glowing HUD): solid black -> a
+   filled --face-glow shape; the white catch-light stays white (the one
+   color kept literally, because a highlight reads as a highlight only in
+   a bright neutral tone); the reference's flat peach blush -> a soft
+   --face-glow radial blur, off by default and warming toward --green for
+   positive expressions or --muted-c for concerned — SARANA's existing
+   role-color convention, not a literal skin tone. */
 :root {
   --face-glow: #74dcff;
   --face-glow-soft: rgba(116, 220, 255, 0.16);
@@ -304,25 +314,6 @@ input {
   pointer-events: none;
 }
 
-/* Restrained holographic scanlines — a handful of faint horizontal bands
-   drifting slowly downward. Deliberately very low opacity: the face
-   stays the primary visual element, this is texture, not a light show. */
-.sarana-face-scanline {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    to bottom,
-    rgba(143, 252, 255, 0.05) 0px,
-    rgba(143, 252, 255, 0.05) 1px,
-    transparent 1px,
-    transparent 3px
-  );
-  mix-blend-mode: screen;
-  opacity: 0.35;
-  animation: face-scanline-drift 9s linear infinite;
-}
-
 .sarana-face-mesh {
   position: absolute;
   inset: 0;
@@ -337,60 +328,73 @@ input {
   --mouth-open: 0;
 }
 
-/* The big circular frame the face sits inside — a single clean ring,
-   matching the reference image (not the old multi-ring wireframe halo). */
-.face-outline {
-  fill: none;
-  stroke: var(--face-glow);
-  stroke-width: 1;
-  opacity: 0.55;
-  filter: drop-shadow(0 0 3px var(--face-glow-soft));
+/* Eyes — the face's dominant feature, a big bold filled glowing shape
+   (not a thin outline stroke), matching the reference's own solid eyes. */
+.face-eye {
+  fill: var(--face-glow);
+  stroke: none;
+  opacity: 0.92;
+  filter: drop-shadow(0 0 3px var(--face-glow)) drop-shadow(0 0 8px var(--face-glow-soft));
+  transition: fill 420ms ease, opacity 420ms ease;
 }
 
-/* Brow/eye/mouth strokes — glowing neon curves, the face's actual
-   features. Two-layer glow (tight core + soft outer bloom) is a cheap
-   CSS stand-in for a real bloom pass. */
-.face-line {
-  fill: none;
-  stroke: var(--face-glow);
-  stroke-width: 2.4;
-  stroke-linecap: round;
-  filter: drop-shadow(0 0 2px var(--face-glow)) drop-shadow(0 0 6px var(--face-glow-soft));
-  transition: stroke 420ms ease, d 420ms ease;
-}
-
-/* Iris — a small glowing filled circle inside each eye outline. */
+/* Iris — a slightly brighter filled center, reinforcing the eye's
+   roundness/solidity (subtle; the eye shape above already carries most
+   of the visual weight). */
 .face-iris {
   fill: var(--face-glow);
-  opacity: 0.9;
-  filter: drop-shadow(0 0 2px var(--face-glow)) drop-shadow(0 0 5px var(--face-glow-soft));
+  opacity: 0.55;
   transition: fill 420ms ease;
 }
 
 /* Catch-light — the small bright highlight dot that makes the eye read
-   as glassy/alive rather than a flat glowing disc. */
+   as glassy/alive rather than a flat glowing disc; the reference's own
+   most important single detail. */
 .face-highlight {
   fill: #ffffff;
   opacity: 0.95;
 }
 
-/* Restrained ambient sparks near the circle rim (matching the reference
-   image's own couple of small accent dots) — a slow twinkle, five fixed
-   points, not a particle system. Timing is staggered per-point via
-   nth-of-type rather than inline style (see SaranaFace.jsx's own note). */
-.mesh-spark {
-  fill: var(--face-glow);
-  opacity: 0;
-  filter: drop-shadow(0 0 2px var(--face-glow));
-  animation: face-spark-twinkle 5.5s ease-in-out infinite;
-  transform-box: fill-box;
-  transform-origin: center;
+/* Brows — thick, round-capped strokes (not a hand-tapered fill path);
+   reads as a bold simple brow shape without needing bezier-width path
+   authoring, matching the reference's solid comma-shaped brows closely
+   enough at this simplicity level. */
+.face-brow {
+  fill: none;
+  stroke: var(--face-glow);
+  stroke-width: 9;
+  stroke-linecap: round;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 2px var(--face-glow)) drop-shadow(0 0 6px var(--face-glow-soft));
+  transition: stroke 420ms ease, d 420ms ease;
 }
-.mesh-spark:nth-of-type(1) { animation-delay: 0s; animation-duration: 5.2s; }
-.mesh-spark:nth-of-type(2) { animation-delay: 1.1s; animation-duration: 6.1s; }
-.mesh-spark:nth-of-type(3) { animation-delay: 2.4s; animation-duration: 5.6s; }
-.mesh-spark:nth-of-type(4) { animation-delay: 0.6s; animation-duration: 6.6s; }
-.mesh-spark:nth-of-type(5) { animation-delay: 1.8s; animation-duration: 5.9s; }
+
+/* Mouth — a bold stroke at rest; SVG auto-closes an open path with a
+   straight chord when filled, so toggling `fill` on for open-mouth
+   expressions (see [data-expression="speaking"] etc. below) turns this
+   SAME single curve into a solid smile-wedge with zero extra path data —
+   exactly the reference's bright open-mouth shape, without authoring a
+   second "open" path. */
+.face-mouth {
+  fill: none;
+  stroke: var(--face-glow);
+  stroke-width: 7;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 2px var(--face-glow)) drop-shadow(0 0 6px var(--face-glow-soft));
+  transition: stroke 420ms ease, fill 300ms ease, fill-opacity 300ms ease, d 420ms ease;
+}
+
+/* Cheeks — a soft blush glow. The reference image shows blush
+   constantly, not just on "happy" — so this stays faintly visible at
+   baseline (not opacity:0) and each expression below only turns the
+   opacity/color UP or DOWN from there, matching the reference's own
+   always-present warmth instead of treating it as a happy-only bonus. */
+.face-cheek {
+  fill: var(--face-glow);
+  opacity: 0.14;
+  filter: blur(6px);
+  transition: opacity 420ms ease, fill 420ms ease;
+}
 
 .mesh-group {
   transform-box: fill-box;
@@ -460,15 +464,26 @@ input {
    amplitude (0..1, set by SaranaFace.jsx from lib/mouthLevel.js — see
    audioOut.js's own note on where the number comes from), NOT a fixed
    looping keyframe: the shape naturally varies with what SARANA is
-   actually saying instead of visibly repeating on a beat. A faster,
-   more linear transition than .mesh-group's default 480ms elastic curve
-   keeps it feeling responsive rather than bouncy. Eyes stay put. */
+   actually saying instead of visibly repeating on a beat. A faster, more
+   linear transition than .mesh-group's default 480ms elastic curve keeps
+   it feeling responsive rather than bouncy. The mouth also fills in as it
+   opens (the same auto-close-on-fill trick every open-mouth expression
+   below uses) so louder speech reads as a bright open smile-wedge, not
+   just a taller stroke. Eyes stay put. */
 [data-expression="speaking"] .mesh-group[data-group="mouth"] {
   transform: scaleY(calc(1 + var(--mouth-open) * 1.6)) scaleX(calc(1 - var(--mouth-open) * 0.08));
   transition: transform 70ms linear;
 }
+[data-expression="speaking"] .face-mouth {
+  fill: var(--face-glow);
+  fill-opacity: calc(0.25 + var(--mouth-open) * 0.6);
+  transition: fill-opacity 70ms linear;
+}
+[data-expression="speaking"] .face-cheek {
+  opacity: 0.22;
+}
 
-/* happy — lifted brows, a fuller smile curve, brighter glow */
+/* happy — lifted brows, a fuller open smile, brighter glow, warm cheeks */
 [data-expression="happy"] .mesh-group[data-group="browL"],
 [data-expression="happy"] .mesh-group[data-group="browR"] {
   transform: translateY(-2px);
@@ -476,15 +491,26 @@ input {
 [data-expression="happy"] .mesh-group[data-group="mouth"] {
   transform: scale(1.1, 1.25);
 }
-[data-expression="happy"] .face-line,
-[data-expression="happy"] .face-iris {
-  stroke: var(--green);
+[data-expression="happy"] .face-mouth {
   fill: var(--green);
+  fill-opacity: 0.75;
+}
+[data-expression="happy"] .face-eye,
+[data-expression="happy"] .face-iris,
+[data-expression="happy"] .face-mouth {
+  stroke: var(--green);
   filter: drop-shadow(0 0 2px var(--green)) drop-shadow(0 0 6px var(--green));
+}
+[data-expression="happy"] .face-eye {
+  fill: var(--green);
+}
+[data-expression="happy"] .face-cheek {
+  opacity: 0.4;
+  fill: var(--green);
 }
 
 /* curious — one brow raised, that eye slightly widened, gaze drift
-   replaced by a static toward-the-subject shift */
+   replaced by a static toward-the-subject shift, a faint warm cheek */
 [data-expression="curious"] .mesh-group[data-group="browR"] {
   transform: translateY(-4px);
 }
@@ -495,8 +521,12 @@ input {
   animation: none;
   transform: translate(1.5px, -0.5px);
 }
+[data-expression="curious"] .face-cheek {
+  opacity: 0.2;
+}
 
-/* concerned — brows angled inward/down, mouth softened into a small frown */
+/* concerned — brows angled inward/down, mouth softened into a small
+   frown, glow shifts to the alert color, cheeks tint the same way */
 [data-expression="concerned"] .mesh-group[data-group="browL"] {
   transform: rotate(8deg) translate(2px, 1px);
 }
@@ -506,14 +536,21 @@ input {
 [data-expression="concerned"] .mesh-group[data-group="mouth"] {
   transform: scaleY(-0.7) translateY(-6px);
 }
-[data-expression="concerned"] .face-line,
-[data-expression="concerned"] .face-iris {
+[data-expression="concerned"] .face-eye,
+[data-expression="concerned"] .face-iris,
+[data-expression="concerned"] .face-brow,
+[data-expression="concerned"] .face-mouth {
   stroke: var(--muted-c);
   fill: var(--muted-c);
   filter: drop-shadow(0 0 2px var(--muted-c)) drop-shadow(0 0 6px var(--muted-c));
 }
+[data-expression="concerned"] .face-cheek {
+  opacity: 0.28;
+  fill: var(--muted-c);
+}
 
-/* sad — a gentle, deliberately UNexaggerated downward expression */
+/* sad — a gentle, deliberately UNexaggerated downward expression, dimmer
+   throughout (including the cheeks, which fade rather than warm) */
 [data-expression="sad"] .mesh-group[data-group="browL"] {
   transform: rotate(6deg) translateY(1px);
 }
@@ -523,9 +560,13 @@ input {
 [data-expression="sad"] .mesh-group[data-group="mouth"] {
   transform: scaleY(-0.6) translateY(-4px);
 }
-[data-expression="sad"] .face-line,
-[data-expression="sad"] .face-iris {
-  opacity: 0.8;
+[data-expression="sad"] .face-eye,
+[data-expression="sad"] .face-brow,
+[data-expression="sad"] .face-mouth {
+  opacity: 0.7;
+}
+[data-expression="sad"] .face-cheek {
+  opacity: 0.06;
 }
 
 /* confused — small asymmetric wobble across brows and mouth */
@@ -543,6 +584,9 @@ input {
 [data-expression="reassuring"] .mesh-group[data-group="mouth"] {
   transform: scale(1.03, 1.1);
 }
+[data-expression="reassuring"] .face-cheek {
+  opacity: 0.18;
+}
 [data-expression="reassuring"] {
   animation-duration: 7.5s;
 }
@@ -558,8 +602,12 @@ input {
 [data-expression="empathetic"] .mesh-group[data-group="eyeR"] {
   transform: scaleY(0.96);
 }
+[data-expression="empathetic"] .face-cheek {
+  opacity: 0.16;
+}
 
-/* surprised — raised brows, widened eyes, a small rounded open mouth */
+/* surprised — raised brows, widened eyes, a small rounded OPEN mouth
+   (filled, like the reference's own "o" shape), a light cheek flush */
 [data-expression="surprised"] .mesh-group[data-group="browL"],
 [data-expression="surprised"] .mesh-group[data-group="browR"] {
   transform: translateY(-5px);
@@ -571,8 +619,15 @@ input {
 [data-expression="surprised"] .mesh-group[data-group="mouth"] {
   transform: scale(0.7, 1.7);
 }
+[data-expression="surprised"] .face-mouth {
+  fill: var(--face-glow);
+  fill-opacity: 0.7;
+}
 [data-expression="surprised"] .mesh-group[data-group^="pupil"] {
   animation: none;
+}
+[data-expression="surprised"] .face-cheek {
+  opacity: 0.3;
 }
 
 /* calm — slower breathing, softly lowered eyes, otherwise neutral */
@@ -599,9 +654,9 @@ input {
   animation-duration: 4.5s;
 }
 
-/* excited — wide bright eyes, lifted brows, an eager open smile, quicker
-   breathing; the highest-energy positive expression in the set, distinct
-   from happy's calmer smile. */
+/* excited — wide bright eyes, lifted brows, an eager OPEN smile (filled),
+   quicker breathing, the warmest cheeks in the set; the highest-energy
+   positive expression, distinct from happy's calmer closed-ish smile. */
 [data-expression="excited"] .mesh-group[data-group="browL"],
 [data-expression="excited"] .mesh-group[data-group="browR"] {
   transform: translateY(-4px);
@@ -613,11 +668,22 @@ input {
 [data-expression="excited"] .mesh-group[data-group="mouth"] {
   transform: scale(1.1, 1.5);
 }
-[data-expression="excited"] .face-line,
-[data-expression="excited"] .face-iris {
-  stroke: var(--acc-2);
+[data-expression="excited"] .face-mouth {
   fill: var(--acc-2);
+  fill-opacity: 0.8;
+}
+[data-expression="excited"] .face-eye,
+[data-expression="excited"] .face-iris,
+[data-expression="excited"] .face-mouth {
+  stroke: var(--acc-2);
   filter: drop-shadow(0 0 2px var(--acc-2)) drop-shadow(0 0 6px var(--acc-2));
+}
+[data-expression="excited"] .face-eye {
+  fill: var(--acc-2);
+}
+[data-expression="excited"] .face-cheek {
+  opacity: 0.5;
+  fill: var(--acc-2);
 }
 [data-expression="excited"] {
   animation-duration: 2.8s;
@@ -656,16 +722,6 @@ input {
   }
 }
 
-@keyframes face-scanline-drift {
-  0% { background-position: 0 0; }
-  100% { background-position: 0 60px; }
-}
-
-@keyframes face-spark-twinkle {
-  0%, 100% { opacity: 0; transform: scale(0.6); }
-  50% { opacity: 0.8; transform: scale(1.4); }
-}
-
 @keyframes face-think-pulse {
   0%, 100% {
     opacity: 0.7;
@@ -677,12 +733,13 @@ input {
 
 @media (prefers-reduced-motion: reduce) {
   .sarana-face-glow,
-  .sarana-face-scanline,
   .sarana-face-mesh,
   .mesh-group,
-  .face-line,
+  .face-eye,
   .face-iris,
-  .mesh-spark {
+  .face-brow,
+  .face-mouth,
+  .face-cheek {
     animation: none !important;
     transition: none !important;
   }

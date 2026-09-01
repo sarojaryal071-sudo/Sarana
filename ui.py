@@ -607,6 +607,303 @@ class HudCanvas(QWidget):
                 cl  = qcol(C.BORDER_B)
             p.fillRect(QRectF(wx0 + i * bw, wy + 20 - hgt, bw - 1, hgt), cl)
 
+
+# ── SaranaFaceCanvas geometry ────────────────────────────────────────────
+# Desktop counterpart to frontend/src/lib/faceMesh.js — same 200x240
+# coordinate space, same shapes (two big bold filled eyes + a bright
+# catch-light, thick simple brow strokes, one mouth curve, two soft cheek
+# glows), built directly from the user's own reference image and
+# recolored into SARANA's existing glow palette (see that module's own
+# header for the full color-translation reasoning, which applies
+# identically here). Reimplemented in QPainter since this file has no
+# SVG/CSS to lean on — no outer head-ring, no dense mesh, no scanline/
+# spark decoration, matching the web build's own simplification.
+_FACE_GLOW = "#74dcff"  # matches frontend's --face-glow token exactly
+
+# Expression parameters for the 5 states real app status can honestly
+# reach today (see frontend/src/lib/faceExpressions.js's own "honest
+# mapping" note, which applies identically here — main.py's status
+# precedence is shared by both platforms). Desktop deliberately doesn't
+# pre-wire the web build's other ten presets — nothing on EITHER platform
+# can reach them from real signal yet, so porting them here would be
+# exactly the unused weight this project's own "don't over-engineer"
+# guidance warns against.
+_SARANA_FACE_EXPRESSIONS = {"neutral", "listening", "thinking", "speaking", "concerned"}
+
+
+class SaranaFaceCanvas(QWidget):
+    """Desktop counterpart to the web frontend's SaranaFace.jsx (see that
+    file's own header) — SARANA's normal-mode visual identity: two big
+    bold glowing eyes, thick simple brows, a mouth curve, soft cheek
+    glows. This is an entirely NEW, ADDITIVE widget living alongside
+    HudCanvas (the JARVIS orb, above): not one line of HudCanvas is
+    touched or called by this class. Which one is visible is decided
+    purely by MainWindow swapping the _hud_cam_stack index (see
+    _apply_jarvis_mode) — exactly mirroring how App.jsx swaps
+    Orb.jsx/SaranaFace.jsx in the web build, satisfying the same
+    "web + desktop represent the same SARANA identity, existing JARVIS
+    orb stays completely intact" requirement on this platform.
+
+    Deliberately reimplements the shapes natively rather than embedding a
+    web view — no new dependency, consistent with every other widget in
+    this file, and avoids the far heavier weight an embedded browser
+    engine would add for a small presentational face.
+    """
+
+    def __init__(self, assistant_name: str = "SARANA", parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.setMinimumSize(300, 300)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self.muted       = False
+        self.speaking    = False
+        self.state       = "INITIALISING"
+        self._assistant_name = assistant_name
+        self.audio_level = 0.0  # real playback amplitude, 0..1 — see MainWindow._apply_audio_level()
+
+        self._tick          = 0
+        self._breathe_phase = 0.0
+        self._blink         = False
+        self._next_blink_at = time.time() + random.uniform(2.4, 5.6)
+        self._blink_until   = 0.0
+        self._gaze_phase    = 0.0
+
+        self._tmr = QTimer(self)
+        self._tmr.timeout.connect(self._step)
+        self._tmr.start(16)
+
+    def _expression(self) -> str:
+        # Mirrors lib/faceExpressions.js's mapStatusToExpression() exactly
+        # (same status precedence, same five reachable outcomes) — kept
+        # as a small local method rather than a shared cross-language
+        # import (Python/JS can't share a module here), but the mapping
+        # itself is a direct, deliberate port, not a reinvention.
+        if self.muted:
+            return "concerned"
+        if self.speaking:
+            return "speaking"
+        if self.state == "THINKING":
+            return "thinking"
+        if self.state == "SLEEPING":
+            return "neutral"
+        return "listening"
+
+    def _step(self):
+        # Performance: this widget only needs to animate while it's the
+        # visible one in _hud_cam_stack — skip all per-frame work (and the
+        # repaint it would trigger) whenever it isn't on screen, per the
+        # project's own "avoid continuously running expensive processing
+        # while idle" requirement.
+        if not self.isVisible():
+            return
+        self._tick += 1
+        now = time.time()
+
+        self._breathe_phase = (self._breathe_phase + (2 * math.pi / 375)) % (2 * math.pi)
+        self._gaze_phase = (self._gaze_phase + (2 * math.pi / 440)) % (2 * math.pi)
+
+        if now >= self._next_blink_at and not self._blink:
+            self._blink = True
+            self._blink_until = now + 0.16
+        elif self._blink and now >= self._blink_until:
+            self._blink = False
+            self._next_blink_at = now + random.uniform(2.4, 5.6)
+
+        self.update()
+
+    @staticmethod
+    def _eye_path(cx: float, cy: float, rx: float, ry: float) -> "QPainterPath":
+        """A bold, rounded, filled eye shape — the same 4-bezier ellipse
+        approximation as EYE_PATHS in faceMesh.js (kappa≈0.5523), given
+        directly in whatever coordinate space the caller wants (screen
+        space here, via already-scaled/offset cx/cy/rx/ry — see
+        paintEvent). Built fresh per paint call (a handful of cubicTo
+        calls — trivially cheap at 60fps) rather than cached as a Qt
+        object at module scope, matching this file's own established
+        pattern of keeping module-level state as plain data."""
+        k = 0.5523
+        kx, ky = k * rx, k * ry
+        path = QPainterPath()
+        path.moveTo(cx - rx, cy)
+        path.cubicTo(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry)
+        path.cubicTo(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy)
+        path.cubicTo(cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry)
+        path.cubicTo(cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy)
+        path.closeSubpath()
+        return path
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), qcol(C.BG))
+
+        W, H = self.width(), self.height()
+        if W < 10 or H < 10:
+            return
+
+        scale = min(W / 200, H / 240) * 0.82
+        ox = W / 2 - 100 * scale
+        oy = H / 2 - 120 * scale
+
+        def to_screen(x, y) -> QPointF:
+            return QPointF(ox + x * scale, oy + y * scale)
+
+        expr = self._expression()
+        muted = self.muted
+        main_color = qcol(C.MUTED_C) if muted else qcol(_FACE_GLOW)
+
+        # whole-face breathing scale — matches .sarana-face-mesh's
+        # face-breathe keyframe (applied to the ENTIRE face)
+        breathe = 1 + 0.009 * (1 + math.sin(self._breathe_phase))
+        center0 = to_screen(100, 120)
+        p.save()
+        p.translate(center0)
+        p.scale(breathe, breathe)
+        p.translate(-center0)
+
+        # cheeks — a soft blush glow, faintly visible at baseline (never
+        # opacity 0 — see index.css's own note on why: the reference shows
+        # blush constantly, not just on a "happy" expression), warmer for
+        # a genuinely positive/engaged read, dimmer+red-tinted when muted.
+        cheek_a = 70 if muted else (56 if self.speaking else 36)
+        cheek_color = qcol(C.MUTED_C, cheek_a) if muted else qcol(_FACE_GLOW, cheek_a)
+        p.setPen(Qt.PenStyle.NoPen)
+        grad_l = QRadialGradient(to_screen(36, 132), 20 * scale)
+        grad_l.setColorAt(0, cheek_color)
+        grad_l.setColorAt(1, qcol(_FACE_GLOW, 0))
+        grad_r = QRadialGradient(to_screen(164, 132), 20 * scale)
+        grad_r.setColorAt(0, cheek_color)
+        grad_r.setColorAt(1, qcol(_FACE_GLOW, 0))
+        p.setBrush(QBrush(grad_l))
+        p.drawEllipse(to_screen(36, 132), 20 * scale, 20 * scale)
+        p.setBrush(QBrush(grad_r))
+        p.drawEllipse(to_screen(164, 132), 20 * scale, 20 * scale)
+
+        # brows — thick round-capped strokes, a real gap between them
+        # (same fix faceMesh.js's own header documents — two distinct
+        # brows, never a fused unibrow)
+        brow_dy = -3 if expr == "thinking" else 0
+        pen = QPen(main_color, 9 * scale, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for path_pts, tilt in (
+            ([(44, 66), (72, 48), (92, 60)], 1 if expr == "thinking" else 0),
+            ([(108, 60), (128, 48), (156, 66)], -1 if expr == "thinking" else 0),
+        ):
+            brow_path = QPainterPath()
+            (x0, y0), (cxp, cyp), (x1, y1) = path_pts
+            brow_path.moveTo(to_screen(x0, y0 + brow_dy + tilt * 2))
+            brow_path.quadTo(to_screen(cxp, cyp + brow_dy - tilt * 2), to_screen(x1, y1 + brow_dy))
+            p.drawPath(brow_path)
+
+        # eyes — the dominant feature, big bold filled shapes; blink
+        # squashes them to a thin line at their own center, listening
+        # narrows them slightly, same idiom the web build's CSS uses.
+        eye_scale_y = 0.06 if self._blink else (1.04 if expr == "listening" else 1.0)
+        eye_scale_x = 1.0 if self._blink else (0.94 if expr == "listening" else 1.0)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(main_color))
+        for cx in (74, 126):
+            center = to_screen(cx, 108)
+            eye_path = self._eye_path(center.x(), center.y(), 24 * scale, 30 * scale)
+            p.save()
+            p.translate(center)
+            p.scale(eye_scale_x, eye_scale_y)
+            p.translate(-center)
+            p.drawPath(eye_path)
+            p.restore()
+
+        # iris glow + catch-light — the highlight is what makes the eye
+        # read as alive rather than a flat disc (matches the reference's
+        # own single most important detail)
+        gx = 1.2 * math.sin(self._gaze_phase)
+        gy = 0.5 * math.cos(self._gaze_phase * 1.4)
+        p.setBrush(QBrush(qcol(C.MUTED_C, 140) if muted else qcol(_FACE_GLOW, 140)))
+        for cx in (74, 126):
+            p.drawEllipse(to_screen(cx + gx, 108 + gy), 11 * scale, 11 * scale)
+        p.setBrush(QBrush(qcol("#ffffff", 242)))
+        for hx in (68, 120):
+            p.drawEllipse(to_screen(hx + gx, 100 + gy), 3.2 * scale, 3.2 * scale)
+
+        # mouth — one curve; a bold stroke at rest, filled in for
+        # speaking (scaled by REAL playback amplitude — self.audio_level,
+        # set by MainWindow._apply_audio_level() from main.py's actual PCM
+        # batches, not a random guess) and for the flipped-into-a-frown
+        # concerned/muted state.
+        mouth_pts = [(68, 164), (100, 184), (132, 164)]
+        if expr == "speaking":
+            lvl = max(0.0, min(1.0, self.audio_level))
+            sy = 1 + lvl * 1.6
+            fill_a = int(255 * (0.25 + lvl * 0.6))
+        elif muted:
+            sy = -0.7
+            fill_a = 0
+        else:
+            sy = 1.0
+            fill_a = 0
+        mouth_origin = to_screen(100, 174)
+        p.save()
+        p.translate(mouth_origin)
+        p.scale(1.0, sy)
+        p.translate(-mouth_origin)
+        mouth_path = QPainterPath()
+        (mx0, my0), (mcx, mcy), (mx1, my1) = mouth_pts
+        if muted:
+            my0 -= 8; my1 -= 8; mcy -= 8
+        mouth_path.moveTo(to_screen(mx0, my0))
+        mouth_path.quadTo(to_screen(mcx, mcy), to_screen(mx1, my1))
+        if fill_a > 0:
+            fill_path = QPainterPath(mouth_path)
+            fill_path.closeSubpath()  # same auto-close-on-fill trick as the web build
+            p.setBrush(QBrush(qcol(_FACE_GLOW, fill_a)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawPath(fill_path)
+        p.setPen(QPen(main_color, 7 * scale, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(mouth_path)
+        p.restore()
+
+        p.restore()  # breathing scale
+
+        # status label + waveform — same information/idiom as HudCanvas's
+        # own (see that class's paintEvent), recolored to --face-glow so
+        # SARANA reads as its own luminous identity rather than a
+        # recolored JARVIS readout.
+        sy_ = oy + 240 * scale + 8
+        if muted:
+            txt, col = "⊘  MUTED", qcol(C.MUTED_C)
+        elif self.speaking:
+            txt, col = "●  SPEAKING", qcol(C.ACC)
+        elif self.state == "THINKING":
+            sym = "◈" if self._tick % 76 < 38 else "◇"
+            txt, col = f"{sym}  THINKING", qcol(C.ACC2)
+        elif self.state == "SLEEPING":
+            sym = "○" if self._tick % 76 < 38 else "●"
+            txt, col = f"{sym}  SLEEPING", qcol(_FACE_GLOW)
+        else:
+            sym = "●" if self._tick % 76 < 38 else "○"
+            txt, col = f"{sym}  LISTENING", qcol(C.GREEN)
+
+        p.setPen(QPen(col, 1))
+        p.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        p.drawText(QRectF(0, sy_, W, 26), Qt.AlignmentFlag.AlignCenter, txt)
+
+        wy = sy_ + 30
+        N, bw = 36, 8
+        wx0 = (W - N * bw) / 2
+        for i in range(N):
+            if muted:
+                hgt, cl = 2, qcol(C.MUTED_C)
+            elif self.speaking:
+                hgt = random.randint(3, 20)
+                cl  = qcol(_FACE_GLOW) if hgt > 12 else qcol(_FACE_GLOW, 140)
+            else:
+                hgt = int(3 + 2 * math.sin(self._tick * 0.09 + i * 0.6))
+                cl  = qcol(C.BORDER_B)
+            p.fillRect(QRectF(wx0 + i * bw, wy + 20 - hgt, bw - 1, hgt), cl)
+
+
 class MetricBar(QWidget):
 
     def __init__(self, label: str, color: str = C.PRI, parent=None):
@@ -1912,6 +2209,18 @@ class MainWindow(QMainWindow):
         # Center column: HUD + resizable content panel via QSplitter
         self.hud = HudCanvas(face_path, _display)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # SARANA Face UI task: desktop's SARANA identity, additive
+        # alongside self.hud — see SaranaFaceCanvas's own header. Which of
+        # the two is visible is decided entirely by _hud_cam_stack's
+        # current index (see _apply_jarvis_mode below); self.hud itself
+        # is never reconfigured or hidden by attribute, only by not being
+        # the stack's current widget.
+        self.sarana_face = SaranaFaceCanvas(_display)
+        self.sarana_face.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # Tracks which HUD identity is current so _on_cam_stream's "return
+        # from camera" path (see below) restores the right one instead of
+        # assuming JARVIS's orb.
+        self._jarvis_active = False
         self._content_panel = self._build_content_panel()
 
         # Live camera container — replaces HUD when camera stream is active
@@ -1948,10 +2257,18 @@ class MainWindow(QMainWindow):
         )
         _cam_v.addWidget(self._cam_live_lbl, stretch=1)
 
-        # Stack: 0 = animated HUD, 1 = live camera
+        # Stack: 0 = JARVIS orb (HudCanvas), 1 = live camera, 2 = SARANA
+        # face (SaranaFaceCanvas) — index 2 is the DEFAULT (SARANA is the
+        # normal/default identity, JARVIS is opt-in, same framing as the
+        # web build's own state.jarvisMode default); a jarvis_mode_changed
+        # message flips to index 0 (see _apply_jarvis_mode), and stopping
+        # a camera share returns to whichever of those two was current
+        # (see _on_cam_stream).
         self._hud_cam_stack = QStackedWidget()
         self._hud_cam_stack.addWidget(self.hud)
         self._hud_cam_stack.addWidget(_cam_cont)
+        self._hud_cam_stack.addWidget(self.sarana_face)
+        self._hud_cam_stack.setCurrentIndex(2)
 
         self._center_split = QSplitter(Qt.Orientation.Vertical)
         self._center_split.setStyleSheet(f"""
@@ -2042,7 +2359,12 @@ class MainWindow(QMainWindow):
         if start:
             self._hud_cam_stack.setCurrentIndex(1)
         else:
-            self._hud_cam_stack.setCurrentIndex(0)
+            # SARANA Face UI task: return to whichever identity was
+            # actually active before the camera took over — JARVIS's orb
+            # (index 0) or SARANA's face (index 2) — not unconditionally
+            # the orb the way this used to (there was only ever one HUD
+            # widget before SaranaFaceCanvas existed).
+            self._hud_cam_stack.setCurrentIndex(0 if self._jarvis_active else 2)
             self._cam_live_lbl.clear()
 
     def _on_cam_frame(self, data: bytes) -> None:
@@ -3242,6 +3564,7 @@ class MainWindow(QMainWindow):
             self._sub_lbl.setText("Personal AI Assistant")
         self._log._ai_name_lc = self._assistant_name.lower()
         self.hud._assistant_name = display
+        self.sarana_face._assistant_name = display
 
         color_changed = False
         if ui_color:
@@ -3314,6 +3637,7 @@ class MainWindow(QMainWindow):
     def _toggle_mute(self):
         self._muted = not self._muted
         self.hud.muted = self._muted
+        self.sarana_face.muted = self._muted
         self._style_mute_btn()
         if self._muted:
             self._apply_state("MUTED")
@@ -3352,9 +3676,18 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        # Mirrored onto the SARANA face too — cheap (a couple of
+        # attribute writes; SaranaFaceCanvas's own _step() already skips
+        # all real work while it isn't the visible widget) and means
+        # whichever identity is currently on screen is always showing the
+        # true, current state, not a stale snapshot from before the last
+        # JARVIS-mode switch.
+        self.sarana_face.state    = state
+        self.sarana_face.speaking = (state == "SPEAKING")
 
     def _apply_audio_level(self, level: float):
         self.hud.audio_level = level
+        self.sarana_face.audio_level = level
 
     def _apply_jarvis_mode(self, active: bool):
         """Desktop HUD's counterpart to the web frontend's Orb/SaranaFace
@@ -3372,7 +3705,17 @@ class MainWindow(QMainWindow):
         "customize assistant name" flow (_apply_name_update) already
         uses for this same "change the displayed name" concept — no new
         UI elements, no HUD/waveform redesign, no change to the JARVIS
-        toggle's own on/off lifecycle (that stays main.py's job)."""
+        toggle's own on/off lifecycle (that stays main.py's job).
+
+        SARANA Face UI task: now ALSO switches which HUD widget is
+        visible (self.hud's JARVIS orb vs self.sarana_face's SARANA face
+        — see SaranaFaceCanvas's own header), the desktop counterpart of
+        App.jsx's Orb/SaranaFace swap. Respects a live camera stream
+        exactly like every other HUD-affecting change already does — if
+        the camera is currently showing (_hud_cam_stack index 1),
+        _jarvis_active is updated so _on_cam_stream restores the RIGHT
+        identity once the camera stops, but the visible stack index
+        itself is left alone until then."""
         base = self._assistant_name.upper()
         if active:
             display = "JARVIS"
@@ -3390,6 +3733,10 @@ class MainWindow(QMainWindow):
         self._title_lbl.setText(display)
         self.hud._assistant_name = display
         self.hud.update()
+
+        self._jarvis_active = active
+        if self._hud_cam_stack.currentIndex() != 1:  # camera isn't active — safe to switch now
+            self._hud_cam_stack.setCurrentIndex(0 if active else 2)
 
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False

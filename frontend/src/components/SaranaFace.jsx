@@ -1,52 +1,38 @@
-// src/components/SaranaFace.jsx — SARANA's visual identity: a minimal
-// "eyes + brows + mouth only" glowing outline face inside a circular
-// frame (per the task's reference image) — not a dense wireframe mesh.
-// Replaces the earlier low-poly wireframe-mesh version this file used to
-// render (git history has that generation) — JARVIS's Orb.jsx is
-// untouched either way.
+// src/components/SaranaFace.jsx — SARANA's visual identity: a simple,
+// bold, filled-shape face (two round glowing eyes + highlight, two thick
+// brow strokes, one mouth curve, two soft cheek glows) inside the orb's
+// own ambient glow — a direct match to the user's own reference image,
+// recolored into SARANA's palette (see lib/faceMesh.js's own header for
+// the full reasoning). No outer head-ring, no dense mesh, no scanline/
+// spark decoration — this generation is a deliberate SIMPLIFICATION from
+// the previous one, not an addition to it (git history has every earlier
+// generation). JARVIS's Orb.jsx is untouched either way, same as always.
 //
 // Renders into the exact same "orb-stage" slot Orb.jsx and VisionStage.jsx
 // already occupy (see App.jsx, which mounts exactly one of the three at a
 // time, crossfading between them — see App.jsx's own transition wrapper).
 //
-// The geometry (path data for each facial feature) is pure, static data
-// from lib/faceMesh.js — hand-authored SVG paths, not procedural math or
-// a mesh extraction (see that module's own header note on why: there is
-// no mesh in this design, just a handful of glowing curves). This
-// component's only job is turning that fixed geometry + the current
-// expression into SVG markup and letting index.css's
-// [data-expression="..."] rules move whole <g> groups around with CSS
-// transforms — no per-frame JS animation loop anywhere in this file.
+// The geometry (path/shape data for each facial feature) is pure, static
+// data from lib/faceMesh.js — hand-authored, not procedural math or a
+// mesh extraction. This component's only job is turning that fixed
+// geometry + the current expression into SVG markup and letting
+// index.css's [data-expression="..."] rules move whole <g> groups around
+// with CSS transforms — no per-frame JS animation loop anywhere in this
+// file (the mouth's real-audio drive is an event-driven subscription, see
+// below, not a polling loop).
 //
 // Expression mapping lives in lib/faceExpressions.js (a pure, separately
-// unit-tested function) — this component only turns "what expression" into
-// "what shows on screen"; it never invents its own status logic. The
-// vocabulary is wider than what real app state can honestly reach (see
-// that module's own comment) — this component doesn't know or care which
-// expressions are "reachable", it just renders whatever
-// mapStatusToExpression() returns.
+// unit-tested function) — this component only turns "what expression"
+// into "what shows on screen"; it never invents its own status logic.
 //
 // Purely presentational: aria-hidden on the visual face itself, no
 // interactive elements. State is still announced via the same
-// role="status"/aria-live text label the earlier generations had — the
+// role="status"/aria-live text label every earlier generation had — the
 // face must never be the ONLY indication of state.
 import { useEffect, useRef, useState } from "react";
 import { mapStatusToExpression } from "../lib/faceExpressions";
-import { FACE_GROUPS, FACE_VIEWBOX, HEAD_CIRCLE, EYE_PATHS, IRIS, BROW_PATHS, MOUTH_PATH } from "../lib/faceMesh";
+import { FACE_GROUPS, FACE_VIEWBOX, EYE_PATHS, IRIS, BROW_PATHS, MOUTH_PATH, CHEEKS } from "../lib/faceMesh";
 import { subscribeMouthLevel } from "../lib/mouthLevel";
-
-// A handful of fixed positions for the ambient sparks near the circle rim
-// (restrained particles, matching the reference's own couple of small
-// accent dots) — plain SVG circles + CSS keyframes, not a particle
-// system. Deliberately NOT random-per-render — fixed, computed once, same
-// reasoning as the geometry constants themselves.
-const SPARKS = [
-  { cx: 40, cy: 60 },
-  { cx: 172, cy: 80 },
-  { cx: 28, cy: 160 },
-  { cx: 178, cy: 150 },
-  { cx: 100, cy: 24 },
-];
 
 // Mirrors Orb.jsx's own status-label glyphs/wording exactly (see its
 // header comment on matching ui.py's HudCanvas precedence) — same
@@ -74,13 +60,11 @@ export default function SaranaFace({ status, assistantName }) {
   const timerRef = useRef(null);
   const faceRef = useRef(null);
 
-  // Real playback-amplitude mouth: see lib/mouthLevel.js's own header
-  // note on why this is a subscription, not a per-frame polling loop —
-  // SaranaFace stays a pure, event-driven renderer,
-  // CSS still carries the actual motion via the --mouth-open custom
-  // property (see index.css's speaking-expression mouth rule). Writes
-  // the DOM property directly (never React state) so a chunk arriving
-  // mid-speech doesn't force a full component re-render.
+  // Real playback-amplitude mouth: see lib/mouthLevel.js's own header note
+  // on why this is a subscription, not a per-frame polling loop — this
+  // component stays a pure, event-driven renderer. Writes the DOM
+  // property directly (never React state) so a chunk arriving mid-speech
+  // doesn't force a full component re-render.
   useEffect(() => {
     return subscribeMouthLevel((level) => {
       faceRef.current?.style.setProperty("--mouth-open", String(level));
@@ -121,7 +105,6 @@ export default function SaranaFace({ status, assistantName }) {
   return (
     <div className="orb-stage">
       <div className="sarana-face-glow" aria-hidden="true" />
-      <div className="sarana-face-scanline" aria-hidden="true" />
       <svg
         ref={faceRef}
         className={`sarana-face-mesh${blinking ? " sarana-face-blink" : ""}`}
@@ -129,21 +112,18 @@ export default function SaranaFace({ status, assistantName }) {
         data-expression={expression}
         aria-hidden="true"
       >
-        <g className="mesh-rings">
-          <circle className="face-outline" cx={HEAD_CIRCLE.cx} cy={HEAD_CIRCLE.cy} r={HEAD_CIRCLE.r} />
-        </g>
-        <g className="mesh-sparks">
-          {SPARKS.map((s, i) => (
-            <circle key={i} className="mesh-spark" cx={s.cx} cy={s.cy} r="1" />
-          ))}
-        </g>
+        {/* Cheeks render FIRST (behind everything else) so the glow sits
+            under the eyes/mouth, not on top of them — same reasoning as
+            painting a blush before the rest of a face. */}
         {FACE_GROUPS.map((group) => (
           <g key={group} className="mesh-group" data-group={group}>
-            {group === "browL" && <path d={BROW_PATHS.browL} className="face-line" />}
-            {group === "browR" && <path d={BROW_PATHS.browR} className="face-line" />}
-            {group === "eyeL" && <path d={EYE_PATHS.eyeL} className="face-line" />}
-            {group === "eyeR" && <path d={EYE_PATHS.eyeR} className="face-line" />}
-            {group === "mouth" && <path d={MOUTH_PATH} className="face-line" />}
+            {group === "cheekL" && <circle className="face-cheek" cx={CHEEKS.cheekL.cx} cy={CHEEKS.cheekL.cy} r={CHEEKS.cheekL.r} />}
+            {group === "cheekR" && <circle className="face-cheek" cx={CHEEKS.cheekR.cx} cy={CHEEKS.cheekR.cy} r={CHEEKS.cheekR.r} />}
+            {group === "browL" && <path d={BROW_PATHS.browL} className="face-brow" />}
+            {group === "browR" && <path d={BROW_PATHS.browR} className="face-brow" />}
+            {group === "eyeL" && <path d={EYE_PATHS.eyeL} className="face-eye" />}
+            {group === "eyeR" && <path d={EYE_PATHS.eyeR} className="face-eye" />}
+            {group === "mouth" && <path d={MOUTH_PATH} className="face-mouth" />}
             {(group === "pupilL" || group === "pupilR") && (
               <>
                 <circle
