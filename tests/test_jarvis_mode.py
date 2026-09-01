@@ -91,6 +91,21 @@ def test_jarvis_mode_on_sets_flag_broadcasts_and_returns_directive() -> None:
     print("test_jarvis_mode_on_sets_flag_broadcasts_and_returns_directive: PASS")
 
 
+def test_jarvis_mode_on_turn_message_instructs_sir_addressing_immediately() -> None:
+    # The turn message is what actually fires the transition IN THE
+    # MOMENT (the persistent [JARVIS_MODE] block is the standing
+    # reference) — it must carry the "sir" override too, not just the
+    # system_instruction block, so the very next reply gets it right.
+    async def _run():
+        jarvis = _jarvis(auto_start=True)
+        fr = await jarvis._execute_tool(_fc("jarvis_mode", action="on"))
+        result = fr.response["result"].lower()
+        assert '"sir"' in result
+        assert "overrides" in result
+    asyncio.run(_run())
+    print("test_jarvis_mode_on_turn_message_instructs_sir_addressing_immediately: PASS")
+
+
 def test_jarvis_mode_off_clears_flag_broadcasts_and_returns_directive() -> None:
     async def _run():
         jarvis = _jarvis(auto_start=True)
@@ -167,6 +182,25 @@ def test_build_config_jarvis_mode_block_reflects_current_state() -> None:
     assert "[JARVIS_MODE]" in text
     assert "currently ON" in text
     print("test_build_config_jarvis_mode_block_reflects_current_state: PASS")
+
+
+def test_build_config_jarvis_mode_block_gives_the_full_iron_man_jarvis_character() -> None:
+    # The user's own request: JARVIS mode should be the FULL classic
+    # movie-JARVIS character, not just "a bit more formal" — address as
+    # "sir" (overriding the normal name-based ADDRESS rule for as long as
+    # the mode stays on), dry wit, unflappable composure, never breaking
+    # character while active.
+    jarvis = JarvisLive(HeadlessSurface())
+    jarvis._jarvis_mode = True
+    text = jarvis._build_config().system_instruction
+    section = text.split("[JARVIS_MODE]")[1].split("[LOCATION]")[0]
+    lowered = section.lower()
+    assert '"sir"' in lowered
+    assert "efendim" in lowered  # Turkish equivalent, matching the ADDRESS block's own bilingual precedent
+    assert "overrides" in lowered  # must explicitly name that it beats the normal ADDRESS rule
+    assert "wit" in lowered
+    assert "never break character" in lowered
+    print("test_build_config_jarvis_mode_block_gives_the_full_iron_man_jarvis_character: PASS")
 
 
 def test_build_config_jarvis_mode_desktop_vs_web_capability_text_differs() -> None:
@@ -576,12 +610,14 @@ if __name__ == "__main__":
     test_jarvis_mode_is_universal_not_desktop_only_or_web_only()
     test_computer_control_is_still_desktop_only()
     test_jarvis_mode_on_sets_flag_broadcasts_and_returns_directive()
+    test_jarvis_mode_on_turn_message_instructs_sir_addressing_immediately()
     test_jarvis_mode_off_clears_flag_broadcasts_and_returns_directive()
     test_jarvis_mode_on_off_updates_the_desktop_ui_identity()
     test_jarvis_mode_invalid_action_leaves_state_unchanged()
     test_jarvis_mode_on_message_differs_between_desktop_and_web()
     test_build_config_includes_jarvis_mode_block_off_by_default()
     test_build_config_jarvis_mode_block_reflects_current_state()
+    test_build_config_jarvis_mode_block_gives_the_full_iron_man_jarvis_character()
     test_build_config_jarvis_mode_desktop_vs_web_capability_text_differs()
     test_build_config_jarvis_mode_desktop_section_covers_goal_reasoning_and_device_capability()
     test_computer_control_new_actions_blocked_without_jarvis_mode()
