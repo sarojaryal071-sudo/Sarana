@@ -299,10 +299,32 @@ input {
   position: absolute;
   inset: -8%;
   border-radius: 50%;
-  background: radial-gradient(circle at 50% 46%, var(--face-glow-soft), transparent 68%);
+  background: radial-gradient(circle at 50% 46%, var(--face-glow-soft), transparent 68%),
+    radial-gradient(circle at 50% 50%, transparent 60%, rgba(0, 3, 6, 0.35) 100%);
   filter: blur(4px);
   animation: face-breathe 6s ease-in-out infinite;
   pointer-events: none;
+}
+
+/* Restrained holographic scanlines (Face Cloner-inspired composite pass,
+   recreated as a plain CSS overlay instead of a shader — see that
+   project's post-process scanline pass) — a handful of faint horizontal
+   bands drifting slowly downward. Deliberately very low opacity: the face
+   stays the primary visual element, this is texture, not a light show. */
+.sarana-face-scanline {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(143, 252, 255, 0.05) 0px,
+    rgba(143, 252, 255, 0.05) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: screen;
+  opacity: 0.35;
+  animation: face-scanline-drift 9s linear infinite;
 }
 
 .sarana-face-mesh {
@@ -312,6 +334,11 @@ input {
   height: 100%;
   overflow: visible;
   animation: face-breathe 6s ease-in-out infinite;
+  /* Real per-chunk playback amplitude (0..1), written imperatively by
+     SaranaFace.jsx from lib/mouthLevel.js — see the "speaking" mouth
+     rules below. 0 = mouth at rest, the correct default before any audio
+     has arrived and after the queue drains. */
+  --mouth-open: 0;
 }
 
 .mesh-ring {
@@ -330,9 +357,32 @@ input {
 
 .mesh-node {
   fill: var(--face-glow);
-  filter: drop-shadow(0 0 2.5px var(--face-glow));
+  /* Two-layer glow (tight core + soft outer bloom) — a cheap CSS stand-in
+     for Face Cloner's actual bloom pass (threshold + blur chain), which
+     needs a GPU post-process pipeline this project deliberately doesn't
+     carry. */
+  filter: drop-shadow(0 0 1.5px var(--face-glow)) drop-shadow(0 0 4px var(--face-glow-soft));
   transition: fill 420ms ease;
 }
+
+/* Restrained ambient sparks (Face Cloner's "instanced vertex sparks",
+   scaled way down — five fixed points, not a particle system) — a slow
+   twinkle so the orb reads as faintly alive even where the face mesh
+   itself has no nodes. Timing is staggered per-point via nth-of-type
+   rather than inline style (see SaranaFace.jsx's own note on why). */
+.mesh-spark {
+  fill: var(--face-glow);
+  opacity: 0;
+  filter: drop-shadow(0 0 2px var(--face-glow));
+  animation: face-spark-twinkle 5.5s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.mesh-spark:nth-of-type(1) { animation-delay: 0s; animation-duration: 5.2s; }
+.mesh-spark:nth-of-type(2) { animation-delay: 1.1s; animation-duration: 6.1s; }
+.mesh-spark:nth-of-type(3) { animation-delay: 2.4s; animation-duration: 5.6s; }
+.mesh-spark:nth-of-type(4) { animation-delay: 0.6s; animation-duration: 6.6s; }
+.mesh-spark:nth-of-type(5) { animation-delay: 1.8s; animation-duration: 5.9s; }
 
 .mesh-group {
   transform-box: fill-box;
@@ -359,15 +409,18 @@ input {
 }
 
 /* ── expression system ─────────────────────────────────────────────────
-   Fourteen expressions, each just a handful of transform/opacity/color
+   Fifteen expressions, each just a handful of transform/opacity/color
    rules on a handful of named groups — never a different face per
    state, exactly the "reusable facial system where small parameters
-   change" the brief asks for. Only neutral/listening/thinking/speaking/
-   concerned are ever actually reachable from real app state today (see
-   lib/faceExpressions.js's own honest-mapping note) — the rest exist so
-   the vocabulary is ready without a fabricated emotion signal driving
-   them. Every rule stays deliberately subtle — small translates/scales/
-   rotations, never a cartoon leap. */
+   change" the brief asks for (also the SARANA Face UI task's own "one
+   underlying face structure, manipulate via parameters" requirement —
+   already satisfied by this architecture, unchanged by that task). Only
+   neutral/listening/thinking/speaking/concerned are ever actually
+   reachable from real app state today (see lib/faceExpressions.js's own
+   honest-mapping note) — the rest exist so the vocabulary is ready
+   without a fabricated emotion signal driving them. Every rule stays
+   deliberately subtle — small translates/scales/rotations, never a
+   cartoon leap. */
 
 /* neutral — calm, relaxed: every group's default (untransformed) position
    already IS neutral; this rule just restates the baseline breathing
@@ -401,14 +454,20 @@ input {
   animation: face-think-pulse 2.4s ease-in-out infinite;
 }
 
-/* speaking — mouth node-groups animate with irregular timing/amplitude
-   (asymmetric top/bottom keyframes) so it never looks like a robotic
-   open-close-open-close loop; eyes stay put, alive rather than static. */
+/* speaking — mouth driven by --mouth-open, a real per-chunk playback
+   amplitude (0..1, set by SaranaFace.jsx from lib/mouthLevel.js — see
+   audioOut.js's own note on where the number comes from), NOT a fixed
+   looping keyframe: the shape naturally varies with what SARANA is
+   actually saying instead of visibly repeating on a beat. A faster,
+   more linear transition than .mesh-group's default 480ms elastic curve
+   keeps it feeling responsive rather than bouncy. Eyes stay put. */
 [data-expression="speaking"] .mesh-group[data-group="mouthTop"] {
-  animation: face-speak-top 620ms ease-in-out infinite;
+  transform: translateY(calc(var(--mouth-open) * -6px)) scale(calc(1 - var(--mouth-open) * 0.06), calc(1 - var(--mouth-open) * 0.12));
+  transition: transform 70ms linear;
 }
 [data-expression="speaking"] .mesh-group[data-group="mouthBottom"] {
-  animation: face-speak-bottom 620ms ease-in-out infinite;
+  transform: translateY(calc(var(--mouth-open) * 8px)) scale(calc(1 + var(--mouth-open) * 0.08), calc(1 + var(--mouth-open) * 0.2));
+  transition: transform 70ms linear;
 }
 
 /* happy — lifted brows, a fuller mouth curve, brightened cheeks */
@@ -562,6 +621,35 @@ input {
   animation-duration: 4.5s;
 }
 
+/* excited — wide bright eyes, lifted brows, an eager open-mouth smile,
+   quicker breathing; the highest-energy positive expression in the set,
+   distinct from happy's calmer close-mouth smile. */
+[data-expression="excited"] .mesh-group[data-group="browL"],
+[data-expression="excited"] .mesh-group[data-group="browR"] {
+  transform: translateY(-4px);
+}
+[data-expression="excited"] .mesh-group[data-group="eyeL"],
+[data-expression="excited"] .mesh-group[data-group="eyeR"] {
+  transform: scale(1.06, 1.1);
+}
+[data-expression="excited"] .mesh-group[data-group="mouthTop"] {
+  transform: translateY(-1px) scale(1.05, 1.1);
+}
+[data-expression="excited"] .mesh-group[data-group="mouthBottom"] {
+  transform: translateY(2px) scale(1.08, 1.3);
+}
+[data-expression="excited"] .mesh-group[data-group="cheekL"],
+[data-expression="excited"] .mesh-group[data-group="cheekR"] {
+  transform: translateY(-1.5px) scale(1.04);
+}
+[data-expression="excited"] .mesh-node {
+  fill: var(--acc-2);
+  filter: drop-shadow(0 0 1.5px var(--acc-2)) drop-shadow(0 0 4px var(--acc-2));
+}
+[data-expression="excited"] {
+  animation-duration: 2.8s;
+}
+
 .sarana-face-status {
   position: absolute;
   bottom: 14px;
@@ -595,18 +683,14 @@ input {
   }
 }
 
-@keyframes face-speak-top {
-  0%, 100% { transform: translateY(0); }
-  30% { transform: translateY(-2.5px); }
-  55% { transform: translateY(-1px); }
-  80% { transform: translateY(-3.5px); }
+@keyframes face-scanline-drift {
+  0% { background-position: 0 0; }
+  100% { background-position: 0 60px; }
 }
 
-@keyframes face-speak-bottom {
-  0%, 100% { transform: translateY(0); }
-  30% { transform: translateY(3.5px); }
-  55% { transform: translateY(1.5px); }
-  80% { transform: translateY(5px); }
+@keyframes face-spark-twinkle {
+  0%, 100% { opacity: 0; transform: scale(0.6); }
+  50% { opacity: 0.8; transform: scale(1.4); }
 }
 
 @keyframes face-think-pulse {
@@ -620,10 +704,12 @@ input {
 
 @media (prefers-reduced-motion: reduce) {
   .sarana-face-glow,
+  .sarana-face-scanline,
   .sarana-face-mesh,
   .mesh-group,
   .mesh-node,
-  .mesh-edge {
+  .mesh-edge,
+  .mesh-spark {
     animation: none !important;
     transition: none !important;
   }

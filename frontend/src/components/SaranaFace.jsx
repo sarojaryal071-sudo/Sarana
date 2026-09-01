@@ -33,6 +33,24 @@
 import { useEffect, useRef, useState } from "react";
 import { mapStatusToExpression } from "../lib/faceExpressions";
 import { buildFacePoints, buildFaceEdges, FACE_GROUPS, FACE_VIEWBOX } from "../lib/faceMesh";
+import { subscribeMouthLevel } from "../lib/mouthLevel";
+
+// A handful of fixed positions for the ambient wireframe sparks (Face
+// Cloner-inspired restrained particles — see that project's "instanced
+// vertex sparks" — recreated here as plain SVG circles + CSS keyframes,
+// not a particle system, since a handful of fixed points is all "restrained"
+// calls for). Deliberately NOT random-per-render — same reasoning as
+// buildFacePoints() itself: fixed, deterministic, computed once.
+// Per-spark timing (stagger, duration) lives in index.css via
+// nth-of-type selectors, not inline style — this component only places
+// the fixed points; see .mesh-spark:nth-of-type(N) there.
+const SPARKS = [
+  { cx: 40, cy: 70 },
+  { cx: 165, cy: 90 },
+  { cx: 30, cy: 170 },
+  { cx: 172, cy: 165 },
+  { cx: 100, cy: 28 },
+];
 
 // Mirrors Orb.jsx's own status-label glyphs/wording exactly (see its
 // header comment on matching ui.py's HudCanvas precedence) — same
@@ -76,6 +94,21 @@ export default function SaranaFace({ status, assistantName }) {
   const expression = mapStatusToExpression(status);
   const [blinking, setBlinking] = useState(false);
   const timerRef = useRef(null);
+  const meshRef = useRef(null);
+
+  // Real playback-amplitude mouth (Face Cloner-inspired, adapted to fit —
+  // see lib/mouthLevel.js's own header note on why this is a subscription,
+  // not a per-frame polling loop: SaranaFace stays a pure, event-driven
+  // renderer, CSS still carries the actual motion via the --mouth-open
+  // custom property (see index.css's own speaking-expression mouth
+  // rules). Writes the DOM property directly (never React state) so a
+  // chunk arriving mid-speech doesn't force a full component re-render
+  // for a value only two <g> transforms use.
+  useEffect(() => {
+    return subscribeMouthLevel((level) => {
+      meshRef.current?.style.setProperty("--mouth-open", String(level));
+    });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -111,7 +144,9 @@ export default function SaranaFace({ status, assistantName }) {
   return (
     <div className="orb-stage">
       <div className="sarana-face-glow" aria-hidden="true" />
+      <div className="sarana-face-scanline" aria-hidden="true" />
       <svg
+        ref={meshRef}
         className={`sarana-face-mesh${blinking ? " sarana-face-blink" : ""}`}
         viewBox={FACE_VIEWBOX}
         data-expression={expression}
@@ -121,6 +156,11 @@ export default function SaranaFace({ status, assistantName }) {
           <circle className="mesh-ring" cx="100" cy="122" r="96" />
           <circle className="mesh-ring" cx="100" cy="122" r="105" />
           <circle className="mesh-ring" cx="100" cy="122" r="114" />
+        </g>
+        <g className="mesh-sparks">
+          {SPARKS.map((s, i) => (
+            <circle key={i} className="mesh-spark" cx={s.cx} cy={s.cy} r="1" />
+          ))}
         </g>
         <g className="mesh-cross-edges">
           {CROSS_GROUP_EDGES.map(([a, b], i) => (

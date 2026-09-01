@@ -39,6 +39,12 @@ export const FACE_EXPRESSIONS = Object.freeze([
   "surprised",
   "calm",
   "focused",
+  // Face Cloner-inspired pass (SARANA Face UI task): excited completes
+  // the task brief's explicit minimum expression list. Same rule as every
+  // entry above — fully implemented in CSS so the vocabulary stays
+  // extensible, but mapStatusToExpression() below still only ever returns
+  // a state real, already-existing app state can honestly justify.
+  "excited",
 ]);
 
 // Mirrors the exact status precedence Orb.jsx itself already renders
