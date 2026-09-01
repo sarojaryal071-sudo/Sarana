@@ -55,6 +55,9 @@ class HeadlessSurface:
     def set_state(self, state: str) -> None:
         print(f"[Headless] state={state}")
 
+    def set_audio_level(self, level: float) -> None:
+        pass   # no HUD/mouth to animate headlessly (see set_jarvis_mode's own note)
+
     def set_jarvis_mode(self, active: bool) -> None:
         # No HUD to update headlessly (web/server sessions get their
         # identity switch from the dashboard's jarvis_mode_changed

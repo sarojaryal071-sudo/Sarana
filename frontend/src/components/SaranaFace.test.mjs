@@ -80,11 +80,11 @@ test("the expression drives rendering via a data-expression attribute (styled en
   assert.doesNotMatch(src, /style=\{\{/, "expressions should be CSS-driven, not inline style objects");
 });
 
-test("every expression in the shared fourteen-word vocabulary has a matching CSS selector", () => {
+test("every expression in the shared fifteen-word vocabulary has a matching CSS selector", () => {
   const vocabMatch = faceExpressionsSrc.match(/FACE_EXPRESSIONS = Object\.freeze\(\[([\s\S]*?)\]\)/);
   assert.ok(vocabMatch, "could not locate FACE_EXPRESSIONS in faceExpressions.js");
   const names = [...vocabMatch[1].matchAll(/"([a-z]+)"/g)].map((m) => m[1]);
-  assert.equal(names.length, 14, "expected the full fourteen-expression vocabulary");
+  assert.equal(names.length, 15, "expected the full fifteen-expression vocabulary");
   for (const name of names) {
     assert.match(
       css,

@@ -16,6 +16,7 @@ if _platform.system() == "Windows":
 
 # ─────────────────────────────────────────────────────────────────────────────
 
+import array
 import asyncio
 import math
 import os
@@ -1740,6 +1741,7 @@ class JarvisLive:
                 # already applied to _listen_audio/_play_audio/_receive_audio.
                 print(f"[JARVIS] Interrupted — {drained} audio chunks discarded")
         self.set_speaking(False)
+        self.ui.set_audio_level(0.0)  # mouth returns to resting now, not at the next batch
         if self._turn_done_event:
             self._turn_done_event.clear()
         self.ui.write_log("SYS: Interrupted — listening...")
@@ -3786,6 +3788,7 @@ class JarvisLive:
                         and self.audio_in_queue.empty()
                     ):
                         self.set_speaking(False)
+                        self.ui.set_audio_level(0.0)
                         self._turn_done_event.clear()
                     continue
 
@@ -3809,6 +3812,24 @@ class JarvisLive:
                         break
 
                 payload = bytes(batch)
+
+                # Real playback amplitude for the desktop HUD (SARANA Face
+                # UI task, section 7 — same idea as the web frontend's
+                # per-chunk RMS in audioOut.js: no FFT, no new audio
+                # pipeline, just the RMS of the exact PCM about to reach
+                # the speaker/browser). Computed regardless of whether a
+                # local speaker is actually available, same reasoning as
+                # broadcast_audio() below — the HUD should track what
+                # SARANA is saying, not local hardware presence.
+                samples = array.array("h")  # int16 LE, matches RECEIVE_SAMPLE_RATE/dtype above
+                samples.frombytes(payload)
+                if samples:
+                    rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
+                    level = min(1.0, (rms / 32768) * 3.2)
+                else:
+                    level = 0.0
+                self.ui.set_audio_level(level)
+
                 if stream is not None:
                     try:
                         await asyncio.to_thread(stream.write, payload)

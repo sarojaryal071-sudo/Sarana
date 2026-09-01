@@ -15,8 +15,13 @@ export class AudioOutPlayer {
   /**
    * @param {string} token
    * @param {(state: "connecting"|"open"|"closed"|"error") => void} onState
-   * @param {() => void} [onActivity] - called once per chunk played, so a
-   *   caller can infer "currently speaking" from real audio arriving.
+   * @param {(level: number) => void} [onActivity] - called once per chunk
+   *   scheduled for playback with that chunk's own RMS amplitude (0..1,
+   *   computed from the same PCM samples about to play — real playback
+   *   amplitude, not a synthetic/random value), and once more with 0 when
+   *   the queue drains or playback is stopped. A caller can use either the
+   *   fact of a call ("currently speaking") or the level itself (e.g. to
+   *   drive SaranaFace's mouth via lib/mouthLevel.js — see App.jsx).
    */
   constructor(token, onState, onActivity) {
     this._token = token;
@@ -78,15 +83,27 @@ export class AudioOutPlayer {
   }
 
   _playChunk(buf) {
-    // Requires a user gesture to have unlocked audio in most browsers —
-    // the mic/interrupt buttons and the "Connect" action both satisfy this
-    // before any audio actually needs to play.
-    this._onActivity?.();
     const ctx = this._ensureContext();
 
     const int16 = new Int16Array(buf);
     const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+    let sumSq = 0;
+    for (let i = 0; i < int16.length; i++) {
+      const s = int16[i] / 32768;
+      float32[i] = s;
+      sumSq += s * s;
+    }
+    // Real playback amplitude for this exact chunk (RMS of the samples
+    // about to play, not a smoothed/predictive estimate) — cheap, no FFT,
+    // computed once per chunk rather than polled. clamp01(rms * gain): PCM
+    // speech RMS sits well under 1.0, so a modest gain keeps normal speech
+    // in a visually useful 0..1 range without needing per-user calibration.
+    const rms = Math.sqrt(sumSq / int16.length);
+    const level = Math.min(1, rms * 3.2);
+    // Requires a user gesture to have unlocked audio in most browsers —
+    // the mic/interrupt buttons and the "Connect" action both satisfy this
+    // before any audio actually needs to play.
+    this._onActivity?.(level);
 
     const audioBuffer = ctx.createBuffer(1, float32.length, SAMPLE_RATE);
     audioBuffer.copyToChannel(float32, 0);
@@ -97,6 +114,10 @@ export class AudioOutPlayer {
     src.onended = () => {
       const i = this._activeSources.indexOf(src);
       if (i !== -1) this._activeSources.splice(i, 1);
+      // Queue fully drained (nothing left scheduled/playing) — report
+      // silence so the mouth returns to resting rather than holding
+      // whatever amplitude the last chunk happened to end on.
+      if (this._activeSources.length === 0) this._onActivity?.(0);
     };
     this._activeSources.push(src);
 
@@ -123,6 +144,7 @@ export class AudioOutPlayer {
     }
     this._activeSources = [];
     if (this._ctx) this._nextStartTime = this._ctx.currentTime;
+    this._onActivity?.(0); // interrupted mid-speech — mouth returns to resting now, not at the next chunk
   }
 
   _scheduleReconnect() {

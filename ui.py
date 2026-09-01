@@ -348,6 +348,7 @@ class HudCanvas(QWidget):
         self.speaking = False
         self.state    = "INITIALISING"
         self._assistant_name = assistant_name
+        self.audio_level = 0.0  # real playback amplitude, 0..1 — see _apply_audio_level() on MainWindow
 
         self._tick       = 0
         self._scale      = 1.0
@@ -391,8 +392,18 @@ class HudCanvas(QWidget):
         now = time.time()
         if now - self._last_t > (0.12 if self.speaking else 0.5):
             if self.speaking:
-                self._tgt_scale = random.uniform(1.06, 1.14)
-                self._tgt_halo  = random.uniform(145, 190)
+                # Real playback amplitude (see main.py's _play_audio(),
+                # which computes this from the exact PCM batch about to
+                # reach the speaker and pushes it here via
+                # MainWindow._apply_audio_level() — same signal/slot
+                # pattern as self.state) drives the target, not an
+                # independent random range: SARANA's "speaking" life
+                # tracks how loud SARANA actually is, not a canned loop.
+                # A little residual jitter keeps it from reading as a
+                # flat, mechanically-locked meter.
+                lvl = max(0.0, min(1.0, self.audio_level))
+                self._tgt_scale = 1.03 + 0.14 * lvl + random.uniform(-0.01, 0.01)
+                self._tgt_halo  = 60 + 150 * lvl + random.uniform(-6, 6)
             elif self.muted:
                 self._tgt_scale = random.uniform(0.998, 1.002)
                 self._tgt_halo  = random.uniform(15, 28)
@@ -1840,6 +1851,7 @@ class RemoteKeyOverlay(QWidget):
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
+    _audio_level_sig = pyqtSignal(float)     # real playback amplitude (0..1) → HudCanvas, thread-safe like _state_sig
     _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
@@ -1983,6 +1995,7 @@ class MainWindow(QMainWindow):
 
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
+        self._audio_level_sig.connect(self._apply_audio_level)
         self._content_sig.connect(self._show_content)
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
@@ -3340,6 +3353,9 @@ class MainWindow(QMainWindow):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
 
+    def _apply_audio_level(self, level: float):
+        self.hud.audio_level = level
+
     def _apply_jarvis_mode(self, active: bool):
         """Desktop HUD's counterpart to the web frontend's Orb/SaranaFace
         switch (see App.jsx's jarvis_mode_changed handling) — the gap
@@ -3477,6 +3493,13 @@ class JarvisUI:
 
     def set_state(self, state: str):
         self._win._state_sig.emit(state)
+
+    def set_audio_level(self, level: float):
+        """Real playback amplitude for the currently-playing audio batch
+        (see main.py's _play_audio()) — thread-safe, same pattern as
+        set_state(). Drives HudCanvas's speaking animation off actual
+        sound instead of an independent random range."""
+        self._win._audio_level_sig.emit(float(level))
 
     def set_jarvis_mode(self, active: bool):
         self._win._jarvis_mode_sig.emit(bool(active))

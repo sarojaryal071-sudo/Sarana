@@ -10,6 +10,7 @@ import { prepareImageForUpload, readFileAsBase64 } from "./lib/image";
 import { permissionManager } from "./lib/permissions";
 import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
+import { setMouthLevel } from "./lib/mouthLevel";
 import { MicStreamer } from "./lib/mic";
 import { stopCameraVision } from "./lib/cameraVision";
 import { stopScreenVision } from "./lib/screenVision";
@@ -339,6 +340,13 @@ export default function App() {
     const audio = new AudioOutPlayer(
       state.token,
       (s) => dispatch({ type: "AUDIO_STATE", value: s }),
+      // Real per-chunk playback amplitude -> SaranaFace's mouth (see
+      // lib/mouthLevel.js). Deliberately NOT a dispatch()/state update:
+      // this fires several times a second while SARANA speaks, and
+      // routing it through the reducer would re-render the whole app
+      // tree that often for a value only the mesh's mouth group cares
+      // about — the pub/sub module updates just that DOM node instead.
+      setMouthLevel,
     );
     audio.connect();
     audioRef.current = audio;

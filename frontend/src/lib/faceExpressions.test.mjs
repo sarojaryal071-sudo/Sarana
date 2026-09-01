@@ -10,13 +10,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FACE_EXPRESSIONS, mapStatusToExpression } from "./faceExpressions.js";
 
-test("the fourteen-expression vocabulary matches the spec exactly", () => {
+test("the fifteen-expression vocabulary matches the spec exactly", () => {
   assert.deepEqual(
     [...FACE_EXPRESSIONS].sort(),
     [
       "concerned", "confused", "curious", "happy", "listening",
       "neutral", "reassuring", "sad", "speaking", "thinking",
-      "empathetic", "surprised", "calm", "focused",
+      "empathetic", "surprised", "calm", "focused", "excited",
     ].sort(),
   );
 });
