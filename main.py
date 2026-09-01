@@ -878,8 +878,8 @@ TOOL_DECLARATIONS = [
         "description": (
             "Turns hand-gesture mouse control on or off, desktop only. "
             "While on, the user's real mouse cursor is controlled by "
-            "their own hand seen through the webcam: moving their index "
-            "finger moves the cursor, a thumb-to-index pinch clicks "
+            "their own hand seen through the webcam: moving their open "
+            "palm moves the cursor, a thumb-to-index pinch clicks "
             "(held briefly, it drags), and two fingers up scrolls. NO "
             "preview window is shown — the webcam runs silently in the "
             "background and nothing about the existing UI changes. "

@@ -150,6 +150,8 @@ _SCROLL_SENSITIVITY = 900       # normalized-y-delta -> scroll "clicks" multipli
 # landmark model docs — 21 points per hand, this only needs a few).
 _WRIST, _THUMB_TIP, _INDEX_TIP, _INDEX_PIP, _MIDDLE_TIP, _MIDDLE_PIP = 0, 4, 8, 6, 12, 10
 _MIDDLE_MCP, _RING_TIP, _RING_PIP, _PINKY_TIP, _PINKY_PIP = 9, 16, 14, 20, 18
+_INDEX_MCP, _RING_MCP, _PINKY_MCP = 5, 13, 17
+_PALM_POINTS = (_WRIST, _INDEX_MCP, _MIDDLE_MCP, _RING_MCP, _PINKY_MCP)
 
 
 class _GestureState:
@@ -253,6 +255,24 @@ def _pinch_ratio(landmarks) -> float:
     return _dist(landmarks[_THUMB_TIP], landmarks[_INDEX_TIP]) / hand_scale
 
 
+def _palm_center(landmarks) -> tuple[float, float]:
+    # Centroid of the wrist + all four MCP (base) knuckles — the palm's
+    # own broad, stable base, not a single fingertip. Cursor tracking was
+    # switched to this from "index fingertip, but only while the index-
+    # up/others-down gesture classifies correctly" specifically because
+    # that classification step was the actual source of the reported
+    # inconsistency (a borderline finger-curl frame would flicker the
+    # gesture in and out, and the cursor would stutter/freeze with it).
+    # A 5-point centroid is far less sensitive to any ONE landmark's
+    # per-frame jitter than a single tip point, and — just as
+    # importantly — needs no gesture classification to compute at all:
+    # cursor tracking is no longer gated behind "is this the MOVE
+    # gesture right now", it just always follows the palm.
+    xs = [landmarks[i].x for i in _PALM_POINTS]
+    ys = [landmarks[i].y for i in _PALM_POINTS]
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
 def _safe_call(fn, *args, **kwargs) -> None:
     # pyautogui.FAILSAFE=True raises the instant the real cursor sits in
     # a screen corner — the user's own physical mouse always wins over
@@ -337,13 +357,18 @@ def _run_loop(cap, stop_event: threading.Event) -> None:
                 pinky_up = _finger_up(right_hand, _PINKY_TIP, _PINKY_PIP)
 
                 # Target point: the pinch midpoint while pinching (feels
-                # like "grabbing" that exact point), the index fingertip
-                # otherwise — matches the reference's own MOVE gesture.
+                # like "grabbing" that exact point), the PALM CENTER
+                # otherwise. Cursor movement is no longer gated behind an
+                # "index finger up, others down" gesture at all — it
+                # simply always follows the palm whenever the right hand
+                # is visible and not pinching/scrolling (see
+                # _palm_center()'s own note on why: that gate was the
+                # actual source of the reported movement inconsistency).
                 if pinch:
                     tx = (right_hand[_THUMB_TIP].x + right_hand[_INDEX_TIP].x) / 2
                     ty = (right_hand[_THUMB_TIP].y + right_hand[_INDEX_TIP].y) / 2
                 else:
-                    tx, ty = right_hand[_INDEX_TIP].x, right_hand[_INDEX_TIP].y
+                    tx, ty = _palm_center(right_hand)
 
                 # Map the control-box-inset frame to full screen coordinates.
                 nx = min(1.0, max(0.0, (tx - m) / (1 - 2 * m)))

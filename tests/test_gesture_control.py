@@ -113,6 +113,42 @@ def test_pinch_ratio_below_threshold_when_fingers_touch() -> None:
     print("test_pinch_ratio_below_threshold_when_fingers_touch: PASS")
 
 
+def test_palm_center_is_the_centroid_of_wrist_and_all_four_mcp_knuckles() -> None:
+    # Cursor tracking was switched from the index fingertip to this —
+    # see _palm_center()'s own docstring for why (the fingertip-based
+    # MOVE gesture was the actual source of the reported movement
+    # inconsistency). A simple, checkable case: five points arranged so
+    # the centroid lands exactly at a known coordinate.
+    landmarks = {
+        gc._WRIST: _lm(0.50, 0.90),
+        gc._INDEX_MCP: _lm(0.40, 0.60),
+        gc._MIDDLE_MCP: _lm(0.50, 0.55),
+        gc._RING_MCP: _lm(0.60, 0.60),
+        gc._PINKY_MCP: _lm(0.70, 0.65),
+    }
+    cx, cy = gc._palm_center(landmarks)
+    expected_x = (0.50 + 0.40 + 0.50 + 0.60 + 0.70) / 5
+    expected_y = (0.90 + 0.60 + 0.55 + 0.60 + 0.65) / 5
+    assert abs(cx - expected_x) < 1e-9
+    assert abs(cy - expected_y) < 1e-9
+    print("test_palm_center_is_the_centroid_of_wrist_and_all_four_mcp_knuckles: PASS")
+
+
+def test_cursor_movement_tracks_the_palm_not_the_index_fingertip() -> None:
+    import inspect
+    src = inspect.getsource(gc._run_loop)
+    # The specific line that sets (tx, ty) for the non-pinching case must
+    # call _palm_center(), never read the index fingertip directly. The
+    # pinch branch legitimately still uses _INDEX_TIP (thumb+index
+    # midpoint, for the drag target) — only the "else:" (not-pinching,
+    # ordinary cursor movement) branch is what changed.
+    if_pinch_block = src.split("if pinch:")[1].split("# Map the control-box")[0]
+    else_branch = if_pinch_block.split("else:")[1]
+    assert "_palm_center(right_hand)" in else_branch
+    assert "_INDEX_TIP" not in else_branch
+    print("test_cursor_movement_tracks_the_palm_not_the_index_fingertip: PASS")
+
+
 # ── model cache (_ensure_model) ──────────────────────────────────────────
 
 def test_ensure_model_skips_download_when_already_cached() -> None:
@@ -248,6 +284,8 @@ if __name__ == "__main__":
     test_finger_up_detects_extended_vs_curled()
     test_pinch_ratio_is_hand_size_normalized()
     test_pinch_ratio_below_threshold_when_fingers_touch()
+    test_palm_center_is_the_centroid_of_wrist_and_all_four_mcp_knuckles()
+    test_cursor_movement_tracks_the_palm_not_the_index_fingertip()
     test_ensure_model_skips_download_when_already_cached()
     test_ensure_model_reports_honest_failure_without_crashing()
     test_start_stop_lifecycle_never_touches_the_real_camera_or_mouse()
