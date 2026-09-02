@@ -135,6 +135,108 @@ def get_volume() -> int | None:
         return None
 
 
+# ── Phase 1: per-app volume/mute + audio device listing (pycaw) ────────
+# Same library, same COM posture as volume_set()/get_volume() above —
+# just the per-SESSION interface (ISimpleAudioVolume) instead of the
+# master endpoint (IAudioEndpointVolume). Deliberately does NOT include
+# "switch the default output device": Windows has no officially
+# documented public API for that. The common workaround (the
+# IPolicyConfig COM interface) is undocumented by Microsoft and its
+# vtable layout can't be verified without live-testing against a real
+# machine's COM runtime — getting a vtable slot wrong doesn't just raise
+# a clean Python exception, it can call into the wrong method of a live
+# system interface. Shipping that blind would be exactly the kind of
+# "confidently wrong" action this project's own safety principles rule
+# out, so it's left as a deferred, explicitly-flagged item rather than
+# guessed at here. list_audio_devices() (read-only) has no such risk.
+
+def _find_audio_session(process_name: str):
+    """Returns the pycaw AudioSession whose OWN process matches
+    process_name (case-insensitive, ".exe" optional on either side), or
+    None if no running app with an active audio session matches — NOT
+    the same as "matched but pycaw failed", which raises/logs instead."""
+    from pycaw.pycaw import AudioUtilities
+    target = process_name.strip().lower().removesuffix(".exe")
+    for session in AudioUtilities.GetAllSessions():
+        proc = session.Process
+        if proc and proc.name().lower().removesuffix(".exe") == target:
+            return session
+    return None
+
+def app_volume_set(process_name: str, value: int) -> bool | None:
+    if _OS != "Windows":
+        return None
+    try:
+        session = _find_audio_session(process_name)
+        if session is None:
+            return None
+        session.SimpleAudioVolume.SetMasterVolume(max(0, min(100, int(value))) / 100.0, None)
+        return True
+    except Exception as e:
+        print(f"[Settings] app_volume_set({process_name}) failed: {e}")
+        return None
+
+def app_volume_get(process_name: str) -> int | None:
+    if _OS != "Windows":
+        return None
+    try:
+        session = _find_audio_session(process_name)
+        if session is None:
+            return None
+        return round(session.SimpleAudioVolume.GetMasterVolume() * 100)
+    except Exception as e:
+        print(f"[Settings] app_volume_get({process_name}) failed: {e}")
+        return None
+
+def app_mute_set(process_name: str, mute: bool) -> bool | None:
+    if _OS != "Windows":
+        return None
+    try:
+        session = _find_audio_session(process_name)
+        if session is None:
+            return None
+        session.SimpleAudioVolume.SetMute(1 if mute else 0, None)
+        return True
+    except Exception as e:
+        print(f"[Settings] app_mute_set({process_name}) failed: {e}")
+        return None
+
+def app_mute_get(process_name: str) -> bool | None:
+    if _OS != "Windows":
+        return None
+    try:
+        session = _find_audio_session(process_name)
+        if session is None:
+            return None
+        return bool(session.SimpleAudioVolume.GetMute())
+    except Exception as e:
+        print(f"[Settings] app_mute_get({process_name}) failed: {e}")
+        return None
+
+def list_audio_devices() -> list | None:
+    """Read-only: active playback devices, with the current default
+    marked. None on failure, never a guessed/partial list presented as
+    complete."""
+    if _OS != "Windows":
+        return None
+    try:
+        from pycaw.pycaw import AudioUtilities
+        default_id = None
+        try:
+            default_id = AudioUtilities.GetSpeakers().GetId()
+        except Exception:
+            pass
+        out = []
+        for dev in AudioUtilities.GetAllDevices():
+            if getattr(dev, "state", None) != 1:  # 1 == DEVICE_STATE_ACTIVE
+                continue
+            out.append({"name": dev.FriendlyName, "default": bool(default_id and dev.id == default_id)})
+        return out
+    except Exception as e:
+        print(f"[Settings] list_audio_devices failed: {e}")
+        return None
+
+
 def brightness_up():
     if _OS == "Darwin":
         subprocess.run(["osascript", "-e",
@@ -908,6 +1010,56 @@ def computer_settings(
             )
         except Exception as e:
             return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"could not set volume: {e}")
+
+    if action == "app_volume_set":
+        target_app = str(params.get("app") or description or "").strip()
+        if not target_app:
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "no application name given")
+        try:
+            level = max(0, min(100, int(value)))
+        except (TypeError, ValueError):
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"'{value}' is not a valid volume level")
+        ok = app_volume_set(target_app, level)
+        if ok is None:
+            return _envelope.envelope(
+                _envelope.STATUS_VERIFIED_FAILURE,
+                f"no running application matching '{target_app}' has an active audio session",
+            )
+        time.sleep(0.2)
+        actual = app_volume_get(target_app)
+        if actual is None:
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"{target_app}'s volume was set but could not be read back")
+        if abs(actual - level) <= 2:
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"{target_app}'s volume is now {actual}%")
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"requested {level}% but {target_app}'s volume now reads {actual}%")
+
+    if action in ("app_mute", "app_unmute"):
+        target_app = str(params.get("app") or description or "").strip()
+        if not target_app:
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "no application name given")
+        want_mute = action == "app_mute"
+        ok = app_mute_set(target_app, want_mute)
+        if ok is None:
+            return _envelope.envelope(
+                _envelope.STATUS_VERIFIED_FAILURE,
+                f"no running application matching '{target_app}' has an active audio session",
+            )
+        time.sleep(0.2)
+        actual = app_mute_get(target_app)
+        if actual is None:
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"{target_app}'s mute state was set but could not be read back")
+        if actual == want_mute:
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"{target_app} is now {'muted' if actual else 'unmuted'}")
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"{target_app} is still {'muted' if actual else 'unmuted'}")
+
+    if action == "list_audio_devices":
+        devices = list_audio_devices()
+        if devices is None:
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "audio devices could not be read")
+        if not devices:
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, "no active playback devices were found")
+        desc = ", ".join(f"{d['name']}{' (default)' if d['default'] else ''}" for d in devices)
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, desc)
 
     if action == "toggle_wifi":
         before = _wifi_state()

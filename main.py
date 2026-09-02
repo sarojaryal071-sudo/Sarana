@@ -724,7 +724,16 @@ TOOL_DECLARATIONS = [
             "from the command's REAL output — read it honestly, never invent device names or numbers "
             "that weren't in the result. If it returns 'No known fast-path shortcut matches', don't "
             "retry with slightly different wording — fall back to accomplish() instead. "
-            "action='list_system_shortcuts' lists everything currently in this library."
+            "action='list_system_shortcuts' lists everything currently in this library. "
+            "ALSO: action='app_volume_set' (value=0-100, app='spotify'/'chrome'/etc.) and "
+            "action='app_mute'/'app_unmute' (app=<name>) control ONE application's own mixer volume "
+            "independent of the master volume — matched against the app's real running process name, "
+            "so it only works while that app is actually running with an active audio session (returns "
+            "[VERIFIED_FAILURE] honestly if not, never pretends). action='list_audio_devices' lists "
+            "active playback devices and marks the current default — read-only; there is currently NO "
+            "action to actually switch/change the default output device (e.g. 'switch to headphones') "
+            "— if asked, say so honestly and suggest action='system_shortcut' value='sound devices' to "
+            "open the Settings pane for the user to pick it manually, never claim to have switched it."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -732,6 +741,7 @@ TOOL_DECLARATIONS = [
                 "action":      {"type": "STRING", "description": "The action to perform, e.g. volume_set | toggle_wifi | sleep | bluetooth_on | bluetooth_off | clipboard_get | clipboard_set | restart | shutdown | minimize | maximize | system_shortcut | list_system_shortcuts | ..."},
                 "description": {"type": "STRING", "description": "Natural language description of what to do (used only when action is omitted)"},
                 "value":       {"type": "STRING", "description": "Optional value: volume level (0-100), text to type/clipboard_set, etc."},
+                "app":         {"type": "STRING", "description": "Process/application name for app_volume_set | app_mute | app_unmute, e.g. 'spotify', 'chrome', 'discord'"},
                 "confirmed":   {"type": "BOOLEAN", "description": "Set true only after the user has explicitly confirmed a consequential action (restart/shutdown) in THIS conversation — never infer it"}
             },
             "required": []
