@@ -101,6 +101,7 @@ from actions.code_helper       import code_helper
 from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control, get_active_window_title
+from actions.office_control    import office_control
 from actions import gesture_control
 from actions.computer_control  import INCONCLUSIVE_TAGS as _cc_INCONCLUSIVE_TAGS
 from actions import result_envelope as _envelope
@@ -748,6 +749,47 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "office_control",
+        "description": (
+            "Controls the ACTIVE document/workbook in an already-open Microsoft Word or Excel window via "
+            "the app's own real object model — reliable for document CONTENT (cell values, formulas, "
+            "text, bold/italic/underline formatting), unlike computer_control's accomplish() which is "
+            "better for chrome-level actions (opening a dialog, clicking a ribbon tab) since Office's "
+            "ribbon has known-unreliable UI automation IDs. Prefer THIS tool over accomplish() whenever "
+            "the request is about what's actually IN the document/spreadsheet. Acts on whichever "
+            "Word/Excel window is currently ACTIVE — if none is open, launches a new VISIBLE one (never "
+            "hidden). Every write is verified by reading it back before reporting "
+            "[VERIFIED_SUCCESS]/[VERIFIED_FAILURE]/[INCONCLUSIVE] — read the tag honestly, never assume "
+            "success. "
+            "app='word' actions: insert_text (text=..., where='cursor'|'end'), replace_text "
+            "(find=..., replace=...), format_selection (bold/italic/underline=true/false — applies to "
+            "whatever text is CURRENTLY SELECTED in Word; if nothing is selected this fails honestly, it "
+            "does not select something for you), save. "
+            "app='excel' actions: set_cell (cell='A1', value=... — value can be a formula string like "
+            "'=SUM(A1:A5)', which is evaluated normally), get_cell (cell='A1'), save. "
+            "save NEVER triggers Word/Excel's blocking native 'Save As' dialog for a document that's "
+            "never been saved before — if it has no filename yet this returns [INCONCLUSIVE] asking the "
+            "user for one instead of risking a hang."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "app":       {"type": "STRING", "description": "'word' or 'excel'"},
+                "action":    {"type": "STRING", "description": "insert_text | replace_text | format_selection | save (word)  |  set_cell | get_cell | save (excel)"},
+                "text":      {"type": "STRING", "description": "Text to insert (word insert_text)"},
+                "where":     {"type": "STRING", "description": "'cursor' (default) or 'end' (word insert_text)"},
+                "find":      {"type": "STRING", "description": "Text to find (word replace_text)"},
+                "replace":   {"type": "STRING", "description": "Replacement text (word replace_text)"},
+                "bold":      {"type": "BOOLEAN", "description": "Set bold on/off for the current Word selection"},
+                "italic":    {"type": "BOOLEAN", "description": "Set italic on/off for the current Word selection"},
+                "underline": {"type": "BOOLEAN", "description": "Set underline on/off for the current Word selection"},
+                "cell":      {"type": "STRING", "description": "Cell reference, e.g. 'A1' or 'B3' (excel set_cell/get_cell)"},
+                "value":     {"type": "STRING", "description": "Value or formula to write, e.g. '42' or '=SUM(A1:A5)' (excel set_cell)"},
+            },
+            "required": ["app", "action"],
+        },
+    },
+    {
         "name": "browser_control",
         "description": (
             "Controls any web browser. Use for: opening websites, searching the web, "
@@ -1258,7 +1300,7 @@ DESKTOP_ONLY_TOOLS = frozenset({
     "reminder", "youtube_video", "screen_process", "close_camera",
     "computer_settings", "desktop_control", "code_helper", "dev_agent",
     "file_processor", "computer_control", "game_updater", "flight_finder",
-    "system_status", "shutdown_jarvis", "gesture_mode",
+    "system_status", "shutdown_jarvis", "gesture_mode", "office_control",
 })
 
 # Bounded autonomous-execution governor (self._jarvis_action_count, its
@@ -3281,6 +3323,8 @@ class JarvisLive:
 
             elif name == "computer_settings":
                 r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None, player=self.ui))
+            elif name == "office_control":
+                r = await loop.run_in_executor(None, lambda: office_control(parameters=args))
                 result = r or "Done."
 
             elif name == "desktop_control":
