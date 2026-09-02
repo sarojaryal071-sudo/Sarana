@@ -49,13 +49,15 @@ def test_every_pane_has_a_valid_ms_settings_uri() -> None:
     print("test_every_pane_has_a_valid_ms_settings_uri: PASS")
 
 
-def test_every_query_has_a_command_and_aliases() -> None:
+def test_every_query_has_a_command_or_psutil_handler_and_aliases() -> None:
     setup()
     reg = ss._load_registry()
     for entry in reg["queries"]:
-        assert entry.get("command"), entry
+        has_shell_command = bool(entry.get("command"))
+        has_psutil_handler = entry.get("kind") == "psutil" and bool(entry.get("handler"))
+        assert has_shell_command or has_psutil_handler, entry
         assert entry.get("aliases"), f"{entry['id']} has no aliases to match against"
-    print("test_every_query_has_a_command_and_aliases: PASS")
+    print("test_every_query_has_a_command_or_psutil_handler_and_aliases: PASS")
 
 
 def test_installed_apps_query_deliberately_avoids_the_win32_product_trap() -> None:
@@ -189,6 +191,87 @@ def test_run_query_parses_netsh_current_interface() -> None:
     print("test_run_query_parses_netsh_current_interface: PASS")
 
 
+# ── Phase 2: psutil-backed queries (no subprocess spawn) ────────────────
+
+def test_disk_usage_network_info_battery_running_processes_are_psutil_kind() -> None:
+    # Regression guard: if these ever silently revert to a "shell" entry,
+    # this catches it even if nobody notices run_query() taking the slow
+    # path again.
+    setup()
+    reg = ss._load_registry()
+    by_id = {e["id"]: e for e in reg["queries"]}
+    for qid in ("disk_usage", "network_info", "battery_status", "running_processes"):
+        assert by_id[qid]["kind"] == "psutil", qid
+        assert by_id[qid]["handler"] in ss._PSUTIL_HANDLERS, qid
+    print("test_disk_usage_network_info_battery_running_processes_are_psutil_kind: PASS")
+
+def test_run_query_psutil_kind_never_spawns_a_subprocess() -> None:
+    # _PSUTIL_HANDLERS captures each function object at module-load time
+    # (the same "dict holds the reference, patching the bare attribute
+    # doesn't reach it" pitfall computer_settings.py's own ACTION_MAP
+    # tests already had to account for) — so the dict ENTRY must be
+    # patched, not the module-level _psutil_disk_usage name.
+    setup()
+    entry = {"id": "disk_usage", "name": "Disk usage", "kind": "psutil", "handler": "disk_usage",
+              "empty_message": "no drives"}
+    fake_handler = MagicMock(return_value=[{"Drive": "C:\\", "UsedGB": 100.0, "FreeGB": 50.0}])
+    with patch.dict(ss._PSUTIL_HANDLERS, {"disk_usage": fake_handler}), \
+         patch.object(ss.subprocess, "run") as m_run:
+        result = ss.run_query(entry)
+    m_run.assert_not_called()
+    fake_handler.assert_called_once()
+    assert result.startswith("[VERIFIED_SUCCESS]")
+    assert "C:\\" in result
+    print("test_run_query_psutil_kind_never_spawns_a_subprocess: PASS")
+
+def test_run_query_psutil_kind_reports_failure_on_genuinely_empty_result() -> None:
+    setup()
+    entry = {"id": "battery_status", "name": "Battery status", "kind": "psutil",
+              "handler": "battery_status", "empty_message": "no battery was found"}
+    with patch.dict(ss._PSUTIL_HANDLERS, {"battery_status": MagicMock(return_value=[])}):
+        result = ss.run_query(entry)
+    assert result.startswith("[VERIFIED_FAILURE]")
+    assert "no battery was found" in result
+    print("test_run_query_psutil_kind_reports_failure_on_genuinely_empty_result: PASS")
+
+def test_run_query_psutil_kind_never_crashes_on_a_handler_exception() -> None:
+    setup()
+    entry = {"id": "x", "name": "X", "kind": "psutil", "handler": "disk_usage"}
+    with patch.dict(ss._PSUTIL_HANDLERS, {"disk_usage": MagicMock(side_effect=RuntimeError("boom"))}):
+        result = ss.run_query(entry)
+    assert result.startswith("[INCONCLUSIVE]")
+    print("test_run_query_psutil_kind_never_crashes_on_a_handler_exception: PASS")
+
+def test_psutil_disk_usage_reads_real_partitions_and_skips_unreadable_ones() -> None:
+    setup()
+    part_ok  = MagicMock(mountpoint="C:\\", device="C:\\")
+    part_bad = MagicMock(mountpoint="D:\\", device="D:\\")  # e.g. empty optical drive
+    usage = MagicMock(used=100 * 1024**3, free=50 * 1024**3)
+    with patch.object(ss.psutil, "disk_partitions", return_value=[part_ok, part_bad]), \
+         patch.object(ss.psutil, "disk_usage", side_effect=[usage, OSError("no media")]):
+        rows = ss._psutil_disk_usage()
+    assert rows == [{"Drive": "C:\\", "UsedGB": 100.0, "FreeGB": 50.0}]
+    print("test_psutil_disk_usage_reads_real_partitions_and_skips_unreadable_ones: PASS")
+
+def test_psutil_battery_status_returns_empty_not_none_when_no_battery() -> None:
+    setup()
+    with patch.object(ss.psutil, "sensors_battery", return_value=None):
+        rows = ss._psutil_battery_status()
+    assert rows == []
+    print("test_psutil_battery_status_returns_empty_not_none_when_no_battery: PASS")
+
+def test_psutil_running_processes_sorts_by_current_cpu_percent_not_cumulative_time() -> None:
+    setup()
+    low  = MagicMock(); low.info = {"name": "idle.exe"}; low.cpu_percent.return_value = 0.5
+    high = MagicMock(); high.info = {"name": "busy.exe"}; high.cpu_percent.return_value = 40.0
+    with patch.object(ss.psutil, "process_iter", return_value=[low, high]), \
+         patch.object(ss.time, "sleep"):  # don't actually block the test suite
+        rows = ss._psutil_running_processes()
+    assert rows[0]["Name"] == "busy.exe"
+    assert rows[0]["CPU%"] == 40.0
+    print("test_psutil_running_processes_sorts_by_current_cpu_percent_not_cumulative_time: PASS")
+
+
 # ── system_shortcut(): the public dispatcher, never guesses ────────────
 
 def test_system_shortcut_with_no_target_asks_instead_of_guessing() -> None:
@@ -257,7 +340,7 @@ def test_computer_settings_list_system_shortcuts_action_calls_list_shortcuts() -
 if __name__ == "__main__":
     test_registry_loads_and_has_both_panes_and_queries()
     test_every_pane_has_a_valid_ms_settings_uri()
-    test_every_query_has_a_command_and_aliases()
+    test_every_query_has_a_command_or_psutil_handler_and_aliases()
     test_installed_apps_query_deliberately_avoids_the_win32_product_trap()
     test_resolve_matches_bluetooth_devices_to_the_query_not_the_settings_pane()
     test_resolve_matches_open_bluetooth_settings_to_the_pane()
@@ -271,6 +354,13 @@ if __name__ == "__main__":
     test_run_query_reports_inconclusive_on_timeout_never_crashes()
     test_run_query_parses_netsh_wifi_networks()
     test_run_query_parses_netsh_current_interface()
+    test_disk_usage_network_info_battery_running_processes_are_psutil_kind()
+    test_run_query_psutil_kind_never_spawns_a_subprocess()
+    test_run_query_psutil_kind_reports_failure_on_genuinely_empty_result()
+    test_run_query_psutil_kind_never_crashes_on_a_handler_exception()
+    test_psutil_disk_usage_reads_real_partitions_and_skips_unreadable_ones()
+    test_psutil_battery_status_returns_empty_not_none_when_no_battery()
+    test_psutil_running_processes_sorts_by_current_cpu_percent_not_cumulative_time()
     test_system_shortcut_with_no_target_asks_instead_of_guessing()
     test_system_shortcut_with_unknown_target_says_so_and_never_calls_anything()
     test_system_shortcut_routes_a_pane_match_through_open_pane()

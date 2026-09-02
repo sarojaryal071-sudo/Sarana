@@ -46,7 +46,10 @@ import platform
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+import psutil
 
 from actions import result_envelope as _envelope
 
@@ -208,8 +211,90 @@ def _parse_netsh_interface(stdout: str) -> dict:
     return info
 
 
+# ── psutil handlers: in-process, no subprocess spawn at all ────────────
+# For data psutil can already read directly (disk usage, per-interface
+# IPs, battery, process list), this is strictly better than shelling out
+# to PowerShell — faster (no process-spawn cost) and no dependency on
+# PowerShell's own availability/execution policy. Each handler returns a
+# list of dicts (same shape run_query()'s JSON path already produces) or
+# [] for "ran fine, genuinely nothing to report" — never None, since a
+# real exception already gets caught and reported by run_query() itself.
+
+def _psutil_disk_usage() -> list:
+    rows = []
+    for part in psutil.disk_partitions(all=False):
+        try:
+            usage = psutil.disk_usage(part.mountpoint)
+        except (PermissionError, OSError):
+            continue  # e.g. an empty optical/removable drive — skip, don't fail the whole query
+        rows.append({
+            "Drive": part.device,
+            "UsedGB": round(usage.used / (1024 ** 3), 1),
+            "FreeGB": round(usage.free / (1024 ** 3), 1),
+        })
+    return rows
+
+def _psutil_network_info() -> list:
+    rows = []
+    for iface, addrs in psutil.net_if_addrs().items():
+        for addr in addrs:
+            if getattr(addr.family, "name", "") == "AF_INET":
+                rows.append({"Interface": iface, "IPv4": addr.address})
+    return rows
+
+def _psutil_battery_status() -> list:
+    battery = psutil.sensors_battery()
+    if battery is None:
+        return []  # genuinely no battery (desktop) — not a failure
+    return [{"Percent": round(battery.percent, 1), "PluggedIn": bool(battery.power_plugged)}]
+
+def _psutil_running_processes() -> list:
+    """Top processes by CURRENT cpu%, not Get-Process's old 'CPU' column
+    (which was cumulative CPU TIME in seconds since launch — a genuinely
+    different, easily-misread number the previous PowerShell version of
+    this query used). psutil.cpu_percent() needs one 'priming' call
+    before it's meaningful, so this deliberately takes a bounded 0.3s
+    sample window rather than returning a guaranteed-wrong first-call
+    0.0% for every process."""
+    procs = list(psutil.process_iter(["name"]))
+    for p in procs:
+        try:
+            p.cpu_percent(None)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    time.sleep(0.3)
+    rows = []
+    for p in procs:
+        try:
+            rows.append({"Name": p.info.get("name") or "?", "CPU%": round(p.cpu_percent(None), 1)})
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    rows.sort(key=lambda r: r["CPU%"], reverse=True)
+    return rows[:6]
+
+_PSUTIL_HANDLERS = {
+    "disk_usage": _psutil_disk_usage,
+    "network_info": _psutil_network_info,
+    "battery_status": _psutil_battery_status,
+    "running_processes": _psutil_running_processes,
+}
+
+
 def run_query(entry: dict) -> str:
     name = entry.get("name", entry.get("id", "query"))
+
+    if entry.get("kind") == "psutil":
+        handler = _PSUTIL_HANDLERS.get(entry.get("handler"))
+        if handler is None:
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"no psutil handler registered for '{name}'")
+        try:
+            items = handler()
+        except Exception as e:
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"could not run the '{name}' query: {e}")
+        if not items:
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, entry.get("empty_message", "nothing was found"))
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, _format_items(entry, items))
+
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", entry["command"]],

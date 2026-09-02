@@ -3,7 +3,7 @@
     "schema_version": 1,
     "description": "Data-driven registry of Windows system capabilities JARVIS can reach without generic UI automation: 'panes' deep-link straight into a specific Settings page (ms-settings: URI scheme), 'queries' run a single built-in, read-only Windows cmdlet and return its real output. Adding a new capability means adding a row here, not writing a new Python module per app — see actions/system_shortcuts.py.",
     "panes_source": "https://github.com/MicrosoftDocs/windows-dev-docs/blob/docs/hub/apps/develop/launch/launch-settings.md (official Microsoft docs repo — ms-settings: URI reference). Only long-standing, stable-since-Windows-10 pages were kept; newer/niche pages (e.g. Dynamic Lighting, Presence sensing) were deliberately left out for cross-build reliability. Microsoft does not publish a version-pinned guarantee for these URIs, so a pane that 404s on a given build should degrade to the OS-level generic open, never crash.",
-    "queries_source": "Built-in Windows PowerShell cmdlets only (Get-PnpDevice, Get-CimInstance, Get-NetIPConfiguration, Get-Printer, Get-NetFirewallProfile, netsh) — no third-party CLI tools, no extra pip/OS dependency. installed_apps deliberately reads the Uninstall registry key instead of Get-CimInstance Win32_Product, which is a well-known trap: it silently triggers an MSI reconfigure/repair pass on every installed package and can be slow or disruptive."
+    "queries_source": "Two execution kinds. \"shell\" (default when no 'kind' field is present) runs a built-in Windows PowerShell cmdlet (Get-PnpDevice, Get-Printer, Get-NetFirewallProfile) or netsh — no third-party CLI tools. \"psutil\" (disk_usage, network_info, running_processes, battery_status) reads the SAME kind of data in-process via the psutil library already in requirements.txt, with no subprocess spawn at all — faster and more reliable than shelling out to PowerShell for data Python can already read directly; see actions/system_shortcuts.py's _PSUTIL_HANDLERS. installed_apps deliberately reads the Uninstall registry key instead of Get-CimInstance Win32_Product, which is a well-known trap: it silently triggers an MSI reconfigure/repair pass on every installed package and can be slow or disruptive."
   },
   "panes": [
     {"id": "about", "name": "About this PC", "uri": "ms-settings:about", "aliases": ["about this pc", "about my computer", "system info", "about"]},
@@ -78,24 +78,24 @@
       "id": "battery_status",
       "name": "Battery status",
       "aliases": ["battery status", "battery percentage", "how much battery", "battery level", "check battery"],
-      "shell": "powershell",
-      "command": "Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object EstimatedChargeRemaining,BatteryStatus | ConvertTo-Json -Compress",
+      "kind": "psutil",
+      "handler": "battery_status",
       "empty_message": "no battery was found (this may be a desktop with no battery)"
     },
     {
       "id": "disk_usage",
       "name": "Disk / storage usage",
       "aliases": ["disk space", "storage space", "how much storage", "free disk space", "disk usage", "how much space left"],
-      "shell": "powershell",
-      "command": "Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | Select-Object Name,@{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}},@{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} | ConvertTo-Json -Compress",
+      "kind": "psutil",
+      "handler": "disk_usage",
       "empty_message": "no drives could be read"
     },
     {
       "id": "network_info",
       "name": "Network / IP configuration",
       "aliases": ["ip address", "network info", "my ip address", "network configuration", "what's my ip"],
-      "shell": "powershell",
-      "command": "Get-NetIPConfiguration -ErrorAction SilentlyContinue | Select-Object InterfaceAlias,@{n='IPv4';e={$_.IPv4Address.IPAddress}} | ConvertTo-Json -Compress",
+      "kind": "psutil",
+      "handler": "network_info",
       "empty_message": "no active network interfaces were found"
     },
     {
@@ -110,8 +110,8 @@
       "id": "running_processes",
       "name": "Top running processes",
       "aliases": ["running processes", "top processes", "what's using cpu", "cpu usage", "what's running"],
-      "shell": "powershell",
-      "command": "Get-Process -ErrorAction SilentlyContinue | Sort-Object CPU -Descending | Select-Object -First 6 Name,@{n='CPU';e={[math]::Round($_.CPU,1)}} | ConvertTo-Json -Compress",
+      "kind": "psutil",
+      "handler": "running_processes",
       "empty_message": "no process list could be read"
     },
     {
