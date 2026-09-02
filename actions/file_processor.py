@@ -13,7 +13,8 @@ Supported types:
   audio   → transcribe, trim, convert, info
   video   → trim, extract_audio, extract_frame, info, compress
   zip     → list, extract
-  pptx    → summarize, extract_text, to_pdf
+  pptx    → summarize, extract_text, analyze, create (builds a NEW presentation
+            from a topic — the one action that doesn't need an existing file)
 """
 
 import os
@@ -79,6 +80,19 @@ def _output_path(src: Path, suffix: str, new_ext: str = None) -> Path:
     ext  = new_ext or src.suffix
     name = f"{src.stem}_{suffix}{ext}"
     return src.parent / name
+
+def _default_output_path(topic: str, suffix: str) -> Path:
+    """Where a NEWLY CREATED file goes when the caller didn't specify a
+    path — the user's Desktop (falling back to their home directory if
+    no Desktop folder exists), named from the topic so it's findable
+    afterward, timestamped so a repeat request never silently
+    overwrites an earlier one."""
+    slug = re.sub(r"[^a-z0-9]+", "_", (topic or "presentation").lower()).strip("_")[:60] or "presentation"
+    out_dir = Path.home() / "Desktop"
+    if not out_dir.is_dir():
+        out_dir = Path.home()
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return out_dir / f"{slug}_{stamp}{suffix}"
 
 def _process_image(path: Path, action: str, params: dict, speak=None) -> str:
     try:
@@ -776,8 +790,89 @@ def _process_pptx(path: Path, action: str, params: dict, speak=None) -> str:
 
     return f"Unknown PPTX action: '{action}'. Try: summarize, extract_text, analyze"
 
+
+# ── pptx creation: the one action that builds a file that doesn't exist
+# yet, rather than processing one that already does (see file_processor()'s
+# own "create" branch below, which is why this whole section sits ahead
+# of the require-an-existing-file dispatch table). python-pptx has been
+# in requirements.txt all along but was only ever used to READ existing
+# presentations (_process_pptx above) — this is the write direction. ──
+
+def _generate_pptx_outline(topic: str) -> list:
+    """A short, BOUNDED internal Gemini call that turns a topic into a
+    slide-by-slide outline — matches this file's own existing pattern
+    for summarize/analyze (model.generate_content once, not an
+    open-ended reasoning loop); the caller still decides everything
+    about whether/where to create a file, this only produces content."""
+    model  = _gemini_client()
+    prompt = (
+        f"Create a slide-by-slide outline for a PowerPoint presentation about: {topic}\n\n"
+        'Return ONLY a valid JSON array, 4-8 slides, each: {"title": "...", "bullets": ["...", "..."]} '
+        "(2-5 short bullet PHRASES per slide, not paragraphs). The first slide is a title slide — give it "
+        'an empty "bullets" list. Return ONLY the JSON array, no explanation, no markdown.'
+    )
+    response = model.generate_content(prompt)
+    text = re.sub(r"```(?:json)?", "", response.text).strip().rstrip("`").strip()
+    return json.loads(text)
+
+def _build_pptx_from_outline(path: Path, outline: list) -> None:
+    from pptx import Presentation
+    prs = Presentation()
+    title_layout  = prs.slide_layouts[0]
+    bullet_layout = prs.slide_layouts[1]
+    for i, slide_data in enumerate(outline):
+        slide = prs.slides.add_slide(title_layout if i == 0 else bullet_layout)
+        slide.shapes.title.text = str(slide_data.get("title") or f"Slide {i + 1}")
+        bullets = slide_data.get("bullets") or []
+        if bullets and len(slide.placeholders) > 1:
+            body = slide.placeholders[1].text_frame
+            body.text = str(bullets[0])
+            for b in bullets[1:]:
+                body.add_paragraph().text = str(b)
+    prs.save(str(path))
+
+def _create_pptx(path: Path, instruction: str, params: dict) -> str:
+    try:
+        import pptx  # noqa: F401 — import check only; the real use is in _build_pptx_from_outline
+    except ImportError:
+        return "python-pptx not installed."
+    topic = (instruction or params.get("topic") or path.stem.replace("_", " ")).strip()
+    if not topic:
+        return "No topic/instruction given to build the presentation from."
+    explicit_slides = params.get("slides")
+    try:
+        outline = explicit_slides if isinstance(explicit_slides, list) and explicit_slides else _generate_pptx_outline(topic)
+    except Exception as e:
+        return f"Could not generate a slide outline: {e}"
+    if not outline:
+        return "The generated outline was empty — nothing to build."
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _build_pptx_from_outline(path, outline)
+    except Exception as e:
+        return f"Could not build the presentation: {e}"
+    if not path.exists():
+        # Belt-and-braces: Presentation.save() didn't raise, but the
+        # file genuinely isn't there — report that honestly rather than
+        # trusting "no exception" as proof of a real file on disk.
+        return "Presentation build reported success but the file was not found afterward."
+    return f"Created presentation with {len(outline)} slide(s): {path}"
+
+
 def file_processor(parameters: dict, player=None, speak=None) -> str:
-    file_path_str = parameters.get("file_path", "").strip()
+    file_path_str = (parameters.get("file_path") or "").strip()
+    action = (parameters.get("action") or "").lower().strip()
+
+    if action == "create":
+        # The one action allowed to target a file that doesn't exist yet
+        # — everything else below requires a real, already-uploaded file.
+        fmt = (parameters.get("format") or Path(file_path_str).suffix.lstrip(".") or "pptx").lower()
+        if fmt != "pptx":
+            return f"'create' currently only supports pptx (got format='{fmt}')."
+        if not file_path_str:
+            file_path_str = str(_default_output_path(parameters.get("instruction", ""), ".pptx"))
+        return _create_pptx(Path(file_path_str), parameters.get("instruction", ""), parameters)
+
     if not file_path_str:
         return "No file path provided."
 
@@ -788,7 +883,6 @@ def file_processor(parameters: dict, player=None, speak=None) -> str:
         return f"Path is not a file: {file_path_str}"
 
     file_type   = _detect_type(path)
-    action      = (parameters.get("action") or "").lower().strip()
     instruction = parameters.get("instruction", "")
     params      = {**parameters, "instruction": instruction}
 

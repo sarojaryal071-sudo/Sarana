@@ -1124,7 +1124,11 @@ TOOL_DECLARATIONS = [
         "archives (list/extract), "
         "presentations (summarize/extract_text). "
         "ALWAYS call this tool when a file has been uploaded and the user gives a command about it. "
-        "If the user's command is ambiguous, pick the most logical action for that file type."
+        "If the user's command is ambiguous, pick the most logical action for that file type. "
+        "ALSO: action='create' builds a NEW PowerPoint from a topic — this is the ONE action that does "
+        "NOT need an uploaded/existing file. Pass instruction=<topic>; file_path is optional (defaults to "
+        "the user's Desktop, named from the topic) — only set it if the user asked for a specific "
+        "location/filename. Generates a real 4-8 slide outline via AI, does not just make placeholder text."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -1146,7 +1150,7 @@ TOOL_DECLARATIONS = [
                     "audio: transcribe | trim | convert | info\n"
                     "video: trim | extract_audio | extract_frame | compress | transcribe | info | convert\n"
                     "archive: list | extract\n"
-                    "pptx: summarize | extract_text | analyze"
+                    "pptx: summarize | extract_text | analyze | create (new file, needs no existing upload)"
                 )
             },
             "instruction": {
