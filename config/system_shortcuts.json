@@ -1,0 +1,142 @@
+{
+  "_meta": {
+    "schema_version": 1,
+    "description": "Data-driven registry of Windows system capabilities JARVIS can reach without generic UI automation: 'panes' deep-link straight into a specific Settings page (ms-settings: URI scheme), 'queries' run a single built-in, read-only Windows cmdlet and return its real output. Adding a new capability means adding a row here, not writing a new Python module per app — see actions/system_shortcuts.py.",
+    "panes_source": "https://github.com/MicrosoftDocs/windows-dev-docs/blob/docs/hub/apps/develop/launch/launch-settings.md (official Microsoft docs repo — ms-settings: URI reference). Only long-standing, stable-since-Windows-10 pages were kept; newer/niche pages (e.g. Dynamic Lighting, Presence sensing) were deliberately left out for cross-build reliability. Microsoft does not publish a version-pinned guarantee for these URIs, so a pane that 404s on a given build should degrade to the OS-level generic open, never crash.",
+    "queries_source": "Built-in Windows PowerShell cmdlets only (Get-PnpDevice, Get-CimInstance, Get-NetIPConfiguration, Get-Printer, Get-NetFirewallProfile, netsh) — no third-party CLI tools, no extra pip/OS dependency. installed_apps deliberately reads the Uninstall registry key instead of Get-CimInstance Win32_Product, which is a well-known trap: it silently triggers an MSI reconfigure/repair pass on every installed package and can be slow or disruptive."
+  },
+  "panes": [
+    {"id": "about", "name": "About this PC", "uri": "ms-settings:about", "aliases": ["about this pc", "about my computer", "system info", "about"]},
+    {"id": "display", "name": "Display", "uri": "ms-settings:display", "aliases": ["display settings", "screen settings"]},
+    {"id": "display_advanced", "name": "Advanced display settings", "uri": "ms-settings:display-advanced", "aliases": ["advanced display settings", "resolution settings", "screen resolution"]},
+    {"id": "night_light", "name": "Night light", "uri": "ms-settings:nightlight", "aliases": ["night light", "night light settings", "blue light filter"]},
+    {"id": "battery_saver", "name": "Battery saver", "uri": "ms-settings:batterysaver", "aliases": ["battery saver", "battery saver settings"]},
+    {"id": "storage", "name": "Storage", "uri": "ms-settings:storagesense", "aliases": ["storage settings", "storage sense"]},
+    {"id": "power_sleep", "name": "Power & sleep", "uri": "ms-settings:powersleep", "aliases": ["power and sleep", "power settings", "sleep settings"]},
+    {"id": "multitasking", "name": "Multitasking", "uri": "ms-settings:multitasking", "aliases": ["multitasking settings", "snap window settings"]},
+    {"id": "notifications", "name": "Notifications & actions", "uri": "ms-settings:notifications", "aliases": ["notification settings", "notifications and actions"]},
+    {"id": "clipboard_settings", "name": "Clipboard", "uri": "ms-settings:clipboard", "aliases": ["clipboard settings", "clipboard history settings"]},
+    {"id": "focus_assist", "name": "Focus assist", "uri": "ms-settings:quiethours", "aliases": ["focus assist", "do not disturb", "quiet hours"]},
+    {"id": "bluetooth_settings", "name": "Bluetooth & devices", "uri": "ms-settings:bluetooth", "aliases": ["bluetooth settings", "bluetooth and devices", "open bluetooth"]},
+    {"id": "printers_settings", "name": "Printers & scanners", "uri": "ms-settings:printers", "aliases": ["printer settings", "printers and scanners"]},
+    {"id": "mouse_touchpad", "name": "Mouse & touchpad", "uri": "ms-settings:mousetouchpad", "aliases": ["mouse settings", "touchpad settings"]},
+    {"id": "autoplay", "name": "AutoPlay", "uri": "ms-settings:autoplay", "aliases": ["autoplay settings"]},
+    {"id": "usb_settings", "name": "USB", "uri": "ms-settings:usb", "aliases": ["usb settings"]},
+    {"id": "connected_devices", "name": "Connected devices", "uri": "ms-settings:connecteddevices", "aliases": ["connected devices", "paired devices settings"]},
+    {"id": "wifi_settings", "name": "Wi-Fi", "uri": "ms-settings:network-wifi", "aliases": ["wifi settings", "wi-fi settings", "wireless settings"]},
+    {"id": "airplane_mode", "name": "Airplane mode", "uri": "ms-settings:network-airplanemode", "aliases": ["airplane mode", "airplane mode settings"]},
+    {"id": "vpn_settings", "name": "VPN", "uri": "ms-settings:network-vpn", "aliases": ["vpn settings"]},
+    {"id": "mobile_hotspot", "name": "Mobile hotspot", "uri": "ms-settings:network-mobilehotspot", "aliases": ["mobile hotspot", "hotspot settings"]},
+    {"id": "ethernet_settings", "name": "Ethernet", "uri": "ms-settings:network-ethernet", "aliases": ["ethernet settings"]},
+    {"id": "network_status", "name": "Network & internet", "uri": "ms-settings:network-status", "aliases": ["network settings", "network and internet settings"]},
+    {"id": "background_settings", "name": "Background", "uri": "ms-settings:personalization-background", "aliases": ["background settings", "desktop background", "wallpaper settings"]},
+    {"id": "colors_settings", "name": "Colors", "uri": "ms-settings:personalization-colors", "aliases": ["color settings", "accent color", "theme colors"]},
+    {"id": "lock_screen_settings", "name": "Lock screen", "uri": "ms-settings:lockscreen", "aliases": ["lock screen settings"]},
+    {"id": "themes_settings", "name": "Themes", "uri": "ms-settings:themes", "aliases": ["theme settings", "windows themes"]},
+    {"id": "start_settings", "name": "Start", "uri": "ms-settings:personalization-start", "aliases": ["start menu settings"]},
+    {"id": "taskbar_settings", "name": "Taskbar", "uri": "ms-settings:taskbar", "aliases": ["taskbar settings"]},
+    {"id": "sound_settings", "name": "Sound", "uri": "ms-settings:sound", "aliases": ["sound settings", "audio settings"]},
+    {"id": "volume_mixer_settings", "name": "Volume mixer", "uri": "ms-settings:apps-volume", "aliases": ["volume mixer", "app volume settings", "per app volume"]},
+    {"id": "sound_devices_settings", "name": "Sound devices", "uri": "ms-settings:sound-devices", "aliases": ["sound devices", "audio devices", "playback devices"]},
+    {"id": "windows_update", "name": "Windows Update", "uri": "ms-settings:windowsupdate", "aliases": ["windows update", "check for updates", "update settings"]},
+    {"id": "windows_security", "name": "Windows Security", "uri": "ms-settings:windowsdefender", "aliases": ["windows security", "windows defender", "antivirus settings"]},
+    {"id": "troubleshoot_settings", "name": "Troubleshoot", "uri": "ms-settings:troubleshoot", "aliases": ["troubleshoot settings", "troubleshooter"]},
+    {"id": "backup_settings", "name": "Backup", "uri": "ms-settings:backup", "aliases": ["backup settings"]},
+    {"id": "recovery_settings", "name": "Recovery", "uri": "ms-settings:recovery", "aliases": ["recovery settings", "reset this pc"]},
+    {"id": "apps_features", "name": "Apps & features", "uri": "ms-settings:appsfeatures", "aliases": ["apps and features", "uninstall a program", "installed apps settings"]},
+    {"id": "default_apps", "name": "Default apps", "uri": "ms-settings:defaultapps", "aliases": ["default apps settings"]},
+    {"id": "startup_apps", "name": "Startup apps", "uri": "ms-settings:startupapps", "aliases": ["startup apps", "startup programs settings"]}
+  ],
+  "queries": [
+    {
+      "id": "bluetooth_devices",
+      "name": "Bluetooth devices",
+      "aliases": ["bluetooth devices", "paired bluetooth devices", "check bluetooth devices", "list bluetooth devices", "what bluetooth devices"],
+      "shell": "powershell",
+      "command": "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | Where-Object { $_.Present -eq $true } | Select-Object FriendlyName,Status | ConvertTo-Json -Compress",
+      "empty_message": "no Bluetooth devices were found (radio may be off, or nothing is paired)"
+    },
+    {
+      "id": "wifi_networks",
+      "name": "Nearby Wi-Fi networks",
+      "aliases": ["wifi networks", "nearby wifi networks", "available wifi networks", "list wifi networks", "scan wifi"],
+      "shell": "netsh",
+      "command": "netsh wlan show networks",
+      "parser": "netsh_networks",
+      "empty_message": "no Wi-Fi networks were found (adapter may be off)"
+    },
+    {
+      "id": "wifi_current",
+      "name": "Current Wi-Fi connection",
+      "aliases": ["current wifi", "wifi status", "what network am i connected to", "connected wifi", "wifi connection status"],
+      "shell": "netsh",
+      "command": "netsh wlan show interfaces",
+      "parser": "netsh_interface",
+      "empty_message": "no active Wi-Fi connection was found"
+    },
+    {
+      "id": "battery_status",
+      "name": "Battery status",
+      "aliases": ["battery status", "battery percentage", "how much battery", "battery level", "check battery"],
+      "shell": "powershell",
+      "command": "Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue | Select-Object EstimatedChargeRemaining,BatteryStatus | ConvertTo-Json -Compress",
+      "empty_message": "no battery was found (this may be a desktop with no battery)"
+    },
+    {
+      "id": "disk_usage",
+      "name": "Disk / storage usage",
+      "aliases": ["disk space", "storage space", "how much storage", "free disk space", "disk usage", "how much space left"],
+      "shell": "powershell",
+      "command": "Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | Select-Object Name,@{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}},@{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} | ConvertTo-Json -Compress",
+      "empty_message": "no drives could be read"
+    },
+    {
+      "id": "network_info",
+      "name": "Network / IP configuration",
+      "aliases": ["ip address", "network info", "my ip address", "network configuration", "what's my ip"],
+      "shell": "powershell",
+      "command": "Get-NetIPConfiguration -ErrorAction SilentlyContinue | Select-Object InterfaceAlias,@{n='IPv4';e={$_.IPv4Address.IPAddress}} | ConvertTo-Json -Compress",
+      "empty_message": "no active network interfaces were found"
+    },
+    {
+      "id": "system_info",
+      "name": "System / OS info",
+      "aliases": ["system info", "windows version", "os version", "computer info", "what windows version"],
+      "shell": "powershell",
+      "command": "Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue | Select-Object Caption,Version,LastBootUpTime | ConvertTo-Json -Compress",
+      "empty_message": "system info could not be read"
+    },
+    {
+      "id": "running_processes",
+      "name": "Top running processes",
+      "aliases": ["running processes", "top processes", "what's using cpu", "cpu usage", "what's running"],
+      "shell": "powershell",
+      "command": "Get-Process -ErrorAction SilentlyContinue | Sort-Object CPU -Descending | Select-Object -First 6 Name,@{n='CPU';e={[math]::Round($_.CPU,1)}} | ConvertTo-Json -Compress",
+      "empty_message": "no process list could be read"
+    },
+    {
+      "id": "installed_apps",
+      "name": "Installed applications",
+      "aliases": ["installed apps", "installed programs", "what apps are installed", "list installed programs", "what's installed"],
+      "shell": "powershell",
+      "command": "Get-ItemProperty 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName } | Select-Object -First 25 -ExpandProperty DisplayName | ConvertTo-Json -Compress",
+      "empty_message": "no installed applications could be read"
+    },
+    {
+      "id": "printers_list",
+      "name": "Printers",
+      "aliases": ["printers", "list printers", "what printers", "available printers", "check printers"],
+      "shell": "powershell",
+      "command": "Get-Printer -ErrorAction SilentlyContinue | Select-Object Name,PrinterStatus | ConvertTo-Json -Compress",
+      "empty_message": "no printers were found"
+    },
+    {
+      "id": "firewall_status",
+      "name": "Firewall status",
+      "aliases": ["firewall status", "is firewall on", "firewall settings status", "check firewall"],
+      "shell": "powershell",
+      "command": "Get-NetFirewallProfile -ErrorAction SilentlyContinue | Select-Object Name,Enabled | ConvertTo-Json -Compress",
+      "empty_message": "firewall status could not be read"
+    }
+  ]
+}

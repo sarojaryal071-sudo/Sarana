@@ -711,12 +711,25 @@ TOOL_DECLARATIONS = [
             "(and any other action the user didn't explicitly and unambiguously ask for) return "
             "[CONFIRMATION_REQUIRED] the first time — do not call again with confirmed=true until the "
             "user has explicitly said yes to THIS specific action; never infer confirmation from the "
-            "original request or unrelated speech."
+            "original request or unrelated speech. "
+            "ALSO: action='system_shortcut' with value=<free text> is a fast library of Windows "
+            "shortcuts — deep-links straight into a specific Settings page OR runs a real read-only "
+            "check, instead of slow generic UI automation. Prefer this over computer_control's "
+            "accomplish() whenever the request matches one of these. Examples: value='bluetooth "
+            "devices' (lists actually-paired devices), 'wifi networks' (nearby SSIDs), 'wifi status' "
+            "(current connection), 'battery status', 'disk space', 'ip address', 'system info', "
+            "'running processes', 'installed apps', 'printers', 'firewall status', or any Settings "
+            "page name like 'display settings'/'sound settings'/'windows update'/'startup apps'. The "
+            "info-check ones return a [VERIFIED_SUCCESS]/[VERIFIED_FAILURE]/[INCONCLUSIVE] tag built "
+            "from the command's REAL output — read it honestly, never invent device names or numbers "
+            "that weren't in the result. If it returns 'No known fast-path shortcut matches', don't "
+            "retry with slightly different wording — fall back to accomplish() instead. "
+            "action='list_system_shortcuts' lists everything currently in this library."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "The action to perform, e.g. volume_set | toggle_wifi | sleep | bluetooth_on | bluetooth_off | clipboard_get | clipboard_set | restart | shutdown | minimize | maximize | ..."},
+                "action":      {"type": "STRING", "description": "The action to perform, e.g. volume_set | toggle_wifi | sleep | bluetooth_on | bluetooth_off | clipboard_get | clipboard_set | restart | shutdown | minimize | maximize | system_shortcut | list_system_shortcuts | ..."},
                 "description": {"type": "STRING", "description": "Natural language description of what to do (used only when action is omitted)"},
                 "value":       {"type": "STRING", "description": "Optional value: volume level (0-100), text to type/clipboard_set, etc."},
                 "confirmed":   {"type": "BOOLEAN", "description": "Set true only after the user has explicitly confirmed a consequential action (restart/shutdown) in THIS conversation — never infer it"}

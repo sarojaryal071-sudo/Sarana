@@ -22,6 +22,7 @@ except ImportError:
     _PYPERCLIP = False
 
 from actions import result_envelope as _envelope
+from actions import system_shortcuts as _shortcuts
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
@@ -978,6 +979,19 @@ def computer_settings(
         if after == text:
             return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, "clipboard now contains the requested text")
         return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "clipboard was written to but could not be read back to confirm")
+
+    # ── system_shortcut: the data-driven fast-path library ─────────────
+    # (actions/system_shortcuts.py, seeded from config/system_shortcuts.json)
+    # — deep-links straight into a specific Settings page, or runs one
+    # built-in read-only cmdlet and reports its real output, instead of
+    # falling back to slow, coordinate-guessing UI automation for things
+    # like "check bluetooth devices" or "what's my battery level".
+    if action in ("system_shortcut", "system_query", "open_setting", "check_status"):
+        target = str(value or params.get("target") or description or "").strip()
+        return _shortcuts.system_shortcut(target)
+
+    if action in ("list_system_shortcuts", "list_shortcuts", "what_can_you_control"):
+        return _shortcuts.list_shortcuts()
 
     if action in ("type_text", "write_on_screen", "type", "write"):
         text = str(value or params.get("text", "")).strip()
