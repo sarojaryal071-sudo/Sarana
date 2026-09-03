@@ -35,6 +35,7 @@ except ImportError:
 
 from config import get_os, is_windows, is_mac, is_linux
 from actions.browser_control import open_media_url
+from actions import result_envelope as _envelope
 
 
 def _get_base_dir() -> Path:
@@ -287,8 +288,22 @@ def _handle_play(parameters: dict, player) -> str:
         # spawning a brand new, untracked window every time, and means
         # a later browser_control(action="close") can actually find and
         # close it.
-        open_media_url(video_url)
-        return f"Playing: {query}"
+        #
+        # open_media_url's own return value is now actually READ instead
+        # of discarded — a real, previously-existing gap found while
+        # building JARVIS's task-verification layer: this used to return
+        # "Playing: {query}" unconditionally the moment the open was
+        # ATTEMPTED, even if open_media_url itself came back with "Could
+        # not open: ..." or "...timed out" — an unverified claim of
+        # success exactly like the "clicked Play" != "video is playing"
+        # case this whole verification architecture exists to prevent.
+        open_result = open_media_url(video_url)
+        if open_result.startswith("Could not open") or "timed out" in open_result:
+            return _envelope.envelope(
+                _envelope.STATUS_VERIFIED_FAILURE,
+                f"tried to play '{query}' but {open_result}",
+            )
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"Playing: {query}")
 
     print(f"[YouTube] ⚠️ Scrape failed, opening filtered search page")
     fallback_url = (
@@ -296,8 +311,16 @@ def _handle_play(parameters: dict, player) -> str:
         f"?search_query={quote_plus(query)}"
         f"&sp={_YT_VIDEO_FILTER}"
     )
-    open_media_url(fallback_url)
-    return f"Opened YouTube search for: {query} (manual selection required)"
+    open_result = open_media_url(fallback_url)
+    if open_result.startswith("Could not open") or "timed out" in open_result:
+        return _envelope.envelope(
+            _envelope.STATUS_VERIFIED_FAILURE,
+            f"tried to open a YouTube search for '{query}' but {open_result}",
+        )
+    return _envelope.envelope(
+        _envelope.STATUS_INCONCLUSIVE,
+        f"opened YouTube search for '{query}' — manual selection required, no specific video was confidently identified",
+    )
 
 
 def _handle_summarize(parameters: dict, player, speak) -> str:

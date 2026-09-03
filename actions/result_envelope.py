@@ -20,6 +20,15 @@ STATUS_VERIFIED_FAILURE      = "VERIFIED_FAILURE"
 STATUS_INCONCLUSIVE          = "INCONCLUSIVE"
 STATUS_UI_AMBIGUOUS          = "UI_AMBIGUOUS"
 STATUS_CONFIRMATION_REQUIRED = "CONFIRMATION_REQUIRED"
+STATUS_CANCELLED             = "CANCELLED"
+# BLOCKED is deliberately distinct from CONFIRMATION_REQUIRED: a
+# CONFIRMATION_REQUIRED action becomes allowed the moment the user says
+# yes (confirmed=true); a BLOCKED action is refused by policy regardless
+# of confirmation — there is no confirmed=true that makes it proceed.
+# Used for things like a generated-code safety-check rejection
+# (actions/desktop.py) or a permanently-disallowed operation (force-push,
+# arbitrary shell execution) — never for something a user can authorize.
+STATUS_BLOCKED                = "BLOCKED"
 
 # Statuses that mean "local verification could not tell" — the ONLY ones
 # worth escalating to the existing observe/verify vision mechanism (once,
@@ -50,6 +59,17 @@ _DIRECTIVES = {
         "confirm this specific action, then call this again with "
         "confirmed=true — never infer confirmation from the original "
         "request or from unrelated speech."
+    ),
+    STATUS_CANCELLED: (
+        "This was cancelled before completion — do not describe it as "
+        "having succeeded or failed; tell the user honestly that it was "
+        "stopped."
+    ),
+    STATUS_BLOCKED: (
+        "This action is blocked by policy and cannot be performed — this "
+        "is not a confirmation gate, so do not ask the user to confirm "
+        "it or suggest a workaround that bypasses the restriction. Tell "
+        "the user honestly why it can't be done."
     ),
 }
 

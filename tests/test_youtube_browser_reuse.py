@@ -99,21 +99,36 @@ def test_open_media_url_reports_an_honest_timeout_not_a_crash() -> None:
 
 def test_handle_play_uses_open_media_url_for_a_successfully_scraped_video() -> None:
     with patch.object(yv, "_scrape_first_video_url", return_value="https://www.youtube.com/watch?v=abc12345678"), \
-         patch.object(yv, "open_media_url") as m_open:
+         patch.object(yv, "open_media_url", return_value="Opened: https://www.youtube.com/watch?v=abc12345678") as m_open:
         result = yv._handle_play({"query": "some song"}, player=None)
     m_open.assert_called_once_with("https://www.youtube.com/watch?v=abc12345678")
+    assert result.startswith("[VERIFIED_SUCCESS]")
     assert "Playing: some song" in result
     print("test_handle_play_uses_open_media_url_for_a_successfully_scraped_video: PASS")
 
 
+def test_handle_play_reports_verified_failure_when_open_media_url_actually_failed() -> None:
+    # Regression guard for the real gap this fixed: _handle_play used to
+    # return "Playing: X" unconditionally the moment the open was
+    # ATTEMPTED, even when open_media_url itself reported a real failure
+    # — an unverified success claim. Now the failure must propagate.
+    with patch.object(yv, "_scrape_first_video_url", return_value="https://www.youtube.com/watch?v=abc12345678"), \
+         patch.object(yv, "open_media_url", return_value="Could not open: no display available"):
+        result = yv._handle_play({"query": "some song"}, player=None)
+    assert result.startswith("[VERIFIED_FAILURE]")
+    assert "Could not open" in result
+    print("test_handle_play_reports_verified_failure_when_open_media_url_actually_failed: PASS")
+
+
 def test_handle_play_uses_open_media_url_for_the_fallback_search_page_too() -> None:
     with patch.object(yv, "_scrape_first_video_url", return_value=None), \
-         patch.object(yv, "open_media_url") as m_open:
+         patch.object(yv, "open_media_url", return_value="Opened: https://www.youtube.com/results?...") as m_open:
         result = yv._handle_play({"query": "some song"}, player=None)
     m_open.assert_called_once()
     (fallback_url,), _ = m_open.call_args
     assert "youtube.com/results" in fallback_url
     assert "some+song" in fallback_url or "some%20song" in fallback_url
+    assert result.startswith("[INCONCLUSIVE]")
     assert "manual selection required" in result
     print("test_handle_play_uses_open_media_url_for_the_fallback_search_page_too: PASS")
 
@@ -171,6 +186,7 @@ if __name__ == "__main__":
     test_open_media_url_never_crashes_on_a_session_error()
     test_open_media_url_reports_an_honest_timeout_not_a_crash()
     test_handle_play_uses_open_media_url_for_a_successfully_scraped_video()
+    test_handle_play_reports_verified_failure_when_open_media_url_actually_failed()
     test_handle_play_uses_open_media_url_for_the_fallback_search_page_too()
     test_handle_play_never_shells_out_to_the_os_directly_anymore()
     test_open_url_function_no_longer_exists_dead_code_was_removed()

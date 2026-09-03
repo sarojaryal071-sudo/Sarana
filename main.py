@@ -102,6 +102,7 @@ from actions.dev_agent         import dev_agent
 from actions.web_search        import web_search as web_search_action
 from actions.computer_control  import computer_control, get_active_window_title
 from actions.office_control    import office_control
+from actions import task_engine
 from actions import gesture_control
 from actions.computer_control  import INCONCLUSIVE_TAGS as _cc_INCONCLUSIVE_TAGS
 from actions import result_envelope as _envelope
@@ -749,6 +750,35 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "jarvis_task",
+        "description": (
+            "JARVIS mode ONLY. The authoritative execution entry point — hand off a CLARIFIED "
+            "objective and JARVIS's own Task Engine decides which capability/method to use, "
+            "executes it, verifies the REAL outcome, and recovers by trying a different method "
+            "on its own if needed. You (Gemini) do the understanding/clarifying — resolve "
+            "'it'/'that song'/ambiguous references into one clear, self-contained objective "
+            "sentence BEFORE calling this — but you do NOT choose which underlying tool/capability "
+            "handles it; that decision belongs to JARVIS, not you. Currently covers: "
+            "playing/searching a video on YouTube, opening/searching a website. For anything this "
+            "doesn't yet cover, use the specific existing tool for that instead (this expands over "
+            "time — it will return [INCONCLUSIVE] with 'no known JARVIS capability' if the "
+            "objective isn't covered yet, never a guess). "
+            "Returns a Result Envelope tag: [VERIFIED_SUCCESS] means the outcome was actually "
+            "verified — read the evidence and repeat it naturally. [VERIFIED_FAILURE]/"
+            "[INCONCLUSIVE] mean it did NOT confirm success — tell the user honestly, never claim "
+            "it worked. Never call browser_control/youtube_video directly for something this tool "
+            "already covers while JARVIS mode is on — always use jarvis_task for those."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "objective": {"type": "STRING", "description": "The user's goal, already clarified/disambiguated by you into one self-contained sentence"},
+                "context":   {"type": "STRING", "description": "Optional: any resolved entity/reference info JARVIS can't infer alone"},
+            },
+            "required": ["objective"],
+        },
+    },
+    {
         "name": "office_control",
         "description": (
             "Controls the ACTIVE document/workbook in an already-open Microsoft Word or Excel window via "
@@ -841,15 +871,23 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "desktop_control",
-        "description": "Controls the desktop: wallpaper, organize, clean, list, stats.",
+        "description": (
+            "Controls the desktop: wallpaper, organize, clean, list, stats. "
+            "action='task' generates and runs code for a free-form request and returns "
+            "[CONFIRMATION_REQUIRED] the first time — do not call again with confirmed=true "
+            "until the user has explicitly said yes to THIS specific request; never infer "
+            "confirmation. It may also return [BLOCKED] if the generated code fails a safety "
+            "check — that is not a confirmation gate, do not retry it or suggest a workaround."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action": {"type": "STRING", "description": "wallpaper | wallpaper_url | organize | clean | list | stats | task"},
-                "path":   {"type": "STRING", "description": "Image path for wallpaper"},
-                "url":    {"type": "STRING", "description": "Image URL for wallpaper_url"},
-                "mode":   {"type": "STRING", "description": "by_type or by_date for organize"},
-                "task":   {"type": "STRING", "description": "Natural language desktop task"},
+                "action":    {"type": "STRING", "description": "wallpaper | wallpaper_url | organize | clean | list | stats | task"},
+                "path":      {"type": "STRING", "description": "Image path for wallpaper"},
+                "url":       {"type": "STRING", "description": "Image URL for wallpaper_url"},
+                "mode":      {"type": "STRING", "description": "by_type or by_date for organize"},
+                "task":      {"type": "STRING", "description": "Natural language desktop task"},
+                "confirmed": {"type": "BOOLEAN", "description": "Set true only after the user has explicitly confirmed action='task' in THIS conversation — never infer it"},
             },
             "required": ["action"]
         }
@@ -1305,6 +1343,7 @@ DESKTOP_ONLY_TOOLS = frozenset({
     "computer_settings", "desktop_control", "code_helper", "dev_agent",
     "file_processor", "computer_control", "game_updater", "flight_finder",
     "system_status", "shutdown_jarvis", "gesture_mode", "office_control",
+    "jarvis_task",
 })
 
 # Bounded autonomous-execution governor (self._jarvis_action_count, its
@@ -3112,9 +3151,60 @@ class JarvisLive:
                 else:
                     result = "gesture_mode requires action='on' or action='off'."
 
+            elif name == "jarvis_task":
+                # The one JARVIS execution entry point (see
+                # docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md). Gemini has
+                # already interpreted/clarified the request into `objective`
+                # — task_engine.py owns everything from here: capability
+                # routing, execution, verification, and bounded recovery,
+                # reusing the EXISTING action modules directly rather than
+                # a second tool-execution path. Symmetric with the
+                # browser_control/youtube_video redirects above: JARVIS mode
+                # means the Task Engine is authoritative for what it
+                # covers, so this itself requires JARVIS mode — outside
+                # it, the existing direct tools remain the right path,
+                # exactly as they already work in SARANA mode today.
+                if not self._jarvis_mode:
+                    result = (
+                        "[JARVIS_MODE_REQUIRED] jarvis_task needs JARVIS mode on. Tell the user "
+                        "honestly (they can say \"turn on JARVIS mode\"), or just use the direct "
+                        "tool (browser_control/youtube_video/etc.) for this request instead."
+                    )
+                else:
+                    r = await loop.run_in_executor(None, lambda: task_engine.execute_task(parameters=args))
+                    result = r or "Done."
+
             elif name == "browser_control":
-                r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
-                result = r or "Done."
+                # JARVIS-mode boundary enforcement — see
+                # docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md §7. In JARVIS
+                # mode, task_engine.py's router owns capability selection;
+                # Gemini must not bypass it by calling this tool directly
+                # for the SAME actions the router already handles. This is
+                # enforced HERE, at dispatch — not left to "Gemini will
+                # probably follow the system instruction": Gemini Live's
+                # tool list can't be dynamically rescoped mid-session
+                # without a disruptive reconnect (self._jarvis_mode toggles
+                # in place, with no reconnect, everywhere else in this
+                # file), so a dispatch-layer check is the only REAL
+                # boundary available today. Scoped to exactly the two
+                # actions task_engine.py's pilot domain actually routes
+                # (go_to/search/new_tab) — every OTHER browser_control
+                # action (click/type/smart_click/screenshot/close/etc.) has
+                # no task_engine path yet, so redirecting those would break
+                # real, working functionality with nothing to replace it;
+                # see the architecture doc's own "staged, not a one-shot
+                # cutover" note.
+                _bc_action = (args.get("action") or "").lower().strip()
+                if self._jarvis_mode and _bc_action in ("go_to", "search", "new_tab"):
+                    result = (
+                        "[JARVIS_TASK_REQUIRED] In JARVIS mode, browser open/search/navigate "
+                        "goes through jarvis_task with a clarified objective — JARVIS's own Task "
+                        "Engine chooses the capability, not this tool directly. Call jarvis_task "
+                        "with the user's goal instead."
+                    )
+                else:
+                    r = await loop.run_in_executor(None, lambda: browser_control(parameters=args, player=self.ui))
+                    result = r or "Done."
 
             elif name == "file_controller":
                 r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=self.ui))
@@ -3129,8 +3219,20 @@ class JarvisLive:
                 result = r or "Reminder set."
 
             elif name == "youtube_video":
-                r = await loop.run_in_executor(None, lambda: youtube_video(parameters=args, response=None, player=self.ui))
-                result = r or "Done."
+                # Same JARVIS-mode boundary as browser_control above — the
+                # 'play' action is exactly task_engine.py's "youtube" pilot
+                # domain. summarize/trending/etc. have no task_engine path
+                # yet and stay directly callable.
+                _yt_action = (args.get("action") or "").lower().strip()
+                if self._jarvis_mode and _yt_action == "play":
+                    result = (
+                        "[JARVIS_TASK_REQUIRED] In JARVIS mode, playing a video goes through "
+                        "jarvis_task with a clarified objective, not this tool directly. Call "
+                        "jarvis_task with the user's goal instead."
+                    )
+                else:
+                    r = await loop.run_in_executor(None, lambda: youtube_video(parameters=args, response=None, player=self.ui))
+                    result = r or "Done."
 
             elif name == "screen_process":
                 import time as _t_mod

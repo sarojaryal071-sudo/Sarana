@@ -1,4 +1,5 @@
 #desktop.py
+import ast
 import os
 import sys
 import json
@@ -8,6 +9,8 @@ import tempfile
 import platform
 from pathlib import Path
 from datetime import datetime
+
+from actions import result_envelope as _envelope
 
 try:
     import pyautogui
@@ -38,12 +41,22 @@ def _get_desktop() -> Path:
 def _build_sandbox() -> dict:
     import time
 
+    # hasattr/getattr were REMOVED deliberately — this is the actual fix,
+    # not a stylistic one. Even with no `import`/`__import__` reachable,
+    # getattr(obj, "__class__")/"__globals__"/"__subclasses__"-style
+    # object-graph traversal on an already-injected object (Path, pyautogui,
+    # the old raw ctypes below) is a well-known, real Python sandbox-escape
+    # technique — it doesn't need __import__ at all, only string-based
+    # attribute lookup on something already in scope. Removing them closes
+    # that specific escape path; _validate_generated_code() below adds a
+    # second, independent layer (a static AST check for dunder-attribute
+    # access) so the restriction doesn't rely on this list alone.
     safe_builtins = {
         "print": print,
         "len": len, "str": str, "int": int, "float": float,
         "bool": bool, "list": list, "dict": dict, "tuple": tuple,
         "range": range, "enumerate": enumerate, "sorted": sorted,
-        "isinstance": isinstance, "hasattr": hasattr, "getattr": getattr,
+        "isinstance": isinstance,
         "max": max, "min": min, "sum": sum, "abs": abs,
         "zip": zip, "map": map, "filter": filter,
     }
@@ -57,7 +70,7 @@ def _build_sandbox() -> dict:
             "copytree":   shutil.copytree,
             "disk_usage": shutil.disk_usage,
         })(),
-        "os_path": os.path,  
+        "os_path": os.path,
     }
 
     if _PYAUTOGUI:
@@ -65,11 +78,21 @@ def _build_sandbox() -> dict:
 
     if _OS == "Windows":
         try:
-            import ctypes
             import winreg
-            sandbox["ctypes"] = ctypes
+            # Raw `ctypes` used to be injected here — REMOVED. Unlike
+            # shutil/winreg above (wrapped in a restricted proxy exposing
+            # only specific read-safe methods), ctypes is fundamentally an
+            # unrestricted foreign-function interface: any Win32 API call,
+            # including ones that spawn processes or write memory/files,
+            # is reachable through it, regardless of what the generating
+            # prompt claims ("Windows API calls, read-only" was never
+            # actually enforced — ctypes cannot be made "read-only" by a
+            # Python-level allowlist). Concrete needs this used to serve
+            # (e.g. setting the wallpaper) already have dedicated, safe,
+            # named functions below (set_wallpaper()) instead of letting
+            # generated code construct arbitrary Win32 calls itself.
             sandbox["winreg"] = type("winreg", (), {
-                # Sadece okuma
+                # Read-only
                 "OpenKey":      winreg.OpenKey,
                 "QueryValueEx": winreg.QueryValueEx,
                 "HKEY_CURRENT_USER": winreg.HKEY_CURRENT_USER,
@@ -80,14 +103,54 @@ def _build_sandbox() -> dict:
     return sandbox
 
 
+# Blocked by name even though none of these are reachable via
+# safe_builtins any more — a second, independent static layer so the
+# restriction doesn't rely purely on the injected-builtins list.
+_BLOCKED_CALL_NAMES = frozenset({
+    "exec", "eval", "compile", "open", "__import__",
+    "input", "globals", "locals", "vars", "delattr", "setattr",
+})
+
+
+def _validate_generated_code(code: str) -> str | None:
+    """Static AST safety check, run BEFORE exec() — enforces the 'hard
+    rules' PROGRAMMATICALLY instead of trusting the code-generating
+    model's own system prompt to have followed them (that prompt's rules
+    were previously the ONLY enforcement — a real gap, since a prompt is
+    an instruction to a model, not a runtime guarantee). Returns None if
+    the code passes, or a short human-readable reason if it's rejected.
+    """
+    try:
+        tree = ast.parse(code, mode="exec")
+    except SyntaxError as e:
+        return f"generated code has a syntax error ({e})"
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return "generated code contains an import statement"
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__") and node.attr.endswith("__"):
+            return f"generated code accesses a dunder attribute ('{node.attr}')"
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else None)
+            if name in _BLOCKED_CALL_NAMES:
+                return f"generated code calls '{name}'"
+    return None
+
+
 def _execute_generated_code(code: str, player=None) -> str:
     if not code or code.strip() == "UNSAFE":
-        return "This action cannot be performed safely."
+        return _envelope.envelope(_envelope.STATUS_BLOCKED, "this action cannot be performed safely")
 
     # Kod temizleme
     if code.startswith("```"):
         lines = code.split("\n")
         code  = "\n".join(lines[1:-1]).strip()
+
+    rejection = _validate_generated_code(code)
+    if rejection:
+        print(f"[Desktop] Rejected generated code: {rejection}\nCode:\n{code[:300]}")
+        return _envelope.envelope(_envelope.STATUS_BLOCKED, rejection)
 
     sandbox      = _build_sandbox()
     output_lines = []
@@ -462,6 +525,24 @@ def desktop_control(
             if not actual_task:
                 return "Please describe what you want to do on the desktop."
 
+            # This is the one desktop_control path that generates and
+            # executes arbitrary code (sandboxed + AST-validated above,
+            # but still a materially higher-risk category than the named
+            # actions above it) — previously dispatched with NO
+            # confirmation gate at all, unlike shutdown/restart elsewhere
+            # in the app. Unconditionally consequential regardless of
+            # WHAT the task text says (unlike is_consequential()'s
+            # pattern-matched goals elsewhere) — arbitrary code generation
+            # is a risky category on its own, so this checks
+            # is_confirmed() directly rather than first asking
+            # is_consequential() to decide; reuses the exact same shared
+            # confirmed=true convention every other gated action uses.
+            if not _envelope.is_confirmed(params):
+                return _envelope.envelope(
+                    _envelope.STATUS_CONFIRMATION_REQUIRED,
+                    f"this will generate and run code to: {actual_task}",
+                )
+
             print(f"[Desktop] Asking Gemini: {actual_task}")
             if player:
                 player.write_log("[Desktop] Generating action...")
@@ -471,6 +552,11 @@ def desktop_control(
 
         else:
             if action:
+                if not _envelope.is_confirmed(params):
+                    return _envelope.envelope(
+                        _envelope.STATUS_CONFIRMATION_REQUIRED,
+                        f"this will generate and run code to: {action}",
+                    )
                 code = _ask_gemini_for_desktop_action(action)
                 return _execute_generated_code(code, player=player)
             return "No action or task specified."
