@@ -374,6 +374,35 @@ No duplication was found among currently-EXISTING owners — the "multiple owner
 
 ---
 
+## 10a. Capability Families *(added post Phase 2 review, before Phase 3 — a correction to the original Phase 3 proposal, not part of the original roadmap text above)*
+
+The Control Hierarchy (§10) is about *how* one capability gets executed (API vs. CLI vs. UIA vs. vision). Capability **families** are a separate, orthogonal concept: *what kind of thing* a capability is, for two specific purposes only — classification, and bounding RECOVERY. A family is **not** a task-sequencing boundary: one objective's PLAN/EXECUTE steps may legitimately cross families in order (`system → application → files` for "open Excel and save this to a specific folder" is ordinary multi-step sequencing, untouched by this).
+
+```
+CAPABILITY FAMILIES
+├── SYSTEM        — universal OS-level infrastructure (audio, display, windows,
+│                    shortcuts, OS settings). Not yet populated — Phase 3.
+├── APPLICATION   — capabilities tied to one specific application/domain
+│                    (browser, YouTube, Office, VS Code/dev, ...).
+│                    youtube/browser live here today (task_engine.py's
+│                    _DOMAINS); Office joins this SAME family in Phase 4.
+├── RESOURCE      — files / terminal / processes. Concept only, not built.
+├── DEVELOPMENT   — repo agent / git. Concept only, not built.
+└── DEPLOYMENT    — deploy + verify. Concept only, not built.
+```
+
+Only SYSTEM and APPLICATION are real, implemented families right now (`actions/task_engine.py`'s `FAMILY_SYSTEM`/`FAMILY_APPLICATION` constants, and a `family` key on every `_DOMAINS` entry). RESOURCE/DEVELOPMENT/DEPLOYMENT are documented placeholders for where those future J7–J11 capabilities will register once built — no empty scaffolding exists for them yet, deliberately.
+
+**Why this exists:** the original Phase 3 proposal bundled System and Office capabilities together for reasons that turned out to be effort/convenience ("these are the next Result-Envelope-ready modules"), not a real architectural judgment that they belong together — they don't. Office is an Application/Domain capability, the same category as Browser and YouTube; System capabilities (volume, display, OS settings) are a different, universal-infrastructure category. Left uncorrected, the router's flat `_DOMAINS` list had no way to prevent System and Application capabilities from collapsing into one undifferentiated category as more domains were added.
+
+**What families actually enforce:** `execute_task()`'s recovery hop (`_RECOVERY_CHAIN`) only proceeds when `family_of(next_domain) == family_of(current_domain)` — a capability may fail over to a *different method within its own category*, never to an unrelated category. A failed volume-set falling back to a browser search would not be a sane recovery of anything; the family check makes that structurally impossible rather than relying on the chain being hand-curated correctly forever.
+
+**Corrected Phase 3/4 split:**
+- **Phase 3 — System capabilities.** `computer_settings.py`/`system_shortcuts.py` only, `family: "system"`. One family, cleanly scoped.
+- **Phase 4 — Application/Domain capabilities, second pair.** `office_control.py` added as a *third* entry in the same family youtube/browser already occupy (`family: "application"`) — a genuine test of the router handling three domains in one family, not a System/Domain conflation.
+
+---
+
 ## 11. Plan / Action / Verification Model
 
 Minimal fields, no more than needed:

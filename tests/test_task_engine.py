@@ -44,6 +44,62 @@ def _handlers(youtube=None, browser=None):
     return patch.dict(te._HANDLERS, overrides)
 
 
+# ── capability families: classification + recovery boundary ────────────
+# (post Phase 2 review, before Phase 3 — see
+# docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md's capability-family note)
+
+def test_youtube_belongs_to_application_family() -> None:
+    assert te.family_of("youtube") == te.FAMILY_APPLICATION
+    print("test_youtube_belongs_to_application_family: PASS")
+
+def test_browser_belongs_to_application_family() -> None:
+    assert te.family_of("browser") == te.FAMILY_APPLICATION
+    print("test_browser_belongs_to_application_family: PASS")
+
+def test_family_of_returns_none_for_an_unregistered_domain() -> None:
+    assert te.family_of("not_a_real_domain") is None
+    print("test_family_of_returns_none_for_an_unregistered_domain: PASS")
+
+def test_family_metadata_does_not_change_route_return_behavior() -> None:
+    # route() must still return a bare domain-name string (or None) —
+    # the family addition is a data-model change, not a route() contract
+    # change.
+    result = te.route("play a Kafle song on YouTube")
+    assert result == "youtube"
+    assert isinstance(result, str)
+    print("test_family_metadata_does_not_change_route_return_behavior: PASS")
+
+def test_real_recovery_chain_entries_are_all_same_family() -> None:
+    # Structural safety net over the REAL (non-faked) _RECOVERY_CHAIN —
+    # catches a future accidental cross-family entry immediately, not
+    # just when a task happens to exercise it.
+    for src, dst in te._RECOVERY_CHAIN.items():
+        assert te.family_of(src) == te.family_of(dst), f"{src} -> {dst} crosses a family boundary"
+    print("test_real_recovery_chain_entries_are_all_same_family: PASS")
+
+def test_recovery_cannot_cross_families() -> None:
+    # Deliberately fabricates a cross-family recovery entry (youtube, a
+    # real application-family domain, pointed at a fake SYSTEM-family
+    # domain) to prove execute_task() refuses the hop — not just that
+    # the real, current data happens to be same-family. This is the
+    # actual enforcement test; the one above is the regression net over
+    # real data.
+    fake_domains = te._DOMAINS + [{
+        "name": "fake_system_domain", "family": te.FAMILY_SYSTEM, "keywords": ["volume"],
+    }]
+    fake_chain = dict(te._RECOVERY_CHAIN)
+    fake_chain["youtube"] = "fake_system_domain"
+    m_system_handler = MagicMock(return_value="[VERIFIED_SUCCESS] should never be reached")
+    m_youtube = MagicMock(return_value="[INCONCLUSIVE] unsure on youtube.")
+    with patch.object(te, "_DOMAINS", fake_domains), \
+         patch.object(te, "_RECOVERY_CHAIN", fake_chain), \
+         patch.dict(te._HANDLERS, {"youtube": m_youtube, "fake_system_domain": m_system_handler}):
+        result = _task(objective="play a Kafle song on YouTube")
+    m_system_handler.assert_not_called()
+    assert result.startswith("[INCONCLUSIVE]")
+    print("test_recovery_cannot_cross_families: PASS")
+
+
 # ── router: deterministic, no LLM ───────────────────────────────────────
 
 def test_route_matches_youtube_domain() -> None:
@@ -174,6 +230,12 @@ def test_execute_task_records_real_step_history() -> None:
 
 
 if __name__ == "__main__":
+    test_youtube_belongs_to_application_family()
+    test_browser_belongs_to_application_family()
+    test_family_of_returns_none_for_an_unregistered_domain()
+    test_family_metadata_does_not_change_route_return_behavior()
+    test_real_recovery_chain_entries_are_all_same_family()
+    test_recovery_cannot_cross_families()
     test_route_matches_youtube_domain()
     test_route_matches_browser_domain()
     test_route_returns_none_for_an_unmatched_objective_rather_than_guessing()

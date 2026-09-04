@@ -40,6 +40,12 @@ and (if the domain's underlying capability isn't already Result-
 Envelope-aware) a small classifier function alongside the existing ones
 below.
 
+Capability-family correction (post Phase 2 review, before Phase 3):
+every _DOMAINS entry now also carries a `family` — a classification and
+RECOVERY boundary, never a task-sequencing boundary (see family_of()'s
+own docstring below for the distinction). This is a data-model addition
+only; the router, the lifecycle, and Phase 0-2 behavior are unchanged.
+
 Explicitly NOT this module's job, and never added here: a second AI/LLM
 choosing what to do: a second tool-execution queue: a second
 verification vocabulary; browser/UI-automation implementation itself
@@ -126,6 +132,37 @@ class Task:
         return step
 
 
+# ── Capability families ──────────────────────────────────────────────
+# A FAMILY is a classification and RECOVERY boundary — NOT a task-
+# sequencing boundary. A single objective's PLAN/EXECUTE steps may
+# legitimately cross families in order (e.g. system -> application ->
+# files for "open Excel and save this to a specific folder") — that is
+# ordinary multi-step sequencing (Phase 4+ work) and nothing here
+# restricts it. What families DO bound is specifically RECOVERY (see
+# execute_task()'s use of family_of() below): if one capability's
+# attempt comes back escalatable, JARVIS may try a DIFFERENT METHOD
+# within the SAME conceptual category, never jump to an unrelated
+# category as a "recovery" — a failed volume-set falling back to a
+# browser search would not be a sane recovery of anything.
+#
+# Only these two are actually populated by a real domain today. The
+# rest of the taxonomy is a documented placeholder for where future
+# capabilities go — deliberately not scaffolded into code until a real
+# domain needs them:
+#   SYSTEM       — universal OS-level infrastructure (audio, display,
+#                   windows, shortcuts, OS settings). Not yet populated
+#                   — Phase 3.
+#   APPLICATION  — capabilities tied to one specific application/domain
+#                   (browser, YouTube, Office, VS Code/dev, ...).
+#                   youtube/browser live here today; Office joins this
+#                   SAME family in Phase 4 — not System.
+#   RESOURCE     — files / terminal / processes. Concept only, not built.
+#   DEVELOPMENT  — repo agent / git. Concept only, not built.
+#   DEPLOYMENT   — deploy + verify. Concept only, not built.
+
+FAMILY_SYSTEM      = "system"
+FAMILY_APPLICATION = "application"
+
 # ── Capability router (deterministic, no LLM) ───────────────────────────
 # Same scoring shape as system_shortcuts.py's _score()/resolve() — a
 # small, explicit, auditable keyword-overlap match, picking the
@@ -136,10 +173,12 @@ class Task:
 _DOMAINS = [
     {
         "name": "youtube",
+        "family": FAMILY_APPLICATION,
         "keywords": ["youtube", "video", "song", "music", "watch", "play"],
     },
     {
         "name": "browser",
+        "family": FAMILY_APPLICATION,
         "keywords": ["website", "site", "browser", "open", "search", "google",
                      "url", "webpage", "page", "navigate", "chrome", "firefox", "edge"],
     },
@@ -159,7 +198,9 @@ def route(objective: str) -> str | None:
     """Returns the best-scoring domain name, or None if nothing clears a
     minimal confidence bar — deliberately refuses to guess at a weak
     match, same 'don't guess, say so' principle already used throughout
-    this codebase (system_shortcuts.resolve(), UI_AMBIGUOUS)."""
+    this codebase (system_shortcuts.resolve(), UI_AMBIGUOUS). Return
+    shape is unchanged by the family addition — still a bare domain-name
+    string (or None), exactly as before."""
     words = _normalize(objective)
     if not words:
         return None
@@ -169,6 +210,17 @@ def route(objective: str) -> str | None:
         if score > best_score:
             best_name, best_score = domain["name"], score
     return best_name if best_score >= 1 else None
+
+
+def family_of(domain_name: str) -> str | None:
+    """The family a registered domain belongs to, or None if the domain
+    isn't registered. Used ONLY to bound RECOVERY (see execute_task()) —
+    never consulted by route() or by ordinary task sequencing, which may
+    cross families freely."""
+    for domain in _DOMAINS:
+        if domain["name"] == domain_name:
+            return domain.get("family")
+    return None
 
 
 # ── Domain result classifiers ────────────────────────────────────────
@@ -263,7 +315,13 @@ def execute_task(parameters: dict = None) -> str:
             pass
 
         next_domain = _RECOVERY_CHAIN.get(domain)
-        if next_domain and next_domain not in tried:
+        # Family-scoped recovery: a hop is only taken if the candidate is
+        # untried AND in the SAME family as the domain that just ran —
+        # recovery tries a different METHOD within one conceptual
+        # category, never jumps categories. This is a RECOVERY rule only;
+        # it has no bearing on ordinary multi-step task sequencing
+        # (Phase 4+), which may cross families deliberately.
+        if next_domain and next_domain not in tried and family_of(next_domain) == family_of(domain):
             task.state = TASK_RECOVERING
             domain = next_domain
             continue
