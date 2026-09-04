@@ -772,10 +772,22 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "objective": {"type": "STRING", "description": "The user's goal, already clarified/disambiguated by you into one self-contained sentence"},
+                "objective": {"type": "STRING", "description": "The user's goal, already clarified/disambiguated by you into one self-contained sentence. Use this for a single-action request."},
+                "objectives": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"},
+                    "description": (
+                        "Optional, INSTEAD of 'objective': for a request that genuinely needs multiple "
+                        "ordered actions (e.g. \"check my battery, then put it in cell A1\"), give each "
+                        "atomic sub-goal as its own clarified sentence here, in order. Still describe WHAT "
+                        "to do in plain language, never WHICH tool/capability handles it — JARVIS decides "
+                        "that for each one, exactly as with a single objective. Omit this for anything "
+                        "single-step and use 'objective' instead."
+                    ),
+                },
                 "context":   {"type": "STRING", "description": "Optional: any resolved entity/reference info JARVIS can't infer alone"},
             },
-            "required": ["objective"],
+            "required": [],
         },
     },
     {

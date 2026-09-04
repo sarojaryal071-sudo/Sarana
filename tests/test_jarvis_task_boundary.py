@@ -53,7 +53,14 @@ def test_jarvis_task_tool_is_declared() -> None:
     names = [t["name"] for t in TOOL_DECLARATIONS]
     assert "jarvis_task" in names
     decl = next(t for t in TOOL_DECLARATIONS if t["name"] == "jarvis_task")
-    assert decl["parameters"]["required"] == ["objective"]
+    # Phase 5A: neither 'objective' nor 'objectives' is individually
+    # schema-required any more (Gemini gives exactly one of the two) —
+    # the actual "at least one" requirement is enforced at runtime by
+    # execute_task()/build_plan(), not expressible as a JSON-schema
+    # "required" list across two alternative fields.
+    assert decl["parameters"]["required"] == []
+    assert "objective" in decl["parameters"]["properties"]
+    assert "objectives" in decl["parameters"]["properties"]
     print("test_jarvis_task_tool_is_declared: PASS")
 
 def test_jarvis_task_outside_jarvis_mode_is_rejected_and_calls_nothing() -> None:

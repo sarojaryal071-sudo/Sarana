@@ -431,6 +431,22 @@ Three domains — deliberately not one giant `"system"` bucket, and not one doma
 
 **Gemini/JARVIS boundary:** `main.py`'s `office_control` branch redirects the specific `(app, action)` pairs the `office` domain covers — which is, deliberately, nearly `office_control.py`'s entire real surface (unlike `computer_settings.py`'s ~50-action/5-migrated split), listed as explicit tuples so a future unmigrated action (e.g. real PowerPoint support, if ever added) stays directly callable rather than silently disappearing behind the redirect.
 
+### Phase 5A — implemented (multi-objective sequencing, structural foundation)
+
+`jarvis_task` accepts an OPTIONAL `objectives: list[str]` alongside the existing `objective: str` — Gemini's own decomposition of a genuinely compound request into ordered, atomic, still-plain-language sub-objectives (never a domain/tool name; the same non-negotiable rule as a single objective, just applied per item). A single `objective` call is unaffected — a one-item plan behaves byte-for-byte as it always has.
+
+**Gemini decomposes intent; JARVIS builds the executable plan.** `build_plan()` runs the EXISTING `route()` once per incoming objective, up front, before any of them execute, producing a `list[PlanStep]` — JARVIS's own artifact (`objective` + JARVIS's routing decision + status). Gemini's `objectives` list has no field for a domain name; `build_plan()`'s own signature takes only objective strings. If any objective fails to route, the WHOLE plan is rejected before anything runs — no partial execution of a compound task JARVIS already knows it can't fully carry out.
+
+**Sequencing vs. recovery, kept structurally disjoint:** `execute_task()`'s new outer loop advances `current_step_index` through the plan only on a PlanStep reaching `VERIFIED_SUCCESS` — sequencing may cross families freely (SYSTEM→APPLICATION is ordinary). The former whole body of `execute_task()` is now `_execute_step()`, called once per PlanStep, completely unchanged in its own logic: family-scoped recovery still only hops within one PlanStep's attempt, never advances the plan. The one real change `_execute_step()` needed: its attempt budget is now a local `attempts` counter rather than `len(task.steps)`, since `task.steps` is shared across every PlanStep in a multi-objective Task now — the old length check would have silently shrunk later PlanSteps' own recovery budget.
+
+**Failure is terminal for the whole task, not just one step:** the first PlanStep that doesn't reach `VERIFIED_SUCCESS` (failed, blocked, or awaiting confirmation) stops the task there — later PlanSteps are never attempted, already-completed ones are never rerun, and JARVIS never modifies or replans the remaining PlanSteps. The only adaptivity is the pre-existing, family-scoped, same-step recovery mechanism.
+
+**TaskContext — small, structured, runtime-only, opt-in:** `values: dict[str, str]` holds a few deterministically-extracted scalars a later objective may consume; `raw: dict[int, str]` keeps each completed PlanStep's own evidence string as an audit trail. `_extract_context_values()` populates `values` after a `VERIFIED_SUCCESS` using the same local-regex discipline as `_parse_office_action` (today's one rule: `system_shortcut`'s battery-percent evidence → `values["percent"]`). Every handler gained a third, mostly-ignored `context` parameter (same uniform-signature pattern Phase 3 used for `confirmed`); `_run_office`/`_parse_office_action` is the one Phase 5A consumer — it falls back to `context.values` for an Excel `set_cell` ONLY when the objective's own text contains a referential word ("that"/"it") and has no literal value of its own, never a silent substitution. `TaskContext` lives on one `Task` instance only — a fresh task never sees a prior task's values.
+
+**Task-level `VERIFIED_SUCCESS` requires every PlanStep to have independently verified success** — dispatching every step is not the same as the task succeeding.
+
+**Proof workflow (fabricated in tests, not yet a production capability):** *"check my battery percentage" → "put that percentage into cell A1"* exercises real cross-family sequencing and real context flow end-to-end, through the actual `main.py` dispatch, with only the underlying `computer_settings`/`office_control` calls mocked — see `tests/test_task_engine_phase5a.py`. Phase 5B is what would make this an actual approved user-facing workflow; Phase 5A only proves the mechanism.
+
 ---
 
 ## 11. Plan / Action / Verification Model
