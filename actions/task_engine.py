@@ -62,6 +62,7 @@ from actions.youtube_video import youtube_video
 from actions.browser_control import browser_control
 from actions.computer_settings import computer_settings
 from actions import system_shortcuts
+from actions.office_control import office_control
 
 # Bounded per-task step budget. Deliberately a small, LOCAL constant for
 # this pilot scope (one primary attempt + one recovery attempt) rather
@@ -179,6 +180,31 @@ _DOMAINS = [
         "name": "youtube",
         "family": FAMILY_APPLICATION,
         "keywords": ["youtube", "video", "song", "music", "watch", "play"],
+    },
+    # office is declared BEFORE browser so that an objective like "open
+    # Word" (which ties 1-1: "word" for office vs. "open" for browser)
+    # resolves to office, not browser — same tie-break-by-declaration-
+    # order technique already used for youtube-vs-browser above. Verified
+    # empirically (see tests/test_task_engine_office.py's own collision
+    # tests), not assumed.
+    {
+        "name": "office",
+        "family": FAMILY_APPLICATION,
+        # Evidence-based: office_control.py's own real app names
+        # (word/excel) and its actual supported action/field vocabulary
+        # (insert/replace/format/bold/italic/underline/save, cell,
+        # spreadsheet/workbook/worksheet, document/paragraph).
+        # Deliberately EXCLUDES generic verbs (open/search/page/file/
+        # write/edit/create) that would collide with browser's keyword
+        # set — "word"/"excel"/"cell" identify actual Office intent, a
+        # bare "open"/"create" does not. Deliberately excludes
+        # "powerpoint" too: office_control.py has no PowerPoint support
+        # today (Word/Excel only) — see docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md's
+        # Phase 4 note; adding the keyword would route confidently to a
+        # capability that doesn't exist.
+        "keywords": ["word", "excel", "spreadsheet", "workbook", "worksheet",
+                     "cell", "document", "paragraph", "insert", "replace",
+                     "bold", "italic", "underline", "formatting", "save"],
     },
     {
         "name": "browser",
@@ -303,6 +329,25 @@ def _classify_system_shortcut_result(result: str) -> str:
     return _envelope.STATUS_INCONCLUSIVE  # "Opened ... settings." or "No known fast-path ..."
 
 
+def _classify_office_result(result: str) -> str:
+    """office_control.py's word_*/excel_* functions already return a
+    Result-Envelope-tagged string for every real path (status_of() below
+    catches those). Its top-level dispatcher's own 'Unknown Word
+    action...'/'Unknown office app...' fallback strings are plain, by
+    that module's own design — _run_office() below only ever emits
+    (app, action) pairs office_control() already supports, so these
+    should never actually fire, but are classified defensively rather
+    than assumed unreachable (same discipline as the browser/system_shortcut
+    classifiers above)."""
+    tag = status_of(result)
+    if tag:
+        return tag
+    r = result or ""
+    if r.startswith("Unknown"):
+        return _envelope.STATUS_VERIFIED_FAILURE
+    return _envelope.STATUS_INCONCLUSIVE
+
+
 # ── Domain handlers — call the EXISTING capability, in-process ─────────
 # Uniform (objective, confirmed) signature across every handler — a
 # minimal compatibility change to youtube/browser (confirmed is simply
@@ -364,9 +409,103 @@ def _run_system_shortcut(objective: str, confirmed: bool = False) -> str:
     return _envelope.envelope(tag, result)
 
 
+_OFFICE_EXCEL_WORDS = {"excel", "spreadsheet", "workbook", "worksheet", "cell"}
+_OFFICE_WORD_WORDS  = {"word", "document", "paragraph"}
+_CELL_REF_RE        = re.compile(r"\b([A-Za-z]{1,2}[0-9]{1,3})\b")
+
+
+def _office_app(words: set) -> str | None:
+    if words & _OFFICE_EXCEL_WORDS:
+        return "excel"
+    if words & _OFFICE_WORD_WORDS:
+        return "word"
+    return None
+
+
+def _parse_office_action(objective: str) -> dict | None:
+    """Deterministic (objective -> office_control() parameters) parsing —
+    JARVIS's own extraction, never a second LLM call, same technique as
+    _run_system_volume's numeric extraction. Word's three content actions
+    (replace/format/insert) are Word-only in office_control.py, so the
+    ACTION ITSELF determines the app for those; Excel's two actions need
+    a cell reference to determine both the app and the target. Returns
+    None when nothing can be confidently determined — most commonly a
+    bare 'open Word'/'open Excel' with no content instruction, since
+    office_control.py has no generic 'just open the app' action; a
+    caller must never guess one into existence."""
+    low = objective.lower()
+    words = _normalize(objective)
+
+    m = re.search(r"\breplace\b\s+(.+?)\s+\bwith\b\s+(.+)", low)
+    if m:
+        return {
+            "app": "word", "action": "replace_text",
+            "find": m.group(1).strip(" '\""), "replace": m.group(2).strip(" '\""),
+        }
+
+    if any(w in words for w in ("bold", "italic", "underline")):
+        params = {"app": "word", "action": "format_selection"}
+        if "bold" in words:
+            params["bold"] = True
+        if "italic" in words:
+            params["italic"] = True
+        if "underline" in words:
+            params["underline"] = True
+        return params
+
+    m = re.search(r"\b(?:insert|write|type)\b\s+(.+)", low)
+    if m:
+        return {"app": "word", "action": "insert_text", "text": m.group(1).strip(" '\"")}
+
+    cell_match = _CELL_REF_RE.search(objective)
+    if cell_match:
+        cell = cell_match.group(1).upper()
+        if any(w in low for w in ("get", "read", "what", "show")):
+            return {"app": "excel", "action": "get_cell", "cell": cell}
+        vm = re.search(r"\b(?:to|as)\b\s+(.+)$", low) or re.search(r"=\s*(.+)$", low)
+        if vm:
+            value_str = vm.group(1).strip(" '\"")
+            try:
+                value = float(value_str) if "." in value_str else int(value_str)
+            except ValueError:
+                value = value_str
+            return {"app": "excel", "action": "set_cell", "cell": cell, "value": value}
+
+    if "save" in words:
+        app = _office_app(words)
+        if app:
+            return {"app": app, "action": "save"}
+
+    return None
+
+
+def _run_office(objective: str, confirmed: bool = False) -> str:
+    """Parses the objective into office_control.py's own (app, action,
+    ...) parameter shape, then calls it in-process exactly as it already
+    exists — no second Office controller, no reimplemented Word/Excel
+    logic. If no supported action can be confidently determined, reports
+    that honestly instead of guessing or fabricating success (see
+    _parse_office_action's own docstring)."""
+    params = _parse_office_action(objective)
+    if params is None:
+        return _envelope.envelope(
+            _envelope.STATUS_INCONCLUSIVE,
+            "no specific Office action (insert/replace/format/save/a cell "
+            "reference) could be determined from this objective — "
+            "office_control.py has no generic 'just open the app' action; "
+            "ask the user what they want done inside Word/Excel",
+        )
+    result = office_control(parameters=params)
+    tag = _classify_office_result(result)
+    if status_of(result):
+        return result
+    return _envelope.envelope(tag, result)
+
+
 _HANDLERS = {
     "youtube": _run_youtube,
     "browser": _run_browser,
+    "office": _run_office,
     "system_volume": _run_system_volume,
     "system_power": _run_system_power,
     "system_shortcut": _run_system_shortcut,
@@ -380,6 +519,12 @@ _HANDLERS = {
 _RECOVERY_CHAIN = {
     "youtube": "browser",
 }
+# Phase 4 (Office) considered and rejected inventing an office->* entry:
+# office_control.py exposes no genuine alternative-method relationship
+# to word/excel (unlike youtube->browser's real "try the general web"
+# fallback) — a failed insert_text/set_cell falling back to browser or
+# system_shortcut would not be a sane recovery of anything. Same
+# no-artificial-recovery discipline as Phase 3's system domains.
 
 
 def execute_task(parameters: dict = None) -> str:

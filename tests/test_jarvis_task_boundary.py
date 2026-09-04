@@ -237,6 +237,67 @@ def test_computer_settings_non_migrated_action_returns_its_real_result_not_done(
     print("test_computer_settings_non_migrated_action_returns_its_real_result_not_done: PASS")
 
 
+# ── office_control: Phase 4 (Office capability) boundary ───────────────
+# task_engine.py's "office" domain covers essentially office_control.py's
+# entire real action surface, so the migrated set below is, deliberately,
+# nearly the whole tool — not a subset the way computer_settings.py's is.
+
+def test_office_control_word_insert_text_is_redirected_in_jarvis_mode() -> None:
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=True)
+        with patch.object(main_module, "office_control") as m_oc:
+            fr = await jarvis._execute_tool(_fc("office_control", app="word", action="insert_text", text="hi"))
+        m_oc.assert_not_called()
+        assert "[JARVIS_TASK_REQUIRED]" in fr.response["result"]
+    asyncio.run(_run())
+    print("test_office_control_word_insert_text_is_redirected_in_jarvis_mode: PASS")
+
+def test_office_control_excel_set_cell_is_redirected_in_jarvis_mode() -> None:
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=True)
+        with patch.object(main_module, "office_control") as m_oc:
+            fr = await jarvis._execute_tool(_fc("office_control", app="excel", action="set_cell", cell="A1", value=5))
+        m_oc.assert_not_called()
+        assert "[JARVIS_TASK_REQUIRED]" in fr.response["result"]
+    asyncio.run(_run())
+    print("test_office_control_excel_set_cell_is_redirected_in_jarvis_mode: PASS")
+
+def test_office_control_save_is_redirected_in_jarvis_mode_for_both_apps() -> None:
+    async def _run():
+        for app in ("word", "excel"):
+            jarvis = _jarvis(jarvis_mode=True)
+            with patch.object(main_module, "office_control") as m_oc:
+                fr = await jarvis._execute_tool(_fc("office_control", app=app, action="save"))
+            m_oc.assert_not_called()
+            assert "[JARVIS_TASK_REQUIRED]" in fr.response["result"], app
+    asyncio.run(_run())
+    print("test_office_control_save_is_redirected_in_jarvis_mode_for_both_apps: PASS")
+
+def test_office_control_unknown_app_action_pair_is_never_redirected() -> None:
+    # A hypothetical/unmigrated (app, action) pair — e.g. a future
+    # PowerPoint action office_control.py doesn't support yet — must stay
+    # directly callable rather than silently disappearing behind this
+    # redirect (the explicit-tuple pattern, not a blanket tool block).
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=True)
+        with patch.object(main_module, "office_control", return_value="Unknown office app: 'powerpoint'.") as m_oc:
+            fr = await jarvis._execute_tool(_fc("office_control", app="powerpoint", action="open"))
+        m_oc.assert_called_once()
+        assert fr.response["result"] == "Unknown office app: 'powerpoint'."
+    asyncio.run(_run())
+    print("test_office_control_unknown_app_action_pair_is_never_redirected: PASS")
+
+def test_office_control_is_unaffected_outside_jarvis_mode() -> None:
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=False)
+        with patch.object(main_module, "office_control", return_value="[VERIFIED_SUCCESS] A1 is now 5.") as m_oc:
+            fr = await jarvis._execute_tool(_fc("office_control", app="excel", action="set_cell", cell="A1", value=5))
+        m_oc.assert_called_once()
+        assert fr.response["result"] == "[VERIFIED_SUCCESS] A1 is now 5."
+    asyncio.run(_run())
+    print("test_office_control_is_unaffected_outside_jarvis_mode: PASS")
+
+
 if __name__ == "__main__":
     test_jarvis_task_tool_is_declared()
     test_jarvis_task_outside_jarvis_mode_is_rejected_and_calls_nothing()
@@ -254,4 +315,9 @@ if __name__ == "__main__":
     test_computer_settings_non_migrated_action_is_never_redirected_even_in_jarvis_mode()
     test_computer_settings_volume_set_is_unaffected_outside_jarvis_mode()
     test_computer_settings_non_migrated_action_returns_its_real_result_not_done()
+    test_office_control_word_insert_text_is_redirected_in_jarvis_mode()
+    test_office_control_excel_set_cell_is_redirected_in_jarvis_mode()
+    test_office_control_save_is_redirected_in_jarvis_mode_for_both_apps()
+    test_office_control_unknown_app_action_pair_is_never_redirected()
+    test_office_control_is_unaffected_outside_jarvis_mode()
     print("\nAll jarvis_task_boundary tests passed.")

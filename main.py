@@ -3464,8 +3464,37 @@ class JarvisLive:
                     r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None, player=self.ui))
                     result = r or "Done."
             elif name == "office_control":
-                r = await loop.run_in_executor(None, lambda: office_control(parameters=args))
-                result = r or "Done."
+                # JARVIS-mode boundary enforcement (same pattern as
+                # browser_control/youtube_video/computer_settings above).
+                # task_engine.py's Phase 4 "office" domain covers
+                # essentially office_control.py's entire real action
+                # surface (Word: insert_text/type, replace_text/
+                # find_replace, format_selection/format, save; Excel:
+                # set_cell, get_cell, save) — there is no large
+                # unmigrated remainder the way computer_settings.py has
+                # (~50 actions, 5 migrated). Listed explicitly by
+                # (app, action) pair, not blanket-blocked, so a future
+                # office_control action added without a matching
+                # task_engine domain stays directly callable rather than
+                # silently disappearing behind this redirect.
+                _oc_app = (args.get("app") or "").lower().strip()
+                _oc_action = (args.get("action") or "").lower().strip()
+                _oc_migrated = {
+                    ("word", "insert_text"), ("word", "type"),
+                    ("word", "replace_text"), ("word", "find_replace"),
+                    ("word", "format_selection"), ("word", "format"),
+                    ("word", "save"),
+                    ("excel", "set_cell"), ("excel", "get_cell"), ("excel", "save"),
+                }
+                if self._jarvis_mode and (_oc_app, _oc_action) in _oc_migrated:
+                    result = (
+                        "[JARVIS_TASK_REQUIRED] In JARVIS mode, this goes through jarvis_task with a "
+                        "clarified objective — JARVIS's own Task Engine owns it, not this tool directly. "
+                        "Call jarvis_task with the user's goal instead."
+                    )
+                else:
+                    r = await loop.run_in_executor(None, lambda: office_control(parameters=args))
+                    result = r or "Done."
 
             elif name == "desktop_control":
                 r = await loop.run_in_executor(None, lambda: desktop_control(parameters=args, player=self.ui))

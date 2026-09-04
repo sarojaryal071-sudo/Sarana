@@ -417,6 +417,20 @@ Three domains — deliberately not one giant `"system"` bucket, and not one doma
 
 **Terminal-status correctness fix, exercised for the first time by this phase:** `execute_task()`'s recovery loop previously treated any non-`VERIFIED_SUCCESS` status as potentially recoverable, including `CONFIRMATION_REQUIRED` and `BLOCKED` — never actually exercised in Phase 2 (youtube/browser never return those statuses). Phase 3's `system_power` made this reachable for the first time, and it was wrong: a different domain can't supply a human's "yes," and can't turn "blocked by policy" into "allowed." Both are now explicitly terminal in `execute_task()`, returned immediately like `VERIFIED_SUCCESS`, never checked against `_RECOVERY_CHAIN`.
 
+### Phase 4 — implemented (Office joins APPLICATION)
+
+`office` is a third `_DOMAINS` entry with `family: "application"`, alongside `youtube`/`browser` — reuses `actions/office_control.py` exactly as it already exists (Word: `insert_text`/`replace_text`/`format_selection`/`save`; Excel: `set_cell`/`get_cell`/`save`), no second Office controller.
+
+**Objective parsing:** `_parse_office_action()` deterministically maps an objective to `office_control()`'s own `(app, action, ...)` parameter shape — same "JARVIS's own extraction, never a second LLM call" technique as `_run_system_volume`'s numeric parsing. Word's three content actions are Word-only in `office_control.py`, so the action verb itself (`replace`/`bold`·`italic`·`underline`/`insert`·`write`·`type`) determines the app; Excel's two actions need a cell reference to determine both. A bare "open Word"/"open Excel" with no content instruction returns `None` — `office_control.py` has no generic "just open the app" action, and `_run_office()` reports that honestly (`INCONCLUSIVE`) rather than fabricating one.
+
+**Routing declaration order:** `office` is declared *before* `browser` in `_DOMAINS` specifically because "open Word"/"open Excel" tie 1-1 against `browser`'s own `open` keyword (`route()` breaks ties by earliest declaration, the same mechanism that already lets `youtube` beat `browser`) — verified empirically, not assumed (`tests/test_task_engine_office.py`'s collision tests).
+
+**A disclosed, not fixed, capability gap:** `office_control.py` has no PowerPoint support at all (Word/Excel only). The `office` domain deliberately does not claim a `powerpoint` keyword, so "open PowerPoint" is not misrouted into a capability that doesn't exist — it falls to `browser` instead. Adding real PowerPoint support would mean extending `office_control.py` itself, outside this integration phase's scope.
+
+**Recovery:** no `office` entry was added to `_RECOVERY_CHAIN` — `office_control.py` exposes no genuine alternative-method relationship the way `youtube`→`browser` does; a failed `insert_text`/`set_cell` falling back to browser or a system domain would not be a sane recovery of anything. Same no-artificial-recovery discipline as Phase 3.
+
+**Gemini/JARVIS boundary:** `main.py`'s `office_control` branch redirects the specific `(app, action)` pairs the `office` domain covers — which is, deliberately, nearly `office_control.py`'s entire real surface (unlike `computer_settings.py`'s ~50-action/5-migrated split), listed as explicit tuples so a future unmigrated action (e.g. real PowerPoint support, if ever added) stays directly callable rather than silently disappearing behind the redirect.
+
 ---
 
 ## 11. Plan / Action / Verification Model
