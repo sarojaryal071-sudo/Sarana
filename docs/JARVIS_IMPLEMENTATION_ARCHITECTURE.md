@@ -401,6 +401,22 @@ Only SYSTEM and APPLICATION are real, implemented families right now (`actions/t
 - **Phase 3 — System capabilities.** `computer_settings.py`/`system_shortcuts.py` only, `family: "system"`. One family, cleanly scoped.
 - **Phase 4 — Application/Domain capabilities, second pair.** `office_control.py` added as a *third* entry in the same family youtube/browser already occupy (`family: "application"`) — a genuine test of the router handling three domains in one family, not a System/Domain conflation.
 
+### Phase 3 — implemented (SYSTEM family populated)
+
+Three domains — deliberately not one giant `"system"` bucket, and not one domain per underlying action either (`computer_settings.py`'s ACTION_MAP alone has ~50 entries; enumerating each as its own `_DOMAINS` entry would be exactly the over-fragmentation the correction warned against):
+
+| Domain | Reuses | Notes |
+|---|---|---|
+| `system_volume` | `computer_settings(action="volume_set", value=N)` | N is extracted from the objective by a plain regex — JARVIS's own deterministic parsing, never a second LLM call. Already Result-Envelope-verified (set-then-readback) by the module it calls. |
+| `system_power` | `computer_settings(action="sleep"/"restart"/"shutdown", confirmed=...)` | Grouped as one domain because they share ONE safety story (the existing `is_consequential()` gate), not because they're keyword-similar. `confirmed` is threaded from `jarvis_task`'s own parameter straight through — the gate itself is reused exactly as-is, never reimplemented or relaxed. |
+| `system_shortcut` | `system_shortcuts.system_shortcut(objective)` | The entire 40-pane/11-query registry as ONE domain — task_engine does not re-implement per-shortcut matching, it hands the raw objective to that module's own already-proven deterministic resolver. |
+
+**Recovery:** no natural SYSTEM→SYSTEM production recovery pair was found among these three domains (no genuinely equivalent "alternative method" exists for any of them at the Task Engine level — `volume_set`'s own internal keypress fallback already lives inside `computer_settings.py` itself, transparent to the Task Engine). `_RECOVERY_CHAIN` gained zero new entries in Phase 3. The family-scoped mechanism itself (SYSTEM→SYSTEM permitted, SYSTEM↔APPLICATION rejected in both directions) is proven via a deliberately fabricated test fixture instead — the same honest technique already used for the Phase 2.5 cross-family test, not a claim about real chain contents.
+
+**A real, pre-existing dispatch bug found and fixed while integrating this (not introduced by it):** `main.py`'s `computer_settings` branch in `_execute_tool()` was missing its own `result =` assignment, silently falling through to the method's `result = "Done."` default regardless of what `computer_settings()` actually returned — including `CONFIRMATION_REQUIRED`/failure envelopes. Confirmed both statically and empirically (a mocked non-`"Done."` return value was silently discarded, no exception raised) before fixing. Fixed alongside the JARVIS-mode boundary redirect for the three migrated actions.
+
+**Terminal-status correctness fix, exercised for the first time by this phase:** `execute_task()`'s recovery loop previously treated any non-`VERIFIED_SUCCESS` status as potentially recoverable, including `CONFIRMATION_REQUIRED` and `BLOCKED` — never actually exercised in Phase 2 (youtube/browser never return those statuses). Phase 3's `system_power` made this reachable for the first time, and it was wrong: a different domain can't supply a human's "yes," and can't turn "blocked by policy" into "allowed." Both are now explicitly terminal in `execute_task()`, returned immediately like `VERIFIED_SUCCESS`, never checked against `_RECOVERY_CHAIN`.
+
 ---
 
 ## 11. Plan / Action / Verification Model

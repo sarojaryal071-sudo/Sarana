@@ -185,7 +185,7 @@ def test_execute_task_recovers_to_browser_when_youtube_is_inconclusive() -> None
 
 def test_execute_task_never_retries_the_same_domain_twice() -> None:
     call_count = {"youtube": 0}
-    def fake_youtube(objective):
+    def fake_youtube(objective, confirmed=False):
         call_count["youtube"] += 1
         return "[INCONCLUSIVE] still not sure."
     m_br = MagicMock(return_value="[INCONCLUSIVE] browser also unsure.")

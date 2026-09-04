@@ -3428,7 +3428,41 @@ class JarvisLive:
                         )
 
             elif name == "computer_settings":
-                r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None, player=self.ui))
+                # Phase 3 (System capabilities) discovery, fixed in the
+                # same edit: this branch was missing its own `result =`
+                # assignment — every call silently fell through to this
+                # method's `result = "Done."` DEFAULT (set once, well
+                # before this whole if/elif chain) instead of the real
+                # return value. Confirmed both statically and empirically
+                # (a mocked non-"Done." return value was silently
+                # discarded, no exception raised) before fixing — every
+                # computer_settings call via Gemini, including
+                # CONFIRMATION_REQUIRED/failure envelopes, was being
+                # reported as "Done." regardless of what actually
+                # happened. Real, pre-existing, safety-relevant bug, not
+                # something introduced here.
+                #
+                # JARVIS-mode boundary enforcement (same pattern as
+                # browser_control/youtube_video above): scoped to exactly
+                # the actions task_engine.py's system_volume/system_power/
+                # system_shortcut domains actually route
+                # (volume_set/sleep/restart/shutdown/system_shortcut) —
+                # every other computer_settings action (the ~50 ACTION_MAP
+                # fire-and-forget ones, app_volume_set/app_mute,
+                # toggle_wifi, bluetooth_on/off, clipboard_get/set,
+                # list_audio_devices, list_system_shortcuts) has no
+                # task_engine path yet and stays directly callable.
+                _cs_action = (args.get("action") or "").lower().strip()
+                _cs_task_engine_actions = ("volume_set", "sleep", "restart", "shutdown", "system_shortcut")
+                if self._jarvis_mode and _cs_action in _cs_task_engine_actions:
+                    result = (
+                        "[JARVIS_TASK_REQUIRED] In JARVIS mode, this goes through jarvis_task with a "
+                        "clarified objective — JARVIS's own Task Engine owns it, not this tool directly. "
+                        "Call jarvis_task with the user's goal instead."
+                    )
+                else:
+                    r = await loop.run_in_executor(None, lambda: computer_settings(parameters=args, response=None, player=self.ui))
+                    result = r or "Done."
             elif name == "office_control":
                 r = await loop.run_in_executor(None, lambda: office_control(parameters=args))
                 result = r or "Done."

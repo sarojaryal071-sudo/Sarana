@@ -157,6 +157,86 @@ def test_youtube_video_summarize_is_never_redirected_even_in_jarvis_mode() -> No
     print("test_youtube_video_summarize_is_never_redirected_even_in_jarvis_mode: PASS")
 
 
+# ── computer_settings: Phase 3 (System capabilities) boundary + the ────
+# real dispatch bug found and fixed alongside it (see main.py's own
+# comment on the computer_settings branch): this branch was previously
+# missing its own `result =` assignment entirely, so every call — success,
+# failure, or CONFIRMATION_REQUIRED — silently fell through to this
+# method's `result = "Done."` DEFAULT instead of the real return value.
+# test_computer_settings_non_migrated_action_returns_its_real_result_not_done
+# is the regression guard for that fix specifically.
+
+def test_computer_settings_volume_set_is_redirected_in_jarvis_mode() -> None:
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=True)
+        with patch.object(main_module, "computer_settings") as m_cs:
+            fr = await jarvis._execute_tool(_fc("computer_settings", action="volume_set", value="40"))
+        m_cs.assert_not_called()
+        assert "[JARVIS_TASK_REQUIRED]" in fr.response["result"]
+    asyncio.run(_run())
+    print("test_computer_settings_volume_set_is_redirected_in_jarvis_mode: PASS")
+
+def test_computer_settings_power_actions_are_redirected_in_jarvis_mode() -> None:
+    async def _run():
+        for action in ("sleep", "restart", "shutdown"):
+            jarvis = _jarvis(jarvis_mode=True)
+            with patch.object(main_module, "computer_settings") as m_cs:
+                fr = await jarvis._execute_tool(_fc("computer_settings", action=action))
+            m_cs.assert_not_called()
+            assert "[JARVIS_TASK_REQUIRED]" in fr.response["result"], action
+    asyncio.run(_run())
+    print("test_computer_settings_power_actions_are_redirected_in_jarvis_mode: PASS")
+
+def test_computer_settings_system_shortcut_is_redirected_in_jarvis_mode() -> None:
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=True)
+        with patch.object(main_module, "computer_settings") as m_cs:
+            fr = await jarvis._execute_tool(_fc("computer_settings", action="system_shortcut", value="check bluetooth devices"))
+        m_cs.assert_not_called()
+        assert "[JARVIS_TASK_REQUIRED]" in fr.response["result"]
+    asyncio.run(_run())
+    print("test_computer_settings_system_shortcut_is_redirected_in_jarvis_mode: PASS")
+
+def test_computer_settings_non_migrated_action_is_never_redirected_even_in_jarvis_mode() -> None:
+    # minimize/maximize/toggle_wifi/bluetooth_on/app_volume_set/
+    # list_system_shortcuts/etc. have no task_engine path yet — must stay
+    # directly callable exactly as before, even in JARVIS mode.
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=True)
+        with patch.object(main_module, "computer_settings", return_value="Done: minimize.") as m_cs:
+            fr = await jarvis._execute_tool(_fc("computer_settings", action="minimize"))
+        m_cs.assert_called_once()
+        assert fr.response["result"] == "Done: minimize."
+    asyncio.run(_run())
+    print("test_computer_settings_non_migrated_action_is_never_redirected_even_in_jarvis_mode: PASS")
+
+def test_computer_settings_volume_set_is_unaffected_outside_jarvis_mode() -> None:
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=False)
+        with patch.object(main_module, "computer_settings", return_value="[VERIFIED_SUCCESS] volume is now 40%.") as m_cs:
+            fr = await jarvis._execute_tool(_fc("computer_settings", action="volume_set", value="40"))
+        m_cs.assert_called_once()
+        assert fr.response["result"] == "[VERIFIED_SUCCESS] volume is now 40%."
+    asyncio.run(_run())
+    print("test_computer_settings_volume_set_is_unaffected_outside_jarvis_mode: PASS")
+
+def test_computer_settings_non_migrated_action_returns_its_real_result_not_done() -> None:
+    # THE regression guard for the real dispatch bug found while adding
+    # this boundary: before the fix, this exact scenario (mocked
+    # computer_settings returning a distinctive, non-"Done." string)
+    # silently came back as "Done." — no exception, no warning, just the
+    # wrong result reaching Gemini. Also exercised in SARANA mode (off),
+    # confirming the fix isn't somehow tied to the new JARVIS-mode branch.
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=False)
+        with patch.object(main_module, "computer_settings", return_value="UNIQUE_MARKER_XYZ123") as m_cs:
+            fr = await jarvis._execute_tool(_fc("computer_settings", action="minimize"))
+        m_cs.assert_called_once()
+        assert fr.response["result"] == "UNIQUE_MARKER_XYZ123"
+    asyncio.run(_run())
+    print("test_computer_settings_non_migrated_action_returns_its_real_result_not_done: PASS")
+
+
 if __name__ == "__main__":
     test_jarvis_task_tool_is_declared()
     test_jarvis_task_outside_jarvis_mode_is_rejected_and_calls_nothing()
@@ -168,4 +248,10 @@ if __name__ == "__main__":
     test_youtube_video_play_is_redirected_in_jarvis_mode()
     test_youtube_video_play_is_unaffected_outside_jarvis_mode()
     test_youtube_video_summarize_is_never_redirected_even_in_jarvis_mode()
+    test_computer_settings_volume_set_is_redirected_in_jarvis_mode()
+    test_computer_settings_power_actions_are_redirected_in_jarvis_mode()
+    test_computer_settings_system_shortcut_is_redirected_in_jarvis_mode()
+    test_computer_settings_non_migrated_action_is_never_redirected_even_in_jarvis_mode()
+    test_computer_settings_volume_set_is_unaffected_outside_jarvis_mode()
+    test_computer_settings_non_migrated_action_returns_its_real_result_not_done()
     print("\nAll jarvis_task_boundary tests passed.")

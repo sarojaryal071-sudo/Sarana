@@ -53,12 +53,15 @@ verification vocabulary; browser/UI-automation implementation itself
 personal memory (a Task's steps are runtime-only and are never written
 to memory/* — see Task.__init__'s own note).
 """
+import re
 import time
 import uuid
 
 from actions import result_envelope as _envelope
 from actions.youtube_video import youtube_video
 from actions.browser_control import browser_control
+from actions.computer_settings import computer_settings
+from actions import system_shortcuts
 
 # Bounded per-task step budget. Deliberately a small, LOCAL constant for
 # this pilot scope (one primary attempt + one recovery attempt) rather
@@ -71,13 +74,14 @@ _MAX_STEPS_PER_TASK = 3
 
 # ── Task state ───────────────────────────────────────────────────────
 
-TASK_RECEIVED   = "RECEIVED"
-TASK_EXECUTING  = "EXECUTING"
-TASK_RECOVERING = "RECOVERING"
-TASK_COMPLETED  = "COMPLETED"
-TASK_FAILED     = "FAILED"
-TASK_BLOCKED    = "BLOCKED"
-TASK_CANCELLED  = "CANCELLED"
+TASK_RECEIVED              = "RECEIVED"
+TASK_EXECUTING             = "EXECUTING"
+TASK_RECOVERING            = "RECOVERING"
+TASK_COMPLETED             = "COMPLETED"
+TASK_FAILED                = "FAILED"
+TASK_BLOCKED               = "BLOCKED"
+TASK_AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION"
+TASK_CANCELLED             = "CANCELLED"
 
 
 def status_of(envelope_str: str) -> str:
@@ -182,11 +186,46 @@ _DOMAINS = [
         "keywords": ["website", "site", "browser", "open", "search", "google",
                      "url", "webpage", "page", "navigate", "chrome", "firefox", "edge"],
     },
+    # ── SYSTEM family (Phase 3) ─────────────────────────────────────────
+    # Three domains, not one giant "system" bucket and not one domain per
+    # ACTION_MAP entry either — the smallest sensible split given what's
+    # actually being integrated: a single verified numeric setting
+    # (volume), a small set of consequential power actions (grouped
+    # because they share ONE safety story — the existing
+    # is_consequential() gate — not because they're keyword-similar), and
+    # the entire system_shortcuts.py registry (40 Settings panes + 11
+    # read-only queries) as ONE domain, since that module already owns
+    # its own deterministic resolver — task_engine does not re-implement
+    # per-shortcut keyword matching, it reuses system_shortcuts.resolve()
+    # wholesale via system_shortcut()'s handler below.
+    {
+        "name": "system_volume",
+        "family": FAMILY_SYSTEM,
+        "keywords": ["volume", "loud", "louder", "quieter", "quiet"],
+    },
+    {
+        "name": "system_power",
+        "family": FAMILY_SYSTEM,
+        "keywords": ["sleep", "suspend", "hibernate", "restart", "reboot", "shutdown", "shut"],
+    },
+    {
+        "name": "system_shortcut",
+        "family": FAMILY_SYSTEM,
+        # Evidence-based: real words drawn from config/system_shortcuts.json's
+        # own pane/query names and aliases — deliberately EXCLUDES "volume"
+        # (owned by system_volume above) even though the registry's own
+        # "Volume mixer" pane alias contains it, so "set my volume to 40%"
+        # never ties with a Settings-page match.
+        "keywords": ["bluetooth", "wifi", "network", "battery", "disk", "storage",
+                     "printer", "printers", "firewall", "processes", "cpu",
+                     "installed", "display", "sound", "brightness", "night",
+                     "airplane", "update", "security", "startup", "settings",
+                     "check", "status", "ip", "address"],
+    },
 ]
 
 
 def _normalize(text: str) -> set:
-    import re
     return set(re.sub(r"[^a-z0-9 ]", " ", (text or "").lower()).split())
 
 
@@ -245,15 +284,81 @@ def _classify_browser_result(result: str) -> str:
     return _envelope.STATUS_INCONCLUSIVE
 
 
-# ── Domain handlers — call the EXISTING capability, in-process ─────────
+def _classify_system_shortcut_result(result: str) -> str:
+    """system_shortcuts.system_shortcut()'s query paths already return a
+    Result-Envelope-tagged string (status_of() below catches those). Its
+    pane-open paths are deliberately PLAIN strings, by that module's own
+    design — there is no real ground truth to confirm a Settings page is
+    now actually visible, so it never claimed VERIFIED_SUCCESS in the
+    first place (see system_shortcuts.py's own open_pane() docstring).
+    Task Engine preserves that honesty rather than upgrading a bare
+    'Opened X settings.' into a fabricated success claim: INCONCLUSIVE is
+    the accurate classification — attempted, not independently verified."""
+    tag = status_of(result)
+    if tag:
+        return tag
+    r = result or ""
+    if r.startswith("Could not open"):
+        return _envelope.STATUS_VERIFIED_FAILURE
+    return _envelope.STATUS_INCONCLUSIVE  # "Opened ... settings." or "No known fast-path ..."
 
-def _run_youtube(objective: str) -> str:
+
+# ── Domain handlers — call the EXISTING capability, in-process ─────────
+# Uniform (objective, confirmed) signature across every handler — a
+# minimal compatibility change to youtube/browser (confirmed is simply
+# unused by them; both are SAFE-tier and never needed it) so
+# execute_task()'s single call site doesn't need to special-case which
+# domains care about confirmation.
+
+def _run_youtube(objective: str, confirmed: bool = False) -> str:
     return youtube_video(parameters={"action": "play", "query": objective}, player=None)
 
 
-def _run_browser(objective: str) -> str:
+def _run_browser(objective: str, confirmed: bool = False) -> str:
     result = browser_control(parameters={"action": "search", "query": objective})
     tag = _classify_browser_result(result)
+    if status_of(result):
+        return result
+    return _envelope.envelope(tag, result)
+
+
+def _run_system_volume(objective: str, confirmed: bool = False) -> str:
+    """Sets the MASTER volume to a percentage parsed out of the
+    objective (JARVIS's own deterministic extraction — never a second
+    LLM call). Defaults to 50% only if the objective genuinely contains
+    no number, matching computer_settings.py's own existing default."""
+    match = re.search(r"(\d{1,3})\s*%?", objective)
+    value = match.group(1) if match else "50"
+    return computer_settings(parameters={"action": "volume_set", "value": value})
+
+
+def _run_system_power(objective: str, confirmed: bool = False) -> str:
+    """Routes to sleep/restart/shutdown based on the objective's own
+    wording. confirmed is threaded straight through to
+    computer_settings()'s EXISTING is_consequential()/is_confirmed()
+    gate — restart/shutdown still require it; sleep still doesn't
+    (unchanged, see result_envelope.py's own note on why sleep isn't
+    classified as consequential). Task Engine does not reimplement or
+    relax that gate — it reuses it exactly as-is."""
+    low = objective.lower()
+    if "restart" in low or "reboot" in low:
+        action = "restart"
+    elif "shutdown" in low or "shut" in low:
+        action = "shutdown"
+    else:
+        action = "sleep"
+    return computer_settings(parameters={"action": action, "confirmed": confirmed})
+
+
+def _run_system_shortcut(objective: str, confirmed: bool = False) -> str:
+    """Deliberately does NOT re-implement pane/query matching — hands
+    the objective straight to system_shortcuts.py's OWN deterministic
+    resolver, reusing its entire 40-pane/11-query registry as one Task
+    Engine domain instead of enumerating each shortcut as its own
+    _DOMAINS entry (see the 'smallest sensible domains, don't
+    over-fragment' note above _DOMAINS)."""
+    result = system_shortcuts.system_shortcut(objective)
+    tag = _classify_system_shortcut_result(result)
     if status_of(result):
         return result
     return _envelope.envelope(tag, result)
@@ -262,6 +367,9 @@ def _run_browser(objective: str) -> str:
 _HANDLERS = {
     "youtube": _run_youtube,
     "browser": _run_browser,
+    "system_volume": _run_system_volume,
+    "system_power": _run_system_power,
+    "system_shortcut": _run_system_shortcut,
 }
 
 # Bounded, ordered recovery chain: if the PRIMARY domain's result is
@@ -277,11 +385,14 @@ _RECOVERY_CHAIN = {
 def execute_task(parameters: dict = None) -> str:
     """The jarvis_task entry point (see main.py's dispatch). parameters:
     objective (str, required), context (str, optional), confirmed (bool,
-    optional — reserved for a future domain that needs it; the current
-    pilot domains are both SAFE-tier and never require it)."""
+    optional — threaded straight through to any domain handler that
+    needs it, e.g. system_power's restart/shutdown; ignored by handlers
+    that don't, e.g. youtube/browser/system_volume/system_shortcut, all
+    SAFE-tier)."""
     params = parameters or {}
     objective = (params.get("objective") or "").strip()
     context = (params.get("context") or "").strip()
+    confirmed = bool(params.get("confirmed", False))
 
     if not objective:
         return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "no objective was given")
@@ -302,11 +413,29 @@ def execute_task(parameters: dict = None) -> str:
         tried.append(domain)
         handler = _HANDLERS[domain]
         started_at = time.monotonic()
-        result = handler(objective)
+        result = handler(objective, confirmed)
         step = task.record(domain, result, started_at)
 
         if step.status == _envelope.STATUS_VERIFIED_SUCCESS:
             task.state = TASK_COMPLETED
+            return result
+
+        if step.status == _envelope.STATUS_BLOCKED:
+            # Permanently refused by policy — never a "try a different
+            # method" situation (that's what RECOVER is for); a
+            # different domain can't turn "blocked" into "allowed".
+            task.state = TASK_BLOCKED
+            return result
+
+        if step.status == _envelope.STATUS_CONFIRMATION_REQUIRED:
+            # Needs an explicit human yes — a different domain/method
+            # can't supply that on the user's behalf. Terminal, exactly
+            # like VERIFIED_SUCCESS/BLOCKED above, just not yet allowed
+            # rather than refused outright. First real exercise of this
+            # path: Phase 2's domains (youtube/browser) never returned
+            # this status, so this branch was latent and untested before
+            # Phase 3's system_power made it reachable.
+            task.state = TASK_AWAITING_CONFIRMATION
             return result
 
         if step.status == _envelope.STATUS_VERIFIED_FAILURE:
