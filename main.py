@@ -243,7 +243,11 @@ TOOL_DECLARATIONS = [
         "description": (
             "Opens any application on the computer. "
             "Use this whenever the user asks to open, launch, or start any app, "
-            "website, or program. Always call this tool — never just say you opened it."
+            "website, or program. Always call this tool — never just say you opened it. "
+            "Returns a Result Envelope tag: [VERIFIED_SUCCESS] means the app is confirmed as "
+            "the active window — say it opened. [INCONCLUSIVE] means a launch command was sent "
+            "but this couldn't confirm it actually appeared (it may still be loading) — tell the "
+            "user honestly, don't claim it's open. [VERIFIED_FAILURE] means it did not launch."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -500,13 +504,24 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "send_message",
-        "description": "Sends a text message via WhatsApp, Telegram, or other messaging platform.",
+        "description": (
+            "Sends a text message via WhatsApp, Telegram, or other messaging platform. This is a "
+            "CONSEQUENTIAL action — sending a message cannot be undone — so it requires explicit "
+            "user confirmation (set confirmed=true only after the user has actually said yes in "
+            "THIS conversation) before it will run; otherwise it returns [CONFIRMATION_REQUIRED]. "
+            "Returns a Result Envelope tag: there is no way to confirm real delivery, so a "
+            "successful attempt returns [INCONCLUSIVE] (the message was typed and sent via the "
+            "app's UI, but delivery isn't independently verifiable) — tell the user it was sent "
+            "via the app, never claim confirmed delivery. [VERIFIED_FAILURE] means it did not go "
+            "through at all (e.g. the app/page never opened)."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "receiver":     {"type": "STRING", "description": "Recipient contact name"},
                 "message_text": {"type": "STRING", "description": "The message to send"},
-                "platform":     {"type": "STRING", "description": "Platform: WhatsApp, Telegram, etc."}
+                "platform":     {"type": "STRING", "description": "Platform: WhatsApp, Telegram, etc."},
+                "confirmed":    {"type": "BOOLEAN", "description": "Set true only after the user has explicitly confirmed sending THIS message in THIS conversation — never infer it"}
             },
             "required": ["receiver", "message_text", "platform"]
         }

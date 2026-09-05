@@ -4,6 +4,8 @@ import sys
 import time
 from pathlib import Path
 
+from actions import result_envelope as _envelope
+
 try:
     import pyautogui
     pyautogui.FAILSAFE = True
@@ -230,23 +232,61 @@ def _resolve_platform(platform_str: str):
     return lambda r, m: _desktop_send(platform_str.strip().title(), r, m)
 
 
+def _classify_send_result(result: str) -> str:
+    """There is no read-back mechanism for ANY of these platforms (no API
+    call, no delivery receipt, no UI state this process can independently
+    inspect afterward) — 'Message sent to X via Y.' means only that the
+    UI keystroke sequence completed without error, never that delivery is
+    confirmed. VERIFIED_SUCCESS is therefore never reachable here by
+    design; the honest ceiling is INCONCLUSIVE. A real, evidenced failure
+    (the app/browser page never opened, or an exception was raised) is
+    still reported as VERIFIED_FAILURE — that IS a known, real outcome."""
+    low = (result or "").lower()
+    if "could not" in low:
+        return _envelope.STATUS_VERIFIED_FAILURE
+    return _envelope.STATUS_INCONCLUSIVE
+
+
 def send_message(
     parameters: dict,
     response=None,
     player=None,
     session_memory=None,
 ) -> str:
+    """J2 (Universal Actions): returns a Result Envelope. Two real
+    changes over the pre-J2 behavior:
+      1. A genuine, pre-existing safety gap closed: result_envelope.py's
+         OWN is_consequential() has always listed "send" as a
+         consequential goal pattern (shared by computer_settings.py/
+         accomplish()) — this function never actually checked it, so
+         every message send was unconditionally unconfirmed. Now gated
+         through the SAME centralized classifier, not a new one.
+      2. 'Message sent' is no longer reported as verified success — see
+         _classify_send_result()'s own docstring for why that ceiling is
+         INCONCLUSIVE, not VERIFIED_SUCCESS, for every platform here.
+    """
     params       = parameters or {}
     receiver     = params.get("receiver", "").strip()
     message_text = params.get("message_text", "").strip()
     platform     = params.get("platform", "whatsapp").strip()
 
     if not receiver:
-        return "Please specify a recipient."
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "no recipient was given")
     if not message_text:
-        return "Please specify the message content."
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "no message content was given")
     if not _PYAUTOGUI:
-        return "PyAutoGUI is not installed — cannot control the desktop."
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "PyAutoGUI is not installed — cannot control the desktop")
+
+    # Centralized risk/confirmation gate — the SAME classifier
+    # computer_settings.py/computer_control.py's accomplish() already
+    # use (see actions/result_envelope.py's own _CONSEQUENTIAL_GOAL_PATTERNS,
+    # which already lists "send" — this is applying an existing rule,
+    # not inventing a new one).
+    if _envelope.is_consequential(goal=f"send a message to {receiver}") and not _envelope.is_confirmed(params):
+        return _envelope.envelope(
+            _envelope.STATUS_CONFIRMATION_REQUIRED,
+            f"this will send a message to {receiver} via {platform}",
+        )
 
     preview = message_text[:50] + ("…" if len(message_text) > 50 else "")
     print(f"[SendMessage] 📨 {platform} → {receiver}: {preview}")
@@ -263,4 +303,4 @@ def send_message(
     if player:
         player.write_log(f"[msg] {result}")
 
-    return result
+    return _envelope.envelope(_classify_send_result(result), result)

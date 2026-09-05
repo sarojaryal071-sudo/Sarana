@@ -3,6 +3,17 @@ import subprocess
 import platform
 import shutil
 
+from actions import result_envelope as _envelope
+# J2 (Universal Actions): reuses computer_control.py's OWN existing
+# get_active_window_title() as the real post-launch verification signal
+# — this is the "migrate onto the general controller" step. Nothing
+# about the OS-specific launch logic below (_launch_windows/_launch_macos/
+# _launch_linux) changes; computer_control.py is the shared substrate
+# this module now depends on for verification, not a second window-
+# detection implementation. No circular import: computer_control.py
+# imports neither this module nor send_message.py.
+from actions.computer_control import get_active_window_title
+
 try:
     import psutil
     _PSUTIL = True
@@ -253,20 +264,43 @@ _OS_LAUNCHERS = {
     "Linux":   _launch_linux,
 }
 
+def _window_confirms_app(window_title: str, app_name: str) -> bool:
+    """Best-effort, deterministic match between the foreground window
+    title and the requested app — never exact (titles vary with open
+    documents, unsaved-state markers, etc.), but real evidence rather
+    than assuming a launch command succeeding means the app actually
+    appeared. Matches on the app name as a whole first, then its first
+    significant word (titles commonly read '<content> - <App Name>')."""
+    if not window_title:
+        return False
+    title_l = window_title.lower()
+    name_l = app_name.lower().strip()
+    if name_l in title_l or title_l in name_l:
+        return True
+    first_word = name_l.split()[0] if name_l.split() else ""
+    return len(first_word) > 2 and first_word in title_l
+
+
 def open_app(
     parameters=None,
     response=None,
     player=None,
     session_memory=None,
 ) -> str:
+    """J2 (Universal Actions): returns a Result Envelope — 'the launch
+    command was sent' is no longer conflated with 'the app is verified
+    open'. VERIFIED_SUCCESS requires the foreground window to actually
+    confirm it (see _window_confirms_app); a launch call that reports
+    success but can't be confirmed that way is honestly INCONCLUSIVE,
+    never upgraded to a guess."""
     app_name = (parameters or {}).get("app_name", "").strip()
 
     if not app_name:
-        return "No application name provided."
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "no application name was given")
 
     launcher = _OS_LAUNCHERS.get(_SYSTEM)
     if launcher is None:
-        return f"Unsupported operating system: {_SYSTEM}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"unsupported operating system: {_SYSTEM}")
 
     normalized = _normalize(app_name)
     print(f"[open_app] Launching: '{app_name}' → '{normalized}' ({_SYSTEM})")
@@ -274,16 +308,27 @@ def open_app(
     if player:
         player.write_log(f"[open_app] {app_name}")
 
+    before = get_active_window_title()
     try:
-        if launcher(normalized):
-            return f"Opened {app_name}."
-        if normalized.lower() != app_name.lower():
-            if launcher(app_name):
-                return f"Opened {app_name}."
-        return (
-            f"Could not confirm that {app_name} launched. "
-            f"It may still be loading, or it might not be installed."
-        )
+        launched = launcher(normalized)
+        if not launched and normalized.lower() != app_name.lower():
+            launched = launcher(app_name)
     except Exception as e:
         print(f"[open_app] Error: {e}")
-        return f"Failed to open {app_name}: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"failed to open {app_name}: {e}")
+
+    if not launched:
+        return _envelope.envelope(
+            _envelope.STATUS_VERIFIED_FAILURE,
+            f"no launch method succeeded for '{app_name}' — it may not be installed",
+        )
+
+    time.sleep(0.4)  # small extra grace period on top of the launcher's own settling sleeps
+    after = get_active_window_title()
+    if _window_confirms_app(after, app_name):
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"{app_name} is now the active window ('{after}')")
+    return _envelope.envelope(
+        _envelope.STATUS_INCONCLUSIVE,
+        f"a launch command for {app_name} was issued, but the foreground window "
+        f"('{after or 'unknown'}') does not confirm it — it may still be loading",
+    )
