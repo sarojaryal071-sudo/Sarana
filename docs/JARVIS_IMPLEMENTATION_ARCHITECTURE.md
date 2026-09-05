@@ -447,6 +447,12 @@ Three domains — deliberately not one giant `"system"` bucket, and not one doma
 
 **Proof workflow (fabricated in tests, not yet a production capability):** *"check my battery percentage" → "put that percentage into cell A1"* exercises real cross-family sequencing and real context flow end-to-end, through the actual `main.py` dispatch, with only the underlying `computer_settings`/`office_control` calls mocked — see `tests/test_task_engine_phase5a.py`. Phase 5B is what would make this an actual approved user-facing workflow; Phase 5A only proves the mechanism.
 
+### Phase 5B — implemented (first real compound workflow, frozen)
+
+The Phase 5A mechanism, unchanged in code, now backs an approved, Gemini-reachable compound objective: *"Check the battery percentage."* → *"Put that percentage into cell A1."* — SYSTEM (`system_shortcut`'s battery query) → APPLICATION (`office`'s `set_cell`), proven both with mocked capabilities (`tests/test_task_engine_phase5b.py`) and with a genuine, non-mocked, end-to-end run through the real `main.py` dispatch (a real battery read, a real `TaskContext` handoff, a real Excel COM write, a real cell readback) — see the Phase 5B report for the exact transcript.
+
+**A real, disclosed precision requirement found while wiring this up:** the illustrative phrasing *"put it into Excel"* (no cell named) is genuinely NOT executable — `office_control.py` has no way to know WHERE to write, and `_parse_office_action()` correctly returns `None` → honest `INCONCLUSIVE` rather than guessing a cell. This isn't a bug; it's why `jarvis_task`'s tool description was updated (the only code change Phase 5B needed outside tests) to tell Gemini explicitly that a spreadsheet objective must name a concrete cell — the same "clarify ambiguity into a self-contained sentence" job Gemini already does for pronouns, extended to this one concrete case. Nothing in `task_engine.py`, `office_control.py`, or the family/recovery/verification model changed.
+
 ---
 
 ## 11. Plan / Action / Verification Model
