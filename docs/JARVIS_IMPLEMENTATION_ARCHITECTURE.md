@@ -150,8 +150,11 @@ PLANNING        — new: only meaningful for a multi-step objective (J4+), not a
 PREPARING       — new: control-method selection reasoning (J3) — usually instantaneous, may not need
                   to be a visible state at all for single-step calls
 EXECUTING       — status:"running" already exists in self._pending_tool_calls
-VERIFYING       — folded into the action module's own Result-Envelope construction today; becomes a
-                  distinct visible state once multi-step objective tracking (J4) exists
+VERIFYING       — folded into the action module's own Result-Envelope construction today; J4 (§ 16)
+                  deliberately did NOT split this into its own visible state — execute_task()/
+                  _execute_step() are one synchronous call with no await point between an action and
+                  its verification, so nothing could ever externally observe "verifying" as distinct
+                  from "executing"; revisit only if execution becomes genuinely async
 RECOVERING      — new (J5) — only entered on a non-VERIFIED_SUCCESS envelope
 COMPLETED       — the function response is sent via send_tool_response; for a multi-step objective (J4+),
                   a second, objective-level COMPLETED check happens after all steps finish
@@ -607,6 +610,17 @@ Stage numbering adjusted from the previously approved J1–J11 by inserting **J0
 - **Tests:** a held-out set of realistic multi-step objectives (mocked actions), verifying the FINAL report matches the ORIGINAL objective, not just the last step.
 - **Definition of done:** matches the earlier roadmap's own J4 exit criteria.
 - **Unlocks:** J5, J6, everything downstream.
+
+**Implemented — smaller than the goal line above implies, because PLAN/ACT/VERIFY were already real, distinct steps by the time this stage started** (Phase 5A/5B, landed as groundwork before J4 was formally scheduled): `build_plan()` is PLAN, a domain handler call inside `_execute_step()` is ACT, that same call's classifier/Result-Envelope status is VERIFY — task-level `VERIFIED_SUCCESS` already required *every* PlanStep to verify, not just the last one. What J4 actually added:
+
+1. **The final report now covers every objective attempted, not just the last one** (`_build_final_report()`/`_finalize_result()`) — this is the literal "Tests" line above: before this, a 3-objective task's caller only ever saw the terminating PlanStep's raw evidence string. A single-objective task is untouched (still byte-for-byte the raw handler result — see `execute_task()`'s own docstring).
+2. **`TASK_INCONCLUSIVE`** as its own `task.state`, distinct from `TASK_FAILED` — a verified failure and "couldn't tell" were being conflated into one bucket.
+3. **`CANCELLED` made explicitly terminal in `_execute_step()`** — a real, if previously unreached, correctness gap: it matched none of the explicit terminal branches and fell through to the same implicit recovery-chain path `INCONCLUSIVE`/`UI_AMBIGUOUS` correctly use, which would have let a cancelled action be silently "recovered" via a different method. No existing domain emits `CANCELLED` yet (verified by inspection), but the vocabulary is shared and now handled correctly the moment one does.
+4. **`_task_state_for()`** — the terminal-state mapping pulled out of `execute_task()`'s own loop into one small, directly-testable pure function, per § 7's "keep state transitions deterministic and testable" principle.
+
+**What was deliberately NOT added**, and why: a `VERIFYING` task state from § 7's own aspirational table — `execute_task()`/`_execute_step()` are one synchronous call with no `await` point between an action and its verification (the classifier runs inline, in the same statement), so no external caller could ever observe "verifying" as distinct from "executing"; a state nothing can read is ceremony, not tracking, and is revisited only if execution ever becomes genuinely async. Mid-task progress narration (§ 7's "Progress reporting" note) — genuinely new plumbing (streaming a partial function-call response) outside this stage's Plan→Act→Verify scope. Expanded tiered recovery (J5) and any new perception/vision composition (J6) were left untouched, as scoped.
+
+**Real end-to-end verification performed:** the battery→Excel compound workflow (`["Check the battery percentage.", "Put that percentage into cell A1."]`), run through the real, non-mocked `system_shortcuts`/`office_control` path (a disposable Excel workbook, never the user's own file) — the returned report correctly listed both objectives' real evidence under one `VERIFIED_SUCCESS` tag. A single objective whose action genuinely can't be locally verified (`"Open Bluetooth settings."`, a real Settings-pane open) correctly returned `INCONCLUSIVE`, never a fabricated success.
 
 ### J5 — Recovery
 - **Goal:** Tiered method-fallback (§ 13), extending the ONE existing recovery path.

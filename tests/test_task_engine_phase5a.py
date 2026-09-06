@@ -294,7 +294,13 @@ def test_end_to_end_battery_percentage_flows_into_the_office_cell() -> None:
          _handlers(system_shortcut=m_battery):
         result = _task(objectives=["check my battery percentage", "put that percentage into cell A1"])
     m_oc.assert_called_once_with(parameters={"app": "excel", "action": "set_cell", "cell": "A1", "value": 52})
-    assert result == "[VERIFIED_SUCCESS] A1 is now 52."
+    # J4: a multi-objective task's final report now covers EVERY objective
+    # actually attempted, not just the last one's raw evidence (see
+    # task_engine.py's _build_final_report()) — both the battery reading
+    # AND the cell write must be present, not just the last step's text.
+    assert result.startswith("[VERIFIED_SUCCESS]")
+    assert "Percent: 52" in result
+    assert "A1 is now 52" in result
     print("test_end_to_end_battery_percentage_flows_into_the_office_cell: PASS")
 
 

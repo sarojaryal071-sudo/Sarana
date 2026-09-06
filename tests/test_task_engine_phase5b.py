@@ -65,7 +65,11 @@ def test_system_to_application_sequencing_executes_both_plansteps_in_order() -> 
     with _handlers(system_shortcut=battery, office=cell):
         result = _task(objectives=[BATTERY_OBJECTIVE, CELL_OBJECTIVE])
     assert call_order == ["system_shortcut", "office"]
-    assert result == "[VERIFIED_SUCCESS] A1 is now 52."
+    # J4: the final report now covers both objectives, not just the last
+    # one's raw text (see task_engine.py's _build_final_report()).
+    assert result.startswith("[VERIFIED_SUCCESS]")
+    assert "Percent: 52" in result
+    assert "A1 is now 52" in result
     print("test_system_to_application_sequencing_executes_both_plansteps_in_order: PASS")
 
 
@@ -76,7 +80,11 @@ def test_battery_percent_enters_context_and_office_consumes_it() -> None:
          _handlers(system_shortcut=MagicMock(return_value="[VERIFIED_SUCCESS] Percent: 52, PluggedIn: True.")):
         result = _task(objectives=[BATTERY_OBJECTIVE, CELL_OBJECTIVE])
     m_oc.assert_called_once_with(parameters={"app": "excel", "action": "set_cell", "cell": "A1", "value": 52})
-    assert result == "[VERIFIED_SUCCESS] A1 is now 52."
+    # J4: the final report now covers both objectives (see
+    # task_engine.py's _build_final_report()), not just the office step.
+    assert result.startswith("[VERIFIED_SUCCESS]")
+    assert "Percent: 52" in result
+    assert "A1 is now 52" in result
     print("test_battery_percent_enters_context_and_office_consumes_it: PASS")
 
 

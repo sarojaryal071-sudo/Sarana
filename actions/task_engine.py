@@ -58,12 +58,31 @@ call continues to behave byte-for-byte as it always has (see
 execute_task()'s own docstring); this is additive, not a rewrite of
 Phase 0-4 behavior.
 
+J4 (Plan -> Act -> Verify, formalizing what Phase 5A/5B already built):
+PLAN is build_plan(); ACT is a handler call inside _execute_step();
+VERIFY is that same call's classifier/Result-Envelope status — these
+were already real, distinct steps, just not named that way. What J4
+actually added: (1) the task-level FINAL REPORT for a multi-objective
+Task now covers every objective actually attempted, not just the last
+one (see _build_final_report()/_finalize_result()) — closing the exact
+gap docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md § 16's own J4 exit
+criteria name ("the FINAL report matches the ORIGINAL objective, not
+just the last step"); (2) TASK_INCONCLUSIVE as its own observable task
+state, distinct from TASK_FAILED (a verified failure and "couldn't tell"
+are different outcomes and were being conflated); (3) CANCELLED is now
+explicitly terminal in _execute_step(), matching BLOCKED/
+CONFIRMATION_REQUIRED, instead of silently falling into the same
+recovery-chain path INCONCLUSIVE/UI_AMBIGUOUS correctly use. A
+single-objective Task is untouched by any of this — see
+execute_task()'s and _finalize_result()'s own docstrings.
+
 Explicitly NOT this module's job, and never added here: a second AI/LLM
 choosing what to do: a second tool-execution queue: a second
 verification vocabulary; browser/UI-automation implementation itself
 (that stays owned by browser_control.py/computer_control.py); permanent
 personal memory (a Task's steps are runtime-only and are never written
-to memory/* — see Task.__init__'s own note).
+to memory/* — see Task.__init__'s own note); expanded tiered recovery
+across method hierarchies (J5); a new perception/vision subsystem (J6).
 """
 import re
 import time
@@ -100,9 +119,21 @@ TASK_EXECUTING             = "EXECUTING"
 TASK_RECOVERING            = "RECOVERING"
 TASK_COMPLETED             = "COMPLETED"
 TASK_FAILED                = "FAILED"
+TASK_INCONCLUSIVE          = "INCONCLUSIVE"
 TASK_BLOCKED               = "BLOCKED"
 TASK_AWAITING_CONFIRMATION = "AWAITING_CONFIRMATION"
 TASK_CANCELLED             = "CANCELLED"
+# J4 note on the two states NOT listed above ("planned"/"verification" in
+# the architecture doc's own aspirational table, § 7): RECEIVED already
+# covers "planned" (a Task's plan is built by build_plan() before
+# TASK_EXECUTING is ever set — see execute_task()). A separate VERIFYING
+# state was deliberately NOT added: execute_task()/_execute_step() are a
+# single synchronous call with no await point between an action and its
+# verification (the classifier IS the verification, run inline, in the
+# same Python statement) — there is no moment at which an external
+# caller could ever observe "verifying" as distinct from "executing",
+# so a state nothing can ever read would be pure ceremony, not real
+# tracking. Revisit only if execution ever becomes genuinely async.
 
 
 def status_of(envelope_str: str) -> str:
@@ -829,6 +860,21 @@ def _execute_step(task: Task, plan_index: int, plan_step: PlanStep, confirmed: b
             task.task_context.raw[plan_index] = result
             return result
 
+        if step.status == _envelope.STATUS_CANCELLED:
+            # J4 correctness fix: CANCELLED used to fall through to the
+            # SAME implicit recovery-chain check INCONCLUSIVE/UI_AMBIGUOUS
+            # use below (it matched none of the explicit branches above),
+            # so a cancelled action could have been "recovered" by trying
+            # a different method — silently overriding the user's own
+            # stop request. result_envelope.py's own ESCALATABLE_STATUSES
+            # deliberately excludes CANCELLED for exactly this reason; no
+            # existing handler emits it yet (verified — grep of actions/
+            # *.py), but the vocabulary is shared, so this module must
+            # honor it correctly the moment one does. Terminal, like
+            # BLOCKED/CONFIRMATION_REQUIRED above.
+            task.task_context.raw[plan_index] = result
+            return result
+
         if step.status == _envelope.STATUS_VERIFIED_FAILURE:
             # A known, real outcome — trying a DIFFERENT domain is still
             # allowed (see _RECOVERY_CHAIN), but never retry THIS domain.
@@ -860,6 +906,110 @@ def _execute_step(task: Task, plan_index: int, plan_step: PlanStep, confirmed: b
     return result
 
 
+def _strip_status_tag(result: str) -> str:
+    """The evidence text of a Result Envelope string with its leading
+    '[STATUS] ' prefix removed (or the original string unchanged if it
+    carries no tag) — used only to avoid a doubled '[STATUS] ... [STATUS]
+    ...' when re-presenting a PlanStep's own evidence inside the task-
+    level report envelope() builds around it (see _build_final_report())."""
+    s = (result or "").strip()
+    if s.startswith("[") and "]" in s:
+        return s[s.index("]") + 1:].strip()
+    return s
+
+
+# Short, human-readable label for each PlanStep outcome inside a
+# multi-objective final report — never the internal domain/routing name
+# (see _build_final_report()'s own docstring on why).
+_STATUS_MARKER = {
+    _envelope.STATUS_VERIFIED_SUCCESS:      "verified",
+    _envelope.STATUS_VERIFIED_FAILURE:      "failed",
+    _envelope.STATUS_INCONCLUSIVE:          "not verified",
+    _envelope.STATUS_UI_AMBIGUOUS:          "not verified",
+    _envelope.STATUS_BLOCKED:               "blocked",
+    _envelope.STATUS_CONFIRMATION_REQUIRED: "needs confirmation",
+    _envelope.STATUS_CANCELLED:             "cancelled",
+}
+
+
+def _build_final_report(task: Task, final_status: str) -> str:
+    """J4: the synthesized final report for a MULTI-objective Task —
+    closes the exact gap the roadmap's own J4 exit criteria name ('the
+    FINAL report matches the ORIGINAL objective, not just the last
+    step', docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md § 16). Before this,
+    a compound task's caller only ever saw the LAST PlanStep's raw
+    evidence string — correct as far as the task-level STATUS goes
+    (TASK_COMPLETED already required EVERY PlanStep to verify — see
+    execute_task()), but silent about what the EARLIER objectives in the
+    same task actually accomplished.
+
+    Reports every PlanStep from index 0 up to (and including) the one
+    that determined the task's outcome — never the ones after it, which
+    were genuinely never attempted (see execute_task()'s own 'stop the
+    whole task, never skip ahead' rule). Never exposes the internal
+    domain/routing name a PlanStep resolved to — that's JARVIS's own
+    implementation detail, not part of a truthful outcome report to
+    Gemini/the user (see this module's own 'never expose internal
+    implementation details unnecessarily' J4 requirement).
+
+    A single-objective Task never reaches this function at all — see
+    execute_task()'s own _finalize_result() call, which returns a
+    one-item plan's raw result completely unchanged, byte-for-byte what
+    Phase 0-4 already returned."""
+    attempted = task.current_step_index + 1
+    total = len(task.plan)
+    lines = []
+    for i in range(attempted):
+        plan_step = task.plan[i]
+        evidence = _strip_status_tag(task.task_context.raw.get(i, ""))
+        marker = _STATUS_MARKER.get(plan_step.status, plan_step.status.lower() or "not verified")
+        lines.append(f"{i + 1}. {plan_step.objective} -> {evidence} ({marker})")
+
+    if final_status == _envelope.STATUS_VERIFIED_SUCCESS:
+        headline = f"All {total} objective{'s' if total != 1 else ''} verified."
+    else:
+        headline = f"Objective {attempted} of {total} {_STATUS_MARKER.get(final_status, 'did not verify')}."
+        if attempted < total:
+            headline += f" The remaining {total - attempted} objective(s) were not attempted."
+
+    return _envelope.envelope(final_status, headline + "\n" + "\n".join(lines))
+
+
+_TERMINAL_STATE_OF = {
+    _envelope.STATUS_BLOCKED:               TASK_BLOCKED,
+    _envelope.STATUS_CONFIRMATION_REQUIRED: TASK_AWAITING_CONFIRMATION,
+    _envelope.STATUS_CANCELLED:             TASK_CANCELLED,
+    _envelope.STATUS_INCONCLUSIVE:          TASK_INCONCLUSIVE,
+    _envelope.STATUS_UI_AMBIGUOUS:          TASK_INCONCLUSIVE,
+}
+
+
+def _task_state_for(status: str) -> str:
+    """The Task-level state a non-VERIFIED_SUCCESS terminating PlanStep
+    status maps to — pulled out of execute_task()'s own loop into one
+    small, directly-testable pure function (section 9's own 'keep state
+    transitions deterministic and testable' requirement), not a second
+    state machine: this is still the exact same TASK_* vocabulary
+    Task.state has always used, just named once instead of inline.
+    VERIFIED_FAILURE (a real, known outcome) and any status this module
+    doesn't otherwise recognize both map to TASK_FAILED — the ordinary
+    default, not a special case."""
+    return _TERMINAL_STATE_OF.get(status, TASK_FAILED)
+
+
+def _finalize_result(task: Task, final_status: str, last_result: str) -> str:
+    """The ONE place a Task's execution turns into what Gemini/the user
+    actually receive. A single-objective Task is untouched — `last_result`
+    IS already the complete, accurate report for its one objective,
+    exactly what Phase 0-4 always returned (see execute_task()'s own
+    docstring: byte-for-byte unchanged). A MULTI-objective Task instead
+    gets _build_final_report()'s synthesized report spanning every
+    objective actually attempted, not just the terminating one."""
+    if len(task.plan) <= 1:
+        return last_result
+    return _build_final_report(task, final_status)
+
+
 def execute_task(parameters: dict = None) -> str:
     """The jarvis_task entry point (see main.py's dispatch). parameters:
     objective (str) — the legacy single-objective interface; continues
@@ -876,10 +1026,16 @@ def execute_task(parameters: dict = None) -> str:
     VERIFIED_SUCCESS — dispatching every step is not the same as the
     task succeeding. The first PlanStep that does not reach
     VERIFIED_SUCCESS stops the WHOLE task there: later PlanSteps are
-    never attempted after a permanently-failed/blocked/
+    never attempted after a permanently-failed/blocked/cancelled/
     confirmation-required one, and JARVIS never modifies or replans the
     remaining PlanSteps — the only adaptivity is the existing,
-    family-scoped, same-step recovery mechanism inside _execute_step()."""
+    family-scoped, same-step recovery mechanism inside _execute_step().
+
+    J4: the returned string is EXACTLY the last PlanStep's own raw
+    result for a single-objective task (unchanged), and a synthesized,
+    whole-plan report for a multi-objective one (see _finalize_result()/
+    _build_final_report()) — never simply the last raw capability result
+    mistaken for the whole objective's outcome."""
     params = parameters or {}
     raw_objectives = params.get("objectives")
     if raw_objectives:
@@ -908,14 +1064,9 @@ def execute_task(parameters: dict = None) -> str:
 
         # Anything else is terminal for the WHOLE task, not just this
         # PlanStep — no autonomous replanning, no skipping ahead.
-        if plan_step.status == _envelope.STATUS_BLOCKED:
-            task.state = TASK_BLOCKED
-        elif plan_step.status == _envelope.STATUS_CONFIRMATION_REQUIRED:
-            task.state = TASK_AWAITING_CONFIRMATION
-        else:
-            task.state = TASK_FAILED
-        return result
+        task.state = _task_state_for(plan_step.status)
+        return _finalize_result(task, plan_step.status, result)
 
     # Every PlanStep independently reached VERIFIED_SUCCESS.
     task.state = TASK_COMPLETED
-    return result
+    return _finalize_result(task, _envelope.STATUS_VERIFIED_SUCCESS, result)
