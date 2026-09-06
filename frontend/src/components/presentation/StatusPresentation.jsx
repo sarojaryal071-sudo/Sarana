@@ -19,12 +19,12 @@ export default function StatusPresentation({ data }) {
 
   return (
     <div className="pw-status">
-      <div className="pw-status-row">
+      <div className="pw-status-row pw-reveal-item">
         <span className={`pw-status-pill pw-status-pill-${state}`}>{STATE_LABELS[state] || state.toUpperCase()}</span>
         {label && <span className="pw-status-label">{label}</span>}
       </div>
       {hasProgress && (
-        <div className="pw-status-bar-track">
+        <div className="pw-status-bar-track pw-reveal-item" style={{ "--pw-reveal-index": 1 }}>
           <div className="pw-status-bar-fill" style={{ width: `${pct}%` }} />
         </div>
       )}

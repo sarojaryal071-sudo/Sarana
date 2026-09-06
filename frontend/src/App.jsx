@@ -10,7 +10,8 @@ import { prepareImageForUpload, readFileAsBase64 } from "./lib/image";
 import { permissionManager } from "./lib/permissions";
 import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
-import { playAudioFx, setAudioFxTheme, setSpeaking as setAudioFxSpeaking } from "./lib/audioFx";
+import { playAudioFx } from "./lib/audioFx";
+import { useAudioFxLifecycle } from "./lib/useAudioFxLifecycle";
 import { setMouthLevel } from "./lib/mouthLevel";
 import { MicStreamer } from "./lib/mic";
 import { stopCameraVision } from "./lib/cameraVision";
@@ -65,20 +66,6 @@ function requestAndSendLocation(token, { fresh = false } = {}) {
         permissionManager.reportObserved("location", e.code);
       }
     });
-}
-
-// Track 4: derives a semantic audio cue from the SAME Result Envelope
-// tags every backend capability already emits (result_envelope.py's own
-// "[STATUS] evidence" convention — see that module's docstring) — never
-// a new backend signal invented for this. A message with no recognized
-// leading tag plays nothing; this is deliberately conservative (only
-// the three genuinely consequential/attention-worthy tags get a cue),
-// matching section 12's own "use silence when silence is better".
-function playResultTagAudioFx(text) {
-  const t = (text || "").trimStart();
-  if (t.startsWith("[CONFIRMATION_REQUIRED]")) playAudioFx("confirmation_required");
-  else if (t.startsWith("[BLOCKED]")) playAudioFx("blocked");
-  else if (t.startsWith("[VERIFIED_FAILURE]")) playAudioFx("error");
 }
 
 export default function App() {
@@ -241,11 +228,22 @@ export default function App() {
         switch (msg.type) {
           case "log":
             dispatch({ type: "LOG_MESSAGE", speaker: msg.speaker, text: msg.text, ts: msg.ts });
-            playResultTagAudioFx(msg.text);
             break;
           case "sys":
             dispatch({ type: "SYS_MESSAGE", text: msg.text, ts: msg.ts });
-            playResultTagAudioFx(msg.text);
+            break;
+          case "audio_cue":
+            // Shared semantic audio event origin: main.py's own
+            // _execute_tool() choke point (see that method's
+            // _emit_audio_cue_for_result()) already knows a result
+            // carries a consequential Result Envelope tag — this
+            // replaces the old text-matching heuristic against Gemini's
+            // own paraphrased reply (see dashboard/server.py's
+            // broadcast_audio_cue() docstring for why that was fragile).
+            // Same event name an embedded desktop Presentation Engine
+            // view receives through the identical broadcast — neither
+            // surface infers this independently.
+            playAudioFx(msg.event);
             break;
           case "status":
             dispatch({ type: "STATUS_MESSAGE", state: msg.state });
@@ -791,27 +789,11 @@ export default function App() {
   // blocked/error) is themed by whichever identity is CURRENTLY shown —
   // deliberately `identity`, not `targetIdentity` (the transition cue
   // above already uses targetIdentity directly, since it IS the theme
-  // change happening).
-  useEffect(() => { setAudioFxTheme(identity); }, [identity]);
-
-  // Track 4: wake/sleep/listening/thinking — derived from the SAME
-  // authoritative assistantStatus broadcasts the visual HUD already
-  // reacts to (main.py's _push_state(), see the "status" WS case
-  // above), never a separate signal invented for audio. Also feeds
-  // audioFx's own speaking-aware ducking (setSpeaking) so NORMAL/
-  // AMBIENT cues never fight an in-progress reply.
-  const prevStatusRef = useRef(state.assistantStatus);
-  useEffect(() => {
-    const prev = prevStatusRef.current;
-    const next = state.assistantStatus;
-    prevStatusRef.current = next;
-    setAudioFxSpeaking(next === "SPEAKING");
-    if (prev === next) return;
-    if (next === "SLEEPING") playAudioFx("assistant_sleep");
-    else if (prev === "SLEEPING") playAudioFx("assistant_wake");
-    else if (next === "LISTENING") playAudioFx("assistant_listening");
-    else if (next === "THINKING") playAudioFx("assistant_thinking");
-  }, [state.assistantStatus]);
+  // change happening). Extracted into a shared hook (lib/useAudioFxLifecycle)
+  // so the desktop-embedded Presentation Engine entry reacts to the same
+  // assistantStatus stream through the exact same code, not a
+  // re-derivation — see that hook's own header.
+  useAudioFxLifecycle(state.assistantStatus, identity);
 
   // SARANA Face UI: an active expression_override (see the WS handler
   // above) clears itself on a real timer rather than being silently
@@ -896,7 +878,7 @@ export default function App() {
               onStopped={handleVisionStopped}
             />
           ) : (
-            <div className={`identity-stage${identityFading ? " identity-stage-fading" : ""}`}>
+            <div className={`identity-stage${identityFading ? " identity-stage-fading" : ""}${state.content ? " identity-stage-defocused" : ""}`}>
               {identity === "jarvis" ? (
                 <Orb status={displayStatus} assistantName={state.assistantName} />
               ) : (

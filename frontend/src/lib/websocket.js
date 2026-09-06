@@ -59,6 +59,18 @@
 //                        SaranaFace while active) — backend-authoritative,
 //                        this frontend never toggles the mode itself
 //                      {"type": "device_action", ...}  (reserved, unsent today)
+//                      {"type": "audio_cue", "event": "blocked" |
+//                        "confirmation_required" | "error"}  — shared
+//                        semantic audio event origin: main.py's own
+//                        _execute_tool() choke point already decided a
+//                        tool result carries one of the Result Envelope's
+//                        consequential tags (see
+//                        dashboard/server.py's broadcast_audio_cue() and
+//                        this file's own header for why this replaced an
+//                        older, fragile text-matching heuristic) — the
+//                        same event name an embedded desktop Presentation
+//                        Engine view receives through the identical
+//                        broadcast (see DashboardServer.set_local_sink()).
 //                      {"type": "pong", "t": <the ping's own timestamp>}
 //                        (handled internally, never forwarded to onMessage)
 //

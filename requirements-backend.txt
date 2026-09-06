@@ -51,3 +51,14 @@ tzdata
 # alone doesn't reach Render, which builds from this file.
 google-auth-oauthlib>=1.0,<2
 google-api-python-client
+
+# Calendar-fix: main.py imports load_dotenv() at module top (guarded with
+# try/except ImportError, so its absence never breaks anything) so a local
+# desktop/dev run can pick up a .env file the same way Render's own
+# platform-injected env vars already work without one. A genuine no-op on
+# Render itself -- no .env file is deployed there, and load_dotenv()'s
+# default override=False means it could never clobber a real env var even
+# if one somehow existed. Included here (not left to the except branch)
+# so the documented .env.example convention actually works out of the box
+# wherever this exact requirements file is what gets installed.
+python-dotenv

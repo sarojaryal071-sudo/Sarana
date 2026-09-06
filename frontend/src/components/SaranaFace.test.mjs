@@ -262,7 +262,7 @@ test("Orb/SaranaFace are chosen via `identity` state, itself derived from state.
 test("VisionStage (camera/screen) still replaces the identity stage in-place, instantly — never renders alongside it as a second element", () => {
   assert.match(
     appSrc,
-    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,600}<SaranaFace/,
+    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,900}<SaranaFace/,
     "VisionStage and the identity-stage branch must be the two arms of the SAME conditional",
   );
 });

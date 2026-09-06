@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JARVIS Presentation</title>
+    <meta name="theme-color" content="#00060a" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <!-- Qt's qtwebchannel.js resource (qrc:///qtwebchannel/qwebchannel.js)
+         is loaded at RUNTIME, from desktopBridge.js, not as a static tag
+         here — Vite's build treats a non-module <script src> as legacy
+         and reorders/hoists it, which broke the load order this needs
+         (qwebchannel.js must be ready before QWebChannel() is
+         constructed). See desktopBridge.js's loadQWebChannelScript(). -->
+    <script type="module" src="/src/desktop-presentation-main.jsx"></script>
+  </body>
+</html>

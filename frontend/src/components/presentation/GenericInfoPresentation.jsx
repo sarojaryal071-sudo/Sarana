@@ -12,7 +12,7 @@ export default function GenericInfoPresentation({ data }) {
       {items.length > 0 && (
         <div className="pw-generic-items">
           {items.map((item, i) => (
-            <div className="pw-generic-item" key={item.label ?? i}>
+            <div className="pw-generic-item pw-reveal-item" style={{ "--pw-reveal-index": i }} key={item.label ?? i}>
               <span className="pw-generic-item-label">{item.label}</span>
               <span className="pw-generic-item-value">{item.value}</span>
             </div>

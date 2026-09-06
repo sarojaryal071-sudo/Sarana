@@ -122,8 +122,8 @@ export default function CalendarPresentation({ data }) {
           {shownEvents.length === 0 ? (
             <div className="pw-calendar-events-empty">No events.</div>
           ) : (
-            shownEvents.map((ev) => (
-              <div className="pw-calendar-event" key={ev.id || `${ev.title}-${ev.start}`}>
+            shownEvents.map((ev, i) => (
+              <div className="pw-calendar-event pw-reveal-item" style={{ "--pw-reveal-index": i }} key={ev.id || `${ev.title}-${ev.start}`}>
                 <span className="pw-calendar-event-time">{formatEventTime(ev.start, ev.all_day)}</span>
                 <span className="pw-calendar-event-title">{ev.title}</span>
                 {ev.location && <span className="pw-calendar-event-location">{ev.location}</span>}

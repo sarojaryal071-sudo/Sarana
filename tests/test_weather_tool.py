@@ -177,6 +177,29 @@ def test_get_weather_tool_broadcasts_the_weather_presentation_to_the_dashboard()
     print("test_get_weather_tool_broadcasts_the_weather_presentation_to_the_dashboard: PASS")
 
 
+def test_get_weather_tool_calls_ui_show_content_even_without_a_dashboard() -> None:
+    """Real, disclosed bug fix: get_weather used to call ONLY
+    self._dashboard.broadcast_content() — the one path a desktop-side
+    Presentation Engine consumer can ever receive a presentation through
+    (self.ui.show_content()) was never called at all, unlike web_search's
+    identical-shape branch. Must fire unconditionally, dashboard or not."""
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.17, 24.94, 50.0)
+        assert jarvis._dashboard is None
+        fake_data = _fake_weather_data()
+        with patch("main.get_weather_data", return_value=fake_data), \
+             patch.object(jarvis.ui, "show_content") as mock_show:
+            fc = _FakeFunctionCall("get_weather", {})
+            await jarvis._execute_tool(fc)
+        mock_show.assert_called_once()
+        title, text, presentation = mock_show.call_args.args
+        assert presentation["type"] == "weather"
+        assert presentation["data"] == fake_data
+    asyncio.run(_run())
+    print("test_get_weather_tool_calls_ui_show_content_even_without_a_dashboard: PASS")
+
+
 def test_get_weather_tool_unknown_place_is_honest() -> None:
     async def _run():
         jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
@@ -245,6 +268,7 @@ if __name__ == "__main__":
     test_get_weather_tool_uses_current_session_location()
     test_get_weather_tool_with_named_place_geocodes_first()
     test_get_weather_tool_broadcasts_the_weather_presentation_to_the_dashboard()
+    test_get_weather_tool_calls_ui_show_content_even_without_a_dashboard()
     test_get_weather_tool_unknown_place_is_honest()
     test_get_weather_tool_without_location_reports_unavailable()
     test_get_weather_tool_desktop_without_location_is_honest_not_an_error()

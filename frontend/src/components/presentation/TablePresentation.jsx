@@ -21,7 +21,7 @@ export default function TablePresentation({ data }) {
         </thead>
         <tbody>
           {rows.map((row, ri) => (
-            <tr key={ri}>
+            <tr className="pw-reveal-item" style={{ "--pw-reveal-index": ri }} key={ri}>
               {row.map((cell, ci) => <td key={ci}>{cell}</td>)}
             </tr>
           ))}

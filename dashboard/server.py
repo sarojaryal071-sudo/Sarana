@@ -221,6 +221,7 @@ import socket
 import string
 import time
 from pathlib import Path
+from typing import Callable
 
 from users import user_db
 from core.latency_stats import LatencyStats
@@ -726,6 +727,21 @@ class DashboardServer:
         self._aes_cache:  dict[str, bytes]= {}   # session_key → AES bytes
         self._clients: set[WebSocket]     = set()
         self._client_roles: dict[WebSocket, str] = {}   # ws → "client" | "desktop" (Phase 3 bookkeeping only)
+        # Desktop Presentation Engine integration: an optional, in-process
+        # sink for every message this server already broadcasts to real
+        # WS clients (_send_to_clients() below is the ONE existing choke
+        # point every broadcast_*() method funnels through — see
+        # broadcast_state()'s own comment for confirmation this has always
+        # been true). NOT a second event bus and NOT a new message type —
+        # main.py wires this to the desktop UI's own message handler (see
+        # ui.py's JarvisUI.receive_dashboard_message()) so the exact same
+        # "content"/"status"/"log"/"sys"/"jarvis_mode_changed"/etc.
+        # messages a browser receives over /ws also reach an embedded
+        # desktop Presentation Engine view, with zero duplicated message
+        # shapes and zero new transport. None on a web-only deployment
+        # (server_main.py never sets this) — a real, ordinary WebSocket
+        # client is completely unaffected either way.
+        self._local_sink: Callable[[dict], None] | None = None
         self._audio_out_clients: set[WebSocket] = set()  # /ws/audio-out subscribers (Phase 4)
         # Audio-out backpressure fix: one bounded queue + one dedicated
         # sender task per /ws/audio-out client (see _register_audio_client()/
@@ -992,6 +1008,15 @@ class DashboardServer:
 
     # ── broadcast ────────────────────────────────────────────────────────
 
+    def set_local_sink(self, sink: Callable[[dict], None] | None) -> None:
+        """Wires the optional in-process message sink (see self._local_sink's
+        own docstring in __init__) -- main.py calls this once, right after
+        constructing DashboardServer, exactly like every other
+        set_*_callback() wiring in run(). Passing None (the default)
+        restores today's exact behavior: only real WS clients receive
+        anything."""
+        self._local_sink = sink
+
     async def broadcast(self, msg: dict) -> None:
         self._history.append(msg)
         if len(self._history) > 300:
@@ -999,6 +1024,19 @@ class DashboardServer:
         await self._send_to_clients(msg)
 
     async def _send_to_clients(self, msg: dict) -> None:
+        # Desktop Presentation Engine integration: the local sink fires for
+        # EVERY message that reaches this method, from EVERY broadcast_*()
+        # caller (broadcast_state() calls this directly, bypassing
+        # broadcast()/self._history, exactly as it always has — see its own
+        # docstring) — one choke point, no per-message-type wiring needed,
+        # and no behavior change at all for real WS clients below. Called
+        # synchronously and defensively: a desktop-side exception must
+        # never take down a real browser/phone client's own delivery.
+        if self._local_sink is not None:
+            try:
+                self._local_sink(msg)
+            except Exception as e:
+                print(f"[Dashboard] Local sink error (desktop delivery skipped): {e}")
         dead: set[WebSocket] = set()
         for ws in list(self._clients):
             try:
@@ -1022,6 +1060,27 @@ class DashboardServer:
         message shape the frontend already understands (see
         AssistantContext.jsx's STATUS_MESSAGE case)."""
         await self._send_to_clients({"type": "status", "state": state})
+
+    async def broadcast_audio_cue(self, event: str) -> None:
+        """Server -> client "audio_cue" message: main.py has just decided
+        a tool result carries one of the Result Envelope's consequential
+        tags ([BLOCKED]/[CONFIRMATION_REQUIRED]/[VERIFIED_FAILURE] -- see
+        _execute_tool()'s own single choke point where this is called)
+        and names the EXACT semantic audioFx event for it -- "blocked" /
+        "confirmation_required" / "error". Real fix this replaces: the
+        browser used to infer this by text-matching Gemini's own spoken/
+        text REPLY for a literal leading tag (App.jsx's old
+        playResultTagAudioFx()) -- fragile, since the system prompt
+        explicitly tells Gemini to paraphrase these naturally rather than
+        echo the tag verbatim, so that heuristic rarely actually fired in
+        real conversations. This is now authoritative and shared: both
+        the browser and (via set_local_sink() -- see that method's own
+        docstring) an embedded desktop Presentation Engine view receive
+        the exact same event name, from the exact same origin, neither
+        one guessing independently. Same non-history, ephemeral-signal
+        treatment as broadcast_state() above -- a client that connects
+        later gets no replay of a stale cue."""
+        await self._send_to_clients({"type": "audio_cue", "event": event})
 
     async def broadcast_location_refresh_request(self, fresh: bool = False) -> None:
         """Location capabilities: server -> client signal asking the

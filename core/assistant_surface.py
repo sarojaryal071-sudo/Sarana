@@ -29,7 +29,18 @@ JarvisLive in main.py (grepped line by line, not assumed):
     JarvisLive's background asyncio loop — JarvisUI (ui.py) marshals the
     actual WinRT call onto the Qt GUI thread; HeadlessSurface reports it
     honestly unavailable, since a headless/web session has no desktop to
-    have native location on)
+    have native location on),
+    receive_dashboard_message (desktop Presentation Engine integration —
+    NOT called directly by JarvisLive; wired once, in run(), as
+    dashboard.DashboardServer's local sink — see that class's own
+    set_local_sink()/self._local_sink docstring. Every message a real
+    browser/phone WS client would receive over /ws ("content" with a
+    structured presentation payload, "status", "log", "sys",
+    "jarvis_mode_changed", etc.) also reaches this method, unmodified,
+    letting JarvisUI forward it into an embedded Presentation Engine view
+    with zero new message shapes. HeadlessSurface's implementation is a
+    genuine no-op — a web-only deployment already receives these over its
+    own real WS connection and has no embedded view to feed)
 
   Read-only properties:
     muted, current_file
@@ -86,3 +97,4 @@ class AssistantSurface(Protocol):
     def notify_phone_connected(self) -> None: ...
     def prompt_reconfig(self) -> None: ...
     def request_native_location_permission(self) -> str: ...
+    def receive_dashboard_message(self, msg: dict) -> None: ...

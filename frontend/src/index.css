@@ -260,8 +260,25 @@ input {
   transform: scale(0.985);
 }
 
+/* Cinematic presentation focus (section 1-2 of the "cinematic
+   presentation experience" brief): the orb/face stays visible but
+   recedes — defocused, dimmed — while a Presentation Engine surface is
+   the active visual focus, exactly the way a well-made HUD keeps its
+   ambient character present but secondary rather than hiding it
+   outright. `filter`, not `opacity`/`transform` (already owned by the
+   identity-crossfade state above) — the two compose cleanly if a mode
+   switch ever happens to land while a presentation is showing, instead
+   of two rules fighting over the same properties. */
+.identity-stage-defocused {
+  filter: blur(2px) brightness(0.72);
+  transition: filter 320ms ease;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .identity-stage {
+    transition: none;
+  }
+  .identity-stage-defocused {
     transition: none;
   }
 }
@@ -940,6 +957,22 @@ input {
   }
 }
 
+/* ── Desktop Presentation Engine entry (desktop.html) ────────────────
+   The embedded QWebEngineView's own viewport IS this panel — there is no
+   surrounding .app-shell/.panel-center grid giving it a height the way
+   the web app's own layout does, so this supplies the same "flex column,
+   surface docks to the bottom" shape directly against the real viewport.
+   ui.py sizes the QWebEngineView widget itself to match the space the
+   old plain-text content panel used — see that file's own comment. */
+.desktop-presentation-root {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: transparent;
+}
+
 /* ── Presentation Engine: the one glass information surface (Track 3) ─
    Deliberately restrained -- one thin border, one soft shadow, a low-
    opacity blur -- never the "giant glowing border" / "excessive
@@ -968,10 +1001,20 @@ input {
 }
 .pw-surface-expanded { max-height: 62%; }
 
-.pw-surface-materializing { opacity: 0; transform: translateY(10px); }
+/* Cinematic materialize: a restrained "glass condensing" read rather than
+   a flat modal fade/slide — starts very slightly scaled down AND less
+   blurred (glass hasn't fully formed yet), settles to its resting scale
+   and full blur as it reaches `active`. The blur value itself doesn't
+   transition (backdrop-filter transitions are unreliable/expensive
+   across engines) — only opacity/transform animate, which is enough for
+   the "forming" read without relying on an animated blur. Dismissal is
+   the same motion in reverse, slightly faster (DISMISS_MS is shorter
+   than MATERIALIZE_MS in PresentationSurface.jsx) — a deconstruction,
+   not just a fade-out. */
+.pw-surface-materializing { opacity: 0; transform: translateY(10px) scale(0.985); }
 .pw-surface-active,
-.pw-surface-updating { opacity: 1; transform: translateY(0); }
-.pw-surface-dismissing { opacity: 0; transform: translateY(6px); }
+.pw-surface-updating { opacity: 1; transform: translateY(0) scale(1); }
+.pw-surface-dismissing { opacity: 0; transform: translateY(6px) scale(0.99); }
 
 .pw-surface-updating .pw-surface-hdr { animation: pw-pulse 420ms ease; }
 @keyframes pw-pulse {
@@ -1033,6 +1076,33 @@ input {
   }
   .pw-surface-materializing,
   .pw-surface-dismissing { opacity: 1; transform: none; }
+}
+
+/* ── Shared data-reveal (belongs to the Presentation Engine itself, not
+   any one renderer — section 5/9's own requirement). A restrained,
+   staggered fade-up per list item, never a literal per-character
+   typewriter (explicitly the "cheesy" territory the brief warns
+   against) — closer to how a well-made HUD reveals a freshly-resolved
+   readout: quick, precise, one wave, not a lingering effect. Every
+   renderer that lists real backend data (weather's daily forecast,
+   calendar's events, table rows, search result lines, generic info
+   items) applies this ONE class with a `--pw-reveal-index` custom
+   property set to the item's own index — the stagger timing lives here,
+   once, not reimplemented per renderer. Deliberately keyed to the
+   renderer's OWN mount, not the outer surface's materialize/update phase
+   — a typed renderer swapping in the same "updating" pulse still gets a
+   fresh, brief reveal of its own new rows, which is the honest signal
+   ("this data just arrived") the brief is actually asking for. */
+.pw-reveal-item {
+  animation: pw-reveal 320ms ease backwards;
+  animation-delay: calc(var(--pw-reveal-index, 0) * 45ms);
+}
+@keyframes pw-reveal {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pw-reveal-item { animation: none !important; opacity: 1; }
 }
 
 /* ── Weather ──────────────────────────────────────────────────────── */

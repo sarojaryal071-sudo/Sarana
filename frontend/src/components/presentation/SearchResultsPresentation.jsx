@@ -20,7 +20,7 @@ export default function SearchResultsPresentation({ data }) {
       </div>
       <div className="pw-search-lines">
         {lines.map((line, i) => (
-          <div className="pw-search-line" key={i}>{line}</div>
+          <div className="pw-search-line pw-reveal-item" style={{ "--pw-reveal-index": i }} key={i}>{line}</div>
         ))}
       </div>
     </div>

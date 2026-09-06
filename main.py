@@ -31,6 +31,33 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+# ── .env loading (real, confirmed gap fixed alongside the Calendar fix) ──
+# .env.example has documented a DATABASE_URL/GOOGLE_CLIENT_ID/_SECRET/
+# _REDIRECT_URI convention since before this fix, but nothing in this
+# codebase ever actually loaded a .env file -- confirmed by inspection: zero
+# `dotenv`/`load_dotenv` usage anywhere in the project. A local `.env`
+# (copied from .env.example, filled in with the SAME real values a
+# deployed backend already uses) was therefore silently ignored entirely,
+# which is the actual root cause behind "Google Calendar is connected but
+# JARVIS says it isn't" on a desktop/local run: calendar_store.is_configured()
+# and calendar_auth.is_configured() only ever see real OS environment
+# variables, and a local process normally has none of these set. Loaded
+# here, before any project module that reads os.environ.get(...) for one
+# of these three vars (memory/postgres_repo.py, actions/calendar_store.py,
+# actions/calendar_auth.py) is even imported, below. override=False (the
+# default) means this can NEVER clobber a real platform-injected value —
+# Render's own env vars always win over anything in a local .env, exactly
+# as before this existed for any deployment that doesn't use a .env file
+# at all. Never fatal if python-dotenv isn't installed (same graceful-
+# degradation convention as every other optional dependency in this file
+# -- sounddevice, winsdk, psycopg): a missing .env or missing dotenv
+# package just means desktop keeps behaving exactly as it always has.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv()
+except ImportError:
+    pass
+
 # ── Console encoding robustness (root cause of the "missing greeting" bug) ──
 # Windows consoles often default to a legacy codepage (cp1252) that cannot
 # represent most Unicode text. Earlier fixes in this file removed emoji from
@@ -383,7 +410,10 @@ TOOL_DECLARATIONS = [
             "for 'what's on my calendar', 'what do I have today/tomorrow', 'do I have "
             "anything at X', 'what's my next appointment', 'what does my week look "
             "like'. Requires the user to have connected Google Calendar first -- if "
-            "not connected, this returns [CALENDAR_NOT_CONNECTED]."
+            "not connected, this returns [CALENDAR_NOT_CONNECTED]; if Calendar "
+            "integration itself isn't configured in this running environment at all "
+            "(a setup gap, not the user's account), this returns [CALENDAR_UNAVAILABLE] "
+            "instead -- these are different situations, never conflate them."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -1652,13 +1682,37 @@ NEARBY_CACHE_MAX_ENTRIES = 20
 # tools (see the location constants above) -- these work on either
 # surface; a connection is per-SARANA-ACCOUNT (see actions/calendar_
 # store.py's owner-keyed schema), never per-surface, so desktop and web
-# both just honestly report [CALENDAR_NOT_CONNECTED] until that specific
-# account has actually connected Google Calendar.
+# both just honestly report a calendar-unavailable result until that
+# specific account has actually connected Google Calendar.
+#
+# Real, confirmed bug fixed alongside this: EVERY calendar tool used to
+# collapse two genuinely different situations into this one message --
+# (a) this SARANA account has never connected Google Calendar, and (b)
+# Google Calendar integration isn't even CONFIGURED in this running
+# process at all (no DATABASE_URL / GOOGLE_CLIENT_ID / _SECRET /
+# _REDIRECT_URI -- see actions/calendar_store.py's and
+# actions/calendar_auth.py's own is_configured()). A real desktop
+# process with none of those env vars set would always say "you haven't
+# connected Google Calendar" even for an account that genuinely HAS
+# connected it (e.g. through the deployed web app, which does have them
+# configured) -- confirmed live on this machine via dashboard/server.py's
+# own [CALENDAR_CONFIG] startup diagnostic. See
+# _calendar_unavailable_result() below, the one place both messages are
+# now decided -- never guessed per call site.
 CALENDAR_NOT_CONNECTED_RESULT = (
     "[CALENDAR_NOT_CONNECTED] The user has not connected Google Calendar to "
     "this SARANA account yet. Tell them honestly and briefly, in your own "
     "natural words, that Google Calendar isn't connected -- they can connect "
     "it from Settings in the app. Never pretend a calendar action happened."
+)
+CALENDAR_UNAVAILABLE_RESULT = (
+    "[CALENDAR_UNAVAILABLE] Google Calendar integration is not configured in "
+    "this running environment at all (this is a setup/deployment gap, not "
+    "something about the user's account or connection). Tell them honestly "
+    "and briefly, in your own natural words, that Google Calendar isn't set "
+    "up here right now -- do NOT tell them to 'connect' it from Settings "
+    "(that would only work in an environment where it's actually "
+    "configured). Never pretend a calendar action happened."
 )
 
 
@@ -2093,6 +2147,47 @@ class JarvisLive:
                 asyncio.run_coroutine_threadsafe(_broadcast(), self._loop)
             except RuntimeError:
                 pass   # loop already closed/closing (shutdown race) — never fatal
+
+    # Result Envelope tag -> shared semantic audioFx event name. Exactly
+    # the three genuinely consequential/attention-worthy tags (see
+    # dashboard/server.py's broadcast_audio_cue() docstring for why this
+    # replaces the old browser-side text-matching heuristic) — a message
+    # with no recognized leading tag emits nothing, same "silence is the
+    # correct default far more often than not" reasoning that heuristic
+    # already used.
+    _AUDIO_CUE_TAGS = (
+        ("[CONFIRMATION_REQUIRED]", "confirmation_required"),
+        ("[BLOCKED]", "blocked"),
+        ("[VERIFIED_FAILURE]", "error"),
+    )
+
+    def _emit_audio_cue_for_result(self, result) -> None:
+        """Shared semantic audio event origin: called from _execute_tool()'s
+        own single choke point, after EVERY tool call's `result` has been
+        finally decided, for every branch — never per-branch instrumentation,
+        never guessed downstream. Broadcasts through the SAME dashboard
+        that already reaches a real browser client AND (via
+        DashboardServer.set_local_sink()) an embedded desktop Presentation
+        Engine view — one authoritative origin, two consumers, neither one
+        independently inferring when this happened.
+
+        Same "a broadcast failure must never crash the caller" resilience
+        _push_state()'s own _broadcast() uses — a test double or a future
+        DashboardServer variant missing broadcast_audio_cue() degrades to
+        a silent skip, exactly like a real network failure would, never a
+        crash of the tool call that triggered it."""
+        if not self._dashboard or not isinstance(result, str):
+            return
+        text = result.lstrip()
+        for tag, event in self._AUDIO_CUE_TAGS:
+            if text.startswith(tag):
+                async def _broadcast():
+                    try:
+                        await self._dashboard.broadcast_audio_cue(event)
+                    except Exception as e:
+                        print(f"[JARVIS] Audio cue broadcast failed: {e}")
+                asyncio.create_task(_broadcast())
+                return
 
     def set_speaking(self, value: bool):
         with self._speaking_lock:
@@ -2937,11 +3032,19 @@ class JarvisLive:
                 # Track 3 (Presentation Engine): fetches the structured
                 # shape ONCE (get_weather_data()) and formats Gemini's
                 # own text reply from it (format_weather_text()) — never
-                # two Open-Meteo calls for one response — then broadcasts
-                # the SAME real data to the web frontend's
-                # WeatherPresentation, alongside (never instead of) the
-                # spoken/text reply. Desktop sessions (no self._dashboard)
-                # simply skip the broadcast; nothing else changes.
+                # two Open-Meteo calls for one response — then hands the
+                # SAME real data to self.ui.show_content() AND (when a
+                # dashboard is up) self._dashboard.broadcast_content(),
+                # alongside (never instead of) the spoken/text reply.
+                # Real, disclosed bug fixed alongside this: this branch
+                # used to call ONLY the dashboard broadcast, unlike
+                # web_search's identical-shape branch below, which already
+                # called both — meaning a desktop session's own
+                # self.ui.show_content() (the ONE place a desktop-side
+                # Presentation Engine consumer can ever receive this) never
+                # even ran. Both calls are unconditional now — show_content()
+                # is safe to call regardless of whether a dashboard exists,
+                # exactly like every other tool that already does this.
                 place = (args.get("place") or "").strip()
                 _weather_place_label = ""
                 _weather_geo_failed = False
@@ -2968,10 +3071,12 @@ class JarvisLive:
                         None, lambda: get_weather_data(glat, glon, _weather_place_label)
                     )
                     result = format_weather_text(_weather_data)
+                    _weather_label = _weather_place_label or "WEATHER"
+                    _weather_presentation = {"type": "weather", "data": _weather_data}
+                    self.ui.show_content(_weather_label, result, _weather_presentation)
                     if self._dashboard:
                         asyncio.create_task(self._dashboard.broadcast_content(
-                            _weather_place_label or "WEATHER", result,
-                            {"type": "weather", "data": _weather_data},
+                            _weather_label, result, _weather_presentation,
                         ))
 
             elif name == "get_current_place":
@@ -3107,7 +3212,7 @@ class JarvisLive:
             elif name == "get_calendar_events":
                 credentials = await self._get_calendar_credentials()
                 if not credentials:
-                    result = CALENDAR_NOT_CONNECTED_RESULT
+                    result = self._calendar_unavailable_result()
                 else:
                     tzinfo = self._calendar_tzinfo()
                     try:
@@ -3132,32 +3237,46 @@ class JarvisLive:
                         # focus_date is set only when the caller's own
                         # requested range IS a single day (e.g. "what's on
                         # the 18th") — never guessed, never invented.
+                        #
+                        # Real, disclosed bug fixed alongside this: this
+                        # whole block used to be gated behind `if
+                        # self._dashboard:`, so a desktop session (which
+                        # always has a dashboard object once one starts —
+                        # see run()'s own DashboardServer() construction,
+                        # unconditional regardless of desktop/web — but has
+                        # no WS client of its OWN listening to it) never
+                        # got this data via self.ui.show_content() at all,
+                        # the one path a desktop-side Presentation Engine
+                        # consumer can ever receive it through. Now built
+                        # unconditionally, exactly like get_weather's
+                        # identical-shape fix above.
+                        _is_single_day = (time_max - time_min).total_seconds() <= 86400
+                        _focus_date = time_min.date().isoformat() if _is_single_day else None
+                        _marked = await loop.run_in_executor(
+                            None,
+                            lambda: calendar_actions.get_month_marked_dates(
+                                credentials, year=time_min.year, month=time_min.month, tzinfo=tzinfo,
+                            ),
+                        )
+                        _calendar_presentation = {
+                            "type": "calendar",
+                            "data": {
+                                "month": f"{time_min.year:04d}-{time_min.month:02d}",
+                                "marked_dates": _marked,
+                                "focus_date": _focus_date,
+                                "events": events,
+                            },
+                        }
+                        self.ui.show_content("CALENDAR", result, _calendar_presentation)
                         if self._dashboard:
-                            _is_single_day = (time_max - time_min).total_seconds() <= 86400
-                            _focus_date = time_min.date().isoformat() if _is_single_day else None
-                            _marked = await loop.run_in_executor(
-                                None,
-                                lambda: calendar_actions.get_month_marked_dates(
-                                    credentials, year=time_min.year, month=time_min.month, tzinfo=tzinfo,
-                                ),
-                            )
                             asyncio.create_task(self._dashboard.broadcast_content(
-                                "CALENDAR", result,
-                                {
-                                    "type": "calendar",
-                                    "data": {
-                                        "month": f"{time_min.year:04d}-{time_min.month:02d}",
-                                        "marked_dates": _marked,
-                                        "focus_date": _focus_date,
-                                        "events": events,
-                                    },
-                                },
+                                "CALENDAR", result, _calendar_presentation,
                             ))
 
             elif name == "find_free_time":
                 credentials = await self._get_calendar_credentials()
                 if not credentials:
-                    result = CALENDAR_NOT_CONNECTED_RESULT
+                    result = self._calendar_unavailable_result()
                 else:
                     tzinfo = self._calendar_tzinfo()
                     try:
@@ -3179,7 +3298,7 @@ class JarvisLive:
             elif name == "create_calendar_event":
                 credentials = await self._get_calendar_credentials()
                 if not credentials:
-                    result = CALENDAR_NOT_CONNECTED_RESULT
+                    result = self._calendar_unavailable_result()
                 else:
                     title = (args.get("title") or "").strip()
                     start = args.get("start", "")
@@ -3210,7 +3329,7 @@ class JarvisLive:
             elif name == "update_calendar_event":
                 credentials = await self._get_calendar_credentials()
                 if not credentials:
-                    result = CALENDAR_NOT_CONNECTED_RESULT
+                    result = self._calendar_unavailable_result()
                 else:
                     tzinfo = self._calendar_tzinfo()
                     event_id = (args.get("event_id") or "").strip()
@@ -3269,7 +3388,7 @@ class JarvisLive:
             elif name == "delete_calendar_event":
                 credentials = await self._get_calendar_credentials()
                 if not credentials:
-                    result = CALENDAR_NOT_CONNECTED_RESULT
+                    result = self._calendar_unavailable_result()
                 else:
                     tzinfo = self._calendar_tzinfo()
                     event_id = (args.get("event_id") or "").strip()
@@ -4084,6 +4203,8 @@ class JarvisLive:
 
         if not self.ui.muted:
             self._push_state("LISTENING")
+
+        self._emit_audio_cue_for_result(result)
 
         print(f"[JARVIS] 📤 {name} → {str(result)[:80]}")
         return types.FunctionResponse(
@@ -5721,6 +5842,26 @@ class JarvisLive:
                 print(f"[Calendar] Failed to persist refreshed token for '{owner}': {e}")
         return credentials
 
+    def _calendar_unavailable_result(self) -> str:
+        """The ONE place that decides which of the two honest calendar-
+        unavailable messages a caller gets, after _get_calendar_credentials()
+        has already returned None -- every one of the five calendar tool
+        branches below calls this instead of hardcoding
+        CALENDAR_NOT_CONNECTED_RESULT directly (that was the actual bug:
+        see CALENDAR_NOT_CONNECTED_RESULT's own docstring above).
+
+        Distinguishes "this environment can't do Calendar at all" (no
+        DATABASE_URL / Google OAuth env vars -- calendar_store.is_configured()
+        and/or calendar_auth.is_configured() are False) from "this specific
+        SARANA account genuinely hasn't connected Calendar yet" (both are
+        configured, but actions/calendar_store.py has no row for this
+        owner). Never guesses -- reads the exact same is_configured() calls
+        dashboard/server.py's own [CALENDAR_CONFIG] startup diagnostic and
+        OAuth routes already use, so this can never disagree with them."""
+        if not (calendar_store.is_configured() and calendar_auth.is_configured()):
+            return CALENDAR_UNAVAILABLE_RESULT
+        return CALENDAR_NOT_CONNECTED_RESULT
+
     def _local_now(self) -> datetime:
         """The single source of truth for "what time is it right now" for
         every user-facing/Gemini-facing purpose (current date/time context,
@@ -6198,6 +6339,14 @@ class JarvisLive:
             # WebSocket message type: the existing WAKE button is what
             # starts the assistant when auto_start=False.
             self._dashboard.set_wake_callback(self._start_event.set)
+            # Desktop Presentation Engine integration: every message this
+            # dashboard would send a real WS client also reaches
+            # self.ui.receive_dashboard_message() in-process — see
+            # DashboardServer.set_local_sink()'s own docstring and
+            # core/assistant_surface.py's for the full reasoning. A
+            # HeadlessSurface's implementation is a no-op, so this is a
+            # genuine no-behavior-change wiring for any non-desktop surface.
+            self._dashboard.set_local_sink(self.ui.receive_dashboard_message)
             asyncio.create_task(self._dashboard.serve())
             # Runs for the whole lifetime, not just inside an active session
             asyncio.create_task(self._process_dashboard_commands())

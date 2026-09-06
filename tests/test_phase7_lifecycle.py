@@ -85,6 +85,14 @@ class _FakeDashboard:
     def set_capabilities_callback(self, fn):
         self._capabilities_fn = fn
 
+    def set_local_sink(self, sink):
+        # Desktop Presentation Engine integration — see
+        # dashboard.DashboardServer.set_local_sink()'s own docstring.
+        # run() calls this unconditionally right after constructing
+        # DashboardServer, so this fake needs it too, same as every
+        # other set_*_callback() above.
+        self._local_sink = sink
+
     async def serve(self):
         await asyncio.Event().wait()  # never returns — mimics a live server
 

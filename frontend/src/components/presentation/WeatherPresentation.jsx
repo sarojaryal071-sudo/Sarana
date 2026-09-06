@@ -26,8 +26,8 @@ export default function WeatherPresentation({ data }) {
       </div>
       {daily.length > 0 && (
         <div className="pw-weather-days">
-          {daily.map((d) => (
-            <div className="pw-weather-day" key={d.date || d.label}>
+          {daily.map((d, i) => (
+            <div className="pw-weather-day pw-reveal-item" style={{ "--pw-reveal-index": i }} key={d.date || d.label}>
               <div className="pw-weather-day-label">{d.label}</div>
               <div className="pw-weather-day-condition">{d.condition}</div>
               <div className="pw-weather-day-range">

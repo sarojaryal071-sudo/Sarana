@@ -20,8 +20,8 @@ else:
     _WIN_HIDE: dict = {}
 
 from PyQt6.QtCore import (
-    QEasingCurve, QMimeData, QObject, QPointF, QRectF, QSize, Qt,
-    QTimer, QUrl, pyqtSignal,
+    QEasingCurve, QMimeData, QObject, QPointF, QPropertyAnimation, QRectF,
+    QSize, Qt, QTimer, QUrl, pyqtSignal, pyqtSlot,
 )
 from PyQt6.QtGui import (
     QBrush, QColor, QConicalGradient, QDragEnterEvent, QDropEvent, QFont,
@@ -29,10 +29,51 @@ from PyQt6.QtGui import (
     QPen, QPixmap, QRadialGradient, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
+    QApplication, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
+    QLabel, QLineEdit, QMainWindow, QPushButton, QScrollArea, QSizePolicy,
+    QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
+
+# Desktop Presentation Engine integration: QWebEngineView hosts the SAME
+# React Presentation Engine (registry.js/PresentationSurface.jsx/
+# audioFx.js) the web frontend already uses — see _build_content_panel()
+# below and desktop-presentation-main.jsx's own header for the full
+# architecture. Guarded like every other less-universal dependency in this
+# project (sounddevice, winsdk) so a desktop install missing PyQt6-
+# WebEngine degrades to the old plain-text panel rather than crashing
+# startup outright. QWebChannel carries the ONE bidirectional signal this
+# integration needs (see _PresentationBridge below) — everything else
+# (content/status/log/sys/etc.) flows one-way, Python -> JS, via
+# runJavaScript(), never needing the channel at all.
+try:
+    from PyQt6.QtWebEngineWidgets import QWebEngineView
+    from PyQt6.QtWebEngineCore import QWebEngineSettings
+    from PyQt6.QtWebChannel import QWebChannel
+    _WEBENGINE_OK = True
+except ImportError:
+    QWebEngineView = None
+    QWebEngineSettings = None
+    QWebChannel = None
+    _WEBENGINE_OK = False
+
+
+class _PresentationBridge(QObject):
+    """The ONE bidirectional piece of the desktop Presentation Engine
+    integration — see _build_content_panel()'s own docstring for why
+    everything else is one-way. The embedded page calls
+    setPresentationActive(bool) whenever its own `content` state becomes
+    non-null/null (see desktop-presentation-main.jsx) so the native HUD
+    can defocus the orb/face — the SAME cinematic contract App.jsx's own
+    .identity-stage-defocused class implements on the web (see
+    index.css) — while a presentation is the visual focus. Deliberately
+    NOT used for content delivery itself (show_content()'s existing
+    runJavaScript() push already covers that, and reusing it here would
+    just be a second, redundant transport for the same data)."""
+    presentationFocusChanged = pyqtSignal(bool)
+
+    @pyqtSlot(bool)
+    def setPresentationActive(self, active: bool) -> None:
+        self.presentationFocusChanged.emit(bool(active))
 
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -42,6 +83,42 @@ def _base_dir() -> Path:
 BASE_DIR   = _base_dir()
 CONFIG_DIR = BASE_DIR / "config"
 API_FILE   = CONFIG_DIR / "api_keys.json"
+
+_local_static_server = None   # keeps the ThreadingHTTPServer instance/thread alive
+
+
+def _start_local_static_server(directory: Path) -> int:
+    """Desktop Presentation Engine integration: serves frontend/dist/ over
+    a real http://127.0.0.1 origin for the embedded QWebEngineView — see
+    _build_content_panel()'s own comment for the real, confirmed bug this
+    fixes (Vite's root-absolute asset paths + ES module scripts both
+    misbehave under a file:// origin). A separate, isolated,
+    loopback-only server — NOT dashboard/server.py's FastAPI app (which
+    also runs in this same process): reusing that would mean either
+    mounting StaticFiles on a real production server that may not even
+    have a frontend/dist directory (Render builds the frontend
+    separately — see .env.example), or risking route conflicts with its
+    many existing endpoints. This one has none of that surface: it knows
+    how to do exactly one thing, serve static files from one directory,
+    bound to loopback only, for this desktop process's own lifetime.
+
+    Idempotent — a second call returns the SAME already-running server's
+    port rather than starting a duplicate (only one embedded view exists
+    per process, but this stays safe even if that ever changes).
+    Binding to port 0 lets the OS pick any free port, avoiding a fixed-
+    port collision with the dashboard's own 8000/8001."""
+    global _local_static_server
+    if _local_static_server is not None:
+        return _local_static_server.server_address[1]
+
+    import functools
+    import http.server
+
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    _local_static_server = server
+    return server.server_address[1]
 
 
 def _read_full_config() -> dict:
@@ -2456,7 +2533,19 @@ class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
     _audio_level_sig = pyqtSignal(float)     # real playback amplitude (0..1) → HudCanvas, thread-safe like _state_sig
-    _content_sig    = pyqtSignal(str, str)   # (title, text) — thread-safe content display
+    # Desktop Presentation Engine integration: both carry a JSON-encoded
+    # dashboard-shaped message ({"type": "content"/"status"/"sys"/...})
+    # pushed into the embedded QWebEngineView via runJavaScript() — see
+    # _push_to_presentation_webview() below. Two separate signals (not
+    # one) purely so show_content()'s direct-call path and
+    # receive_dashboard_message()'s dashboard-local-sink path stay
+    # textually distinct at the emit site, which is what lets
+    # receive_dashboard_message() cleanly skip "content"-type messages
+    # (show_content() already delivers those — see that method's own
+    # docstring for why forwarding both would double-deliver the same
+    # presentation).
+    _content_sig      = pyqtSignal(str)   # show_content() -> "content" messages only
+    _dashboard_msg_sig = pyqtSignal(str)  # receive_dashboard_message() -> everything else
     _reconfig_sig   = pyqtSignal()           # trigger setup overlay from any thread
     _camera_sig     = pyqtSignal(bytes)      # show camera frame preview (small overlay)
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
@@ -2637,7 +2726,8 @@ class MainWindow(QMainWindow):
         self._log_sig.connect(self._log.append_log)
         self._state_sig.connect(self._apply_state)
         self._audio_level_sig.connect(self._apply_audio_level)
-        self._content_sig.connect(self._show_content)
+        self._content_sig.connect(self._push_to_presentation_webview)
+        self._dashboard_msg_sig.connect(self._push_to_presentation_webview)
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
         self._cam_stream_sig.connect(self._on_cam_stream)
@@ -3545,8 +3635,23 @@ class MainWindow(QMainWindow):
 
     def _build_content_panel(self) -> QWidget:
         """
-        Collapsible panel below the HUD — shows search results, news, briefings.
-        Hidden by default; appears when show_content() is called.
+        Collapsible panel below the HUD — hosts the real Presentation
+        Engine (weather/calendar/search/etc.) via an embedded
+        QWebEngineView loading frontend/dist/desktop.html, the SAME React
+        components (PresentationSurface/registry.js/audioFx.js) the web
+        frontend already uses — see desktop-presentation-main.jsx's own
+        header for the full architecture and this class's
+        _push_to_presentation_webview()/receive_dashboard_message() for
+        how data reaches it. Hidden by default; appears the first time
+        show_content() is called and then stays docked for the rest of
+        the session (dismissing a specific presentation clears its
+        content but doesn't collapse this panel again — the same
+        "ContentPanel returns null, the surrounding layout doesn't
+        resize" behavior the web frontend already has).
+
+        Falls back to the old plain-text QTextEdit panel if PyQt6-
+        WebEngine isn't installed (_WEBENGINE_OK — see this module's own
+        import guard) rather than crashing desktop startup outright.
         """
         w = QWidget()
         w.setObjectName("ContentPanel")
@@ -3559,94 +3664,177 @@ class MainWindow(QMainWindow):
         w.hide()
 
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(12, 7, 12, 8)
-        lay.setSpacing(5)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
 
-        # ── header row ───────────────────────────────────────────────────────
-        hdr = QHBoxLayout(); hdr.setSpacing(6)
-
-        dot = QLabel("◈")
-        dot.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
-        dot.setStyleSheet(f"color: {C.PRI}; background: transparent;")
-        hdr.addWidget(dot)
-
-        self._content_title_lbl = QLabel("BRIEFING")
-        self._content_title_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
-        self._content_title_lbl.setStyleSheet(
-            f"color: {C.PRI}; background: transparent; letter-spacing: 1px;"
-        )
-        hdr.addWidget(self._content_title_lbl)
-        hdr.addStretch()
-
-        self._content_ts_lbl = QLabel("")
-        self._content_ts_lbl.setFont(QFont("Courier New", 7))
-        self._content_ts_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-        hdr.addWidget(self._content_ts_lbl)
-
-        dismiss = QPushButton("DISMISS  ✕")
-        dismiss.setFont(QFont("Courier New", 7))
-        dismiss.setFixedHeight(18)
-        dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
-        dismiss.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {C.TEXT_DIM};
-                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 0 5px;
-            }}
-            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
-        """)
-        dismiss.clicked.connect(w.hide)
-        hdr.addWidget(dismiss)
-        lay.addLayout(hdr)
-
-        # ── separator ─────────────────────────────────────────────────────────
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER};"); lay.addWidget(sep)
-
-        # ── text display ──────────────────────────────────────────────────────
-        self._content_display = QTextEdit()
-        self._content_display.setReadOnly(True)
-        self._content_display.setFont(QFont("Courier New", 8))
-        self._content_display.setMinimumHeight(60)
-        self._content_display.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        self._content_display.setStyleSheet(f"""
-            QTextEdit {{
-                background: {C.DARK};
-                color: {C.TEXT};
-                border: 1px solid {C.BORDER};
-                border-radius: 3px;
-                padding: 6px 8px;
-                selection-background-color: {C.PRI_GHO};
-            }}
-            QScrollBar:vertical {{
-                background: {C.BG}; width: 6px; border: none;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {C.BORDER_B}; border-radius: 3px; min-height: 16px;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0; border: none;
-            }}
-        """)
-        lay.addWidget(self._content_display)
+        if _WEBENGINE_OK:
+            self._content_webview = QWebEngineView()
+            self._content_webview.setMinimumHeight(60)
+            self._content_webview.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            # Cinematic presentation focus: the ONE bidirectional wire in
+            # this integration (see _PresentationBridge's own docstring)
+            # — the embedded page tells native Qt when a presentation is
+            # active so the orb/face can defocus, the same contract
+            # App.jsx's .identity-stage-defocused implements on the web.
+            self._presentation_bridge = _PresentationBridge()
+            self._presentation_bridge.presentationFocusChanged.connect(self._set_presentation_focus)
+            self._presentation_channel = QWebChannel(self._content_webview.page())
+            self._presentation_channel.registerObject("presentationBridge", self._presentation_bridge)
+            self._content_webview.page().setWebChannel(self._presentation_channel)
+            # A transparent Qt background behind the page's own dark
+            # background (see index.css's body{background:var(--bg)})
+            # avoids a white flash while the local page is still loading.
+            self._content_webview.page().setBackgroundColor(QColor(C.PANEL))
+            # Real bug found via actual verification (Chromium DevTools
+            # console against the live embedded page): Chromium's
+            # autoplay policy blocks a page's AudioContext from starting
+            # until a genuine user gesture happens INSIDE that page — but
+            # nobody ever clicks inside this embedded view (all real
+            # interaction is with the native Qt HUD/mic), so audioFx.js's
+            # cinematic cues would silently never play, forever, on
+            # desktop. This embedded content is trusted (it's this app's
+            # own bundle, not third-party web content), so disabling the
+            # gesture requirement here is the correct fix, not a workaround.
+            self._content_webview.settings().setAttribute(
+                QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False
+            )
+            desktop_html = BASE_DIR / "frontend" / "dist" / "desktop.html"
+            if desktop_html.exists():
+                # Real bug found via actual verification (Chromium DevTools
+                # against the live embedded page — not assumed): Vite emits
+                # its bundle references as root-absolute paths
+                # ("/assets/desktop-X.js"). Loaded via QUrl.fromLocalFile()
+                # (a file:// origin), that resolves to the filesystem ROOT
+                # (C:\assets\...), not frontend/dist/assets/ — the script
+                # 404s silently and NOTHING ever mounts (confirmed:
+                # window.__jarvisBridge and window.QWebChannel were both
+                # still undefined after a real weather query). ES module
+                # scripts are also unreliable under file:// in Chromium
+                # regardless (fetch()-based imports hit the file:// CORS
+                # wall). Serving over a real http://127.0.0.1 origin (see
+                # _start_local_static_server() below) fixes both at once —
+                # absolute paths resolve correctly, and it's a real origin
+                # modules can load under.
+                port = _start_local_static_server(BASE_DIR / "frontend" / "dist")
+                self._content_webview.setUrl(QUrl(f"http://127.0.0.1:{port}/desktop.html"))
+            else:
+                # Real, disclosed degraded state — never a silent blank
+                # panel: the frontend simply hasn't been built yet
+                # (`cd frontend && npm run build`) on this machine.
+                self._content_webview.setHtml(
+                    "<body style='background:#01131f;color:#7fa;"
+                    "font-family:monospace;padding:16px;'>"
+                    "Presentation Engine unavailable — run "
+                    "<code>npm run build</code> in frontend/.</body>"
+                )
+            lay.addWidget(self._content_webview)
+        else:
+            self._content_webview = None
+            self._presentation_bridge = None
+            self._content_display = QTextEdit()
+            self._content_display.setReadOnly(True)
+            self._content_display.setFont(QFont("Courier New", 8))
+            self._content_display.setMinimumHeight(60)
+            self._content_display.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            )
+            self._content_display.setStyleSheet(f"""
+                QTextEdit {{
+                    background: {C.DARK};
+                    color: {C.TEXT};
+                    border: 1px solid {C.BORDER};
+                    border-radius: 3px;
+                    padding: 6px 8px;
+                    selection-background-color: {C.PRI_GHO};
+                }}
+                QScrollBar:vertical {{
+                    background: {C.BG}; width: 6px; border: none;
+                }}
+                QScrollBar::handle:vertical {{
+                    background: {C.BORDER_B}; border-radius: 3px; min-height: 16px;
+                }}
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                    height: 0; border: none;
+                }}
+            """)
+            lay.setContentsMargins(12, 7, 12, 8)
+            lay.addWidget(self._content_display)
 
         return w
 
-    def _show_content(self, title: str, text: str):
-        """Slot — runs on Qt main thread. Updates and shows the content panel."""
-        import time as _time
-        self._content_title_lbl.setText(title.upper()[:48])
-        self._content_ts_lbl.setText(_time.strftime("%H:%M:%S"))
-        self._content_display.setPlainText(text)
-        self._content_display.moveCursor(
-            self._content_display.textCursor().MoveOperation.Start
-        )
+    def _push_to_presentation_webview(self, msg_json: str) -> None:
+        """Slot — runs on the Qt main thread (both _content_sig and
+        _dashboard_msg_sig connect here — see their own docstrings for why
+        two signals feed one slot). Pushes the message into the embedded
+        Presentation Engine view via window.__jarvisBridge.receive() (see
+        desktopBridge.js) — a plain runJavaScript() call, not QWebChannel:
+        this integration is one-directional (Python -> JS) only, since
+        dismissing a presentation is a purely local React state change
+        with no need to notify Python back (mirrors the web frontend's
+        own DISMISS_CONTENT dispatch exactly).
+
+        json.dumps() has already produced valid JS-object-literal syntax,
+        so it's embedded directly as the call's argument — no further
+        escaping needed, and no double-encoding.
+
+        First real "content" message docks the panel open, same as the
+        old plain-text panel did — see _build_content_panel()'s own
+        docstring for why it deliberately does NOT auto-collapse again
+        on a later dismiss."""
+        if self._content_webview is not None:
+            self._content_webview.page().runJavaScript(
+                f"window.__jarvisBridge && window.__jarvisBridge.receive({msg_json});"
+            )
+        else:
+            # Fallback panel (_WEBENGINE_OK is False) — best-effort plain
+            # text for a "content" message only; status/log/sys/etc. have
+            # no equivalent rendering in the old plain panel and are
+            # simply not shown there (they still reach write_log()
+            # separately for anything that matters as a transcript line).
+            try:
+                msg = json.loads(msg_json)
+            except Exception:
+                return
+            if msg.get("type") != "content":
+                return
+            import time as _time
+            self._content_display.setPlainText(
+                f"{msg.get('title', '')}\n{_time.strftime('%H:%M:%S')}\n\n{msg.get('text', '')}"
+            )
+            self._content_display.moveCursor(
+                self._content_display.textCursor().MoveOperation.Start
+            )
+
         first_show = not self._content_panel.isVisible()
         self._content_panel.show()
         if first_show:
             total = self._center_split.height()
             self._center_split.setSizes([max(total - 220, 120), 220])
+
+    def _set_presentation_focus(self, active: bool) -> None:
+        """Slot — runs on the Qt main thread (QWebChannel invokes slots on
+        the thread that owns the QObject, which is this one). Dims the
+        native orb/face stack while a presentation is the visual focus —
+        the SAME cinematic contract App.jsx's .identity-stage-defocused
+        class implements on the web (opacity-only here, not blur:
+        HudCanvas/SaranaFaceCanvas repaint continuously via their own
+        timers, and a QGraphicsBlurEffect recompositing every frame would
+        be real, avoidable render cost for a purely cosmetic dim — see
+        this method's own restraint on that point)."""
+        target = 0.72 if active else 1.0
+        effect = self._hud_cam_stack.graphicsEffect()
+        if not isinstance(effect, QGraphicsOpacityEffect):
+            effect = QGraphicsOpacityEffect(self._hud_cam_stack)
+            self._hud_cam_stack.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(320)
+        anim.setStartValue(effect.opacity())
+        anim.setEndValue(target)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._presentation_focus_anim = anim   # keep a reference alive until it finishes
 
     def _build_footer(self) -> QWidget:
         w = QWidget()
@@ -4254,17 +4442,46 @@ class JarvisUI:
         """Thread-safe: display content in the panel below the HUD.
 
         `presentation` (Track 3's structured payload — see
-        core/assistant_surface.py's own Protocol signature) is accepted
-        for call-site compatibility with the web frontend's
-        PresentationSurface but deliberately NOT rendered here: the
-        desktop HUD keeps showing plain title/text exactly as before.
-        Building an equivalent PyQt6 glass-surface renderer for weather/
-        calendar/table/etc. is a genuinely separate, disproportionate
-        effort from this phase's actual scope (the web frontend is
-        where the cinematic HUD work already lives — see
-        IdentityTransition.jsx) and is a documented future extension,
-        not a silent gap."""
-        self._win._content_sig.emit(title[:48], text[:4000])
+        core/assistant_surface.py's own Protocol signature) now DOES
+        render on desktop: the panel below the HUD is a QWebEngineView
+        hosting the SAME React Presentation Engine the web frontend uses
+        (PresentationSurface.jsx/registry.js/audioFx.js, unmodified — see
+        _build_content_panel()/desktop-presentation-main.jsx). This
+        method's own message shape mirrors dashboard/server.py's
+        broadcast_content() exactly ({"type": "content", "title", "text",
+        "presentation"}) so the embedded page's desktopBridge.js handles
+        it through the identical code path a real browser client's
+        "content" WS message already uses — never a second Presentation
+        Engine, never a second payload format.
+
+        Title/text are NOT pre-truncated here anymore (the old [:48]/
+        [:4000] were a plain-QTextEdit-specific concession) — the real
+        Presentation Engine already handles arbitrarily-shaped
+        title/text/data the same way the web frontend does."""
+        msg_json = json.dumps({"type": "content", "title": title, "text": text, "presentation": presentation})
+        self._win._content_sig.emit(msg_json)
+
+    def receive_dashboard_message(self, msg: dict) -> None:
+        """Desktop Presentation Engine integration — see
+        core/assistant_surface.py's own docstring for this method and
+        dashboard.DashboardServer.set_local_sink() for how main.py wires
+        it. Deliberately SKIPS "content" messages: show_content() above
+        already delivers every presentation-worthy result to this same
+        embedded view directly (main.py calls both unconditionally at
+        every real call site — see get_weather/get_calendar_events/
+        web_search in main.py) — forwarding "content" here too would
+        push the SAME presentation into the embedded page twice via two
+        separately-JSON-encoded messages, which PresentationSurface's own
+        materialize/update phase detection could read as two distinct
+        updates instead of one (a visible double-flicker), not just a
+        harmless duplicate. Every other message type (status,
+        jarvis_mode_changed, log, sys, ...) has no such direct-call
+        equivalent and is forwarded exactly as received — see
+        desktopBridge.js for what the embedded page actually does with
+        each."""
+        if not isinstance(msg, dict) or msg.get("type") == "content":
+            return
+        self._win._dashboard_msg_sig.emit(json.dumps(msg))
 
     def prompt_reconfig(self):
         """Thread-safe: show the API key setup overlay (e.g. after an auth error)."""

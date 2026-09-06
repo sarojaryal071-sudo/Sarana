@@ -181,14 +181,55 @@ def test_calendar_tzinfo_never_defaults_to_utc_when_web_timezone_set() -> None:
 # ── get_calendar_events ─────────────────────────────────────────────────
 
 def test_get_calendar_events_not_connected() -> None:
+    """Store AND auth both configured, but this account has no saved
+    credentials row -- the genuine "never connected" case, distinct from
+    "not configured in this environment" below (real bug fix: these two
+    used to collapse into one always-[CALENDAR_NOT_CONNECTED] message —
+    see main.py's _calendar_unavailable_result())."""
     async def _run():
         jarvis = _jarvis()
-        with patch("main.calendar_store.is_configured", return_value=False):
+        with patch("main.calendar_store.is_configured", return_value=True), \
+             patch("main.calendar_auth.is_configured", return_value=True), \
+             patch("main.calendar_store.load_credentials", return_value=None):
             fc = _FakeFunctionCall("get_calendar_events", {"start": "2026-08-29T00:00:00", "end": "2026-08-30T00:00:00"})
             resp = await jarvis._execute_tool(fc)
         assert "[CALENDAR_NOT_CONNECTED]" in resp.response["result"]
     asyncio.run(_run())
     print("test_get_calendar_events_not_connected: PASS")
+
+
+def test_get_calendar_events_unavailable_when_store_not_configured() -> None:
+    """Real bug fix: no DATABASE_URL (calendar_store unconfigured) is an
+    ENVIRONMENT gap, not "the user hasn't connected Calendar" -- a desktop
+    process with no DATABASE_URL used to claim the latter even for an
+    account that genuinely has Calendar connected elsewhere (e.g. the
+    deployed web app). Must say [CALENDAR_UNAVAILABLE], never
+    [CALENDAR_NOT_CONNECTED]."""
+    async def _run():
+        jarvis = _jarvis()
+        with patch("main.calendar_store.is_configured", return_value=False), \
+             patch("main.calendar_auth.is_configured", return_value=True):
+            fc = _FakeFunctionCall("get_calendar_events", {"start": "2026-08-29T00:00:00", "end": "2026-08-30T00:00:00"})
+            resp = await jarvis._execute_tool(fc)
+        assert "[CALENDAR_UNAVAILABLE]" in resp.response["result"]
+        assert "[CALENDAR_NOT_CONNECTED]" not in resp.response["result"]
+    asyncio.run(_run())
+    print("test_get_calendar_events_unavailable_when_store_not_configured: PASS")
+
+
+def test_get_calendar_events_unavailable_when_oauth_not_configured() -> None:
+    """Same distinction, the other half: DATABASE_URL set but Google OAuth
+    env vars (GOOGLE_CLIENT_ID/_SECRET/_REDIRECT_URI) missing -- still an
+    environment gap, not an account state."""
+    async def _run():
+        jarvis = _jarvis()
+        with patch("main.calendar_store.is_configured", return_value=True), \
+             patch("main.calendar_auth.is_configured", return_value=False):
+            fc = _FakeFunctionCall("get_calendar_events", {"start": "2026-08-29T00:00:00", "end": "2026-08-30T00:00:00"})
+            resp = await jarvis._execute_tool(fc)
+        assert "[CALENDAR_UNAVAILABLE]" in resp.response["result"]
+    asyncio.run(_run())
+    print("test_get_calendar_events_unavailable_when_oauth_not_configured: PASS")
 
 
 def test_get_calendar_events_success_uses_resolved_tzinfo() -> None:
@@ -252,6 +293,34 @@ def test_get_calendar_events_broadcasts_a_calendar_presentation_with_real_marked
         assert presentation["data"]["events"] == day_events
     asyncio.run(_run())
     print("test_get_calendar_events_broadcasts_a_calendar_presentation_with_real_marked_dates: PASS")
+
+
+def test_get_calendar_events_calls_ui_show_content_even_without_a_dashboard() -> None:
+    """Real, disclosed bug fix: the calendar presentation payload used to
+    be built and delivered ONLY inside `if self._dashboard:`, so a desktop
+    session (which has no dashboard WS client of its own listening) never
+    reached self.ui.show_content() — the one path a desktop-side
+    Presentation Engine consumer can ever receive it through. Must fire
+    unconditionally, dashboard or not."""
+    async def _run():
+        jarvis = _jarvis()
+        assert jarvis._dashboard is None
+        fake_creds = _valid_credentials()
+        day_events = [{"id": "ev1", "title": "Standup", "start": "2026-09-18T09:00:00+00:00",
+                       "end": "2026-09-18T09:30:00+00:00", "location": "", "all_day": False}]
+        with patch("main.calendar_store.is_configured", return_value=True), \
+             patch.object(JarvisLive, "_get_calendar_credentials", return_value=fake_creds), \
+             patch("main.calendar_actions.get_events", return_value=day_events), \
+             patch("main.calendar_actions.get_month_marked_dates", return_value=["2026-09-18"]), \
+             patch.object(jarvis.ui, "show_content") as mock_show:
+            fc = _FakeFunctionCall("get_calendar_events", {"start": "2026-09-18T00:00:00", "end": "2026-09-19T00:00:00"})
+            await jarvis._execute_tool(fc)
+        mock_show.assert_called_once()
+        title, text, presentation = mock_show.call_args.args
+        assert presentation["type"] == "calendar"
+        assert presentation["data"]["events"] == day_events
+    asyncio.run(_run())
+    print("test_get_calendar_events_calls_ui_show_content_even_without_a_dashboard: PASS")
 
 
 def test_get_calendar_events_multi_day_range_has_no_focus_date() -> None:
@@ -325,7 +394,7 @@ def test_find_free_time_not_connected() -> None:
         with patch("main.calendar_store.is_configured", return_value=False):
             fc = _FakeFunctionCall("find_free_time", {"start": "2026-08-29T08:00:00", "end": "2026-08-29T18:00:00"})
             resp = await jarvis._execute_tool(fc)
-        assert "[CALENDAR_NOT_CONNECTED]" in resp.response["result"]
+        assert "[CALENDAR_UNAVAILABLE]" in resp.response["result"]
     asyncio.run(_run())
     print("test_find_free_time_not_connected: PASS")
 
@@ -353,7 +422,7 @@ def test_create_event_not_connected() -> None:
         with patch("main.calendar_store.is_configured", return_value=False):
             fc = _FakeFunctionCall("create_calendar_event", {"title": "Dentist", "start": "2026-08-29T14:00:00"})
             resp = await jarvis._execute_tool(fc)
-        assert "[CALENDAR_NOT_CONNECTED]" in resp.response["result"]
+        assert "[CALENDAR_UNAVAILABLE]" in resp.response["result"]
     asyncio.run(_run())
     print("test_create_event_not_connected: PASS")
 
@@ -466,7 +535,7 @@ def test_update_event_not_connected() -> None:
         with patch("main.calendar_store.is_configured", return_value=False):
             fc = _FakeFunctionCall("update_calendar_event", {"event_id": "ev1"})
             resp = await jarvis._execute_tool(fc)
-        assert "[CALENDAR_NOT_CONNECTED]" in resp.response["result"]
+        assert "[CALENDAR_UNAVAILABLE]" in resp.response["result"]
     asyncio.run(_run())
     print("test_update_event_not_connected: PASS")
 
@@ -512,7 +581,7 @@ def test_delete_event_not_connected() -> None:
         with patch("main.calendar_store.is_configured", return_value=False):
             fc = _FakeFunctionCall("delete_calendar_event", {"event_id": "ev1"})
             resp = await jarvis._execute_tool(fc)
-        assert "[CALENDAR_NOT_CONNECTED]" in resp.response["result"]
+        assert "[CALENDAR_UNAVAILABLE]" in resp.response["result"]
     asyncio.run(_run())
     print("test_delete_event_not_connected: PASS")
 
@@ -546,15 +615,37 @@ def test_calendar_tools_registered_and_not_desktop_only() -> None:
 
 def test_calendar_tools_honestly_unavailable_on_desktop_without_connection() -> None:
     """Desktop is NOT gated as desktop-only -- it just honestly reports
-    not-connected the same way a web session without a connection does."""
+    unavailable the same way a web session with no Calendar configuration
+    does (this is the real environment-not-configured case a bare desktop
+    process with no DATABASE_URL/.env genuinely hits)."""
     async def _run():
         jarvis = JarvisLive(HeadlessSurface())   # auto_start=True, desktop
         with patch("main.calendar_store.is_configured", return_value=False):
             fc = _FakeFunctionCall("get_calendar_events", {"start": "2026-08-29T00:00:00", "end": "2026-08-30T00:00:00"})
             resp = await jarvis._execute_tool(fc)
-        assert "[CALENDAR_NOT_CONNECTED]" in resp.response["result"]
+        assert "[CALENDAR_UNAVAILABLE]" in resp.response["result"]
     asyncio.run(_run())
     print("test_calendar_tools_honestly_unavailable_on_desktop_without_connection: PASS")
+
+
+def test_calendar_tools_not_connected_on_desktop_when_fully_configured() -> None:
+    """The other half of the same real bug: a desktop process WITH a
+    correctly configured .env (real DATABASE_URL + Google OAuth vars) but
+    an account that genuinely never connected Calendar must still say
+    [CALENDAR_NOT_CONNECTED], not [CALENDAR_UNAVAILABLE] -- configuration
+    and connection are independent facts."""
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface())   # auto_start=True, desktop
+        jarvis._user_profile = {"username": "saroj"}   # a real, resolved account
+        with patch("main.calendar_store.is_configured", return_value=True), \
+             patch("main.calendar_auth.is_configured", return_value=True), \
+             patch("main.calendar_store.load_credentials", return_value=None):
+            fc = _FakeFunctionCall("get_calendar_events", {"start": "2026-08-29T00:00:00", "end": "2026-08-30T00:00:00"})
+            resp = await jarvis._execute_tool(fc)
+        assert "[CALENDAR_NOT_CONNECTED]" in resp.response["result"]
+        assert "[CALENDAR_UNAVAILABLE]" not in resp.response["result"]
+    asyncio.run(_run())
+    print("test_calendar_tools_not_connected_on_desktop_when_fully_configured: PASS")
 
 
 def test_build_config_never_includes_calendar_tokens_in_system_instruction() -> None:
@@ -589,8 +680,11 @@ if __name__ == "__main__":
     test_calendar_tzinfo_falls_back_to_machine_offset_on_desktop()
     test_calendar_tzinfo_never_defaults_to_utc_when_web_timezone_set()
     test_get_calendar_events_not_connected()
+    test_get_calendar_events_unavailable_when_store_not_configured()
+    test_get_calendar_events_unavailable_when_oauth_not_configured()
     test_get_calendar_events_success_uses_resolved_tzinfo()
     test_get_calendar_events_broadcasts_a_calendar_presentation_with_real_marked_dates()
+    test_get_calendar_events_calls_ui_show_content_even_without_a_dashboard()
     test_get_calendar_events_multi_day_range_has_no_focus_date()
     test_get_calendar_events_invalid_dates_asks_instead_of_guessing()
     test_get_calendar_events_api_failure_propagates_honestly()
@@ -611,5 +705,6 @@ if __name__ == "__main__":
     test_delete_event_api_failure_propagates_honestly()
     test_calendar_tools_registered_and_not_desktop_only()
     test_calendar_tools_honestly_unavailable_on_desktop_without_connection()
+    test_calendar_tools_not_connected_on_desktop_when_fully_configured()
     test_build_config_never_includes_calendar_tokens_in_system_instruction()
     print("\nAll calendar-tools tests passed.")

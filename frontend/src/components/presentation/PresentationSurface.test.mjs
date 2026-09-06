@@ -166,7 +166,7 @@ test("production polish: clicking a day filters the ALREADY-FETCHED events clien
 });
 
 test("day cells are real, keyboard-accessible buttons, not click-handler divs", () => {
-  assert.match(calendarSrc, /<button[\s\S]{0,40}type="button"/);
+  assert.match(calendarSrc, /<button[\s\S]{0,80}type="button"/);
   assert.match(calendarSrc, /aria-pressed=\{isSelected\}/);
 });
 

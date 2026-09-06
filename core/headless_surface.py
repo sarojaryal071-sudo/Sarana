@@ -112,3 +112,13 @@ class HeadlessSurface:
             "no interactive setup dialog. Fix config/api_keys.json and "
             "restart the process."
         )
+
+    def receive_dashboard_message(self, msg: dict) -> None:
+        # A genuine no-op: this exists so JarvisLive/main.py can wire
+        # DashboardServer.set_local_sink() unconditionally without caring
+        # which surface it's on. A headless/web deployment's real clients
+        # already receive every one of these messages over their own /ws
+        # connection — there is no embedded desktop view here to forward
+        # them into (see core/assistant_surface.py's own docstring for
+        # this method).
+        pass
