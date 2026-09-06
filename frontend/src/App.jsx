@@ -37,8 +37,16 @@ const SESSION_RETRY_MS = 4000;
 // reporting location as unavailable — never surfaced as an error here,
 // never retried automatically by this function itself (each call site
 // decides its own retry policy, if any).
-function requestAndSendLocation(token) {
-  return getCurrentLocation()
+//
+// Pre-J4 fix: `fresh` (default false, the original passive behavior)
+// forces a genuinely NEW browser fix — maximumAge: 0, enableHighAccuracy:
+// true — for an explicit current-location request (main.py's
+// require_fresh=True tools: get_current_place/find_nearby_places/
+// get_directions). Without this, an explicit "where am I"/"how far away
+// is X" could silently be answered from an old, coarse, OS-cached
+// position instead of a fresh one.
+function requestAndSendLocation(token, { fresh = false } = {}) {
+  return getCurrentLocation(fresh ? { maximumAge: 0, enableHighAccuracy: true } : {})
     .then((fix) => {
       // Permissions foundation: a fix was actually obtained, so the real
       // permission is granted — fold that observation into the shared
@@ -318,8 +326,15 @@ export default function App() {
             // silent fetch-and-send at that point would use location
             // behind the user's back even though no dialog would show.
             // Respect the same effective state everything else does.
+            //
+            // Pre-J4 fix: `msg.fresh` (see dashboard/server.py's
+            // broadcast_location_refresh_request()) distinguishes a
+            // passive background refresh from an explicit current-location
+            // request — only the latter forces a genuinely new,
+            // high-accuracy fix instead of allowing the browser's normal
+            // position cache.
             if (permissionManager.getEffectiveState("location") === "granted") {
-              requestAndSendLocation(state.token);
+              requestAndSendLocation(state.token, { fresh: !!msg.fresh });
             }
             break;
           case "audio_stop":

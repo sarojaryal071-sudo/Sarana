@@ -32,12 +32,20 @@ const DEFAULT_MAX_AGE_MS = 5 * 60 * 1000;
  * now); none of them warrants retrying automatically or alarming the
  * user.
  *
- * @param {{ timeout?: number, maximumAge?: number }} [options]
+ * @param {{ timeout?: number, maximumAge?: number, enableHighAccuracy?: boolean }} [options]
  * @returns {Promise<LocationFix>}
  */
 export function getCurrentLocation({
   timeout = DEFAULT_TIMEOUT_MS,
   maximumAge = DEFAULT_MAX_AGE_MS,
+  // Pre-J4 fix: was previously hardcoded false below for every call. Now
+  // an explicit per-call option -- App.jsx's passive once-per-login fix
+  // still defaults to false (city-level, faster lock, less battery, as
+  // before); an explicit current-location refresh
+  // (requestAndSendLocation(token, { fresh: true })) passes true instead,
+  // since a request like "how far away is X" needs the browser's best
+  // available fix, not the cheapest one.
+  enableHighAccuracy = false,
 } = {}) {
   return new Promise((resolve, reject) => {
     if (typeof navigator === "undefined" || !("geolocation" in navigator)) {
@@ -67,7 +75,7 @@ export function getCurrentLocation({
         reject(err);
       },
       {
-        enableHighAccuracy: false, // city-level is enough; faster lock, less battery
+        enableHighAccuracy,
         timeout,
         maximumAge,
       },

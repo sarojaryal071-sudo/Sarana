@@ -1023,7 +1023,7 @@ class DashboardServer:
         AssistantContext.jsx's STATUS_MESSAGE case)."""
         await self._send_to_clients({"type": "status", "state": state})
 
-    async def broadcast_location_refresh_request(self) -> None:
+    async def broadcast_location_refresh_request(self, fresh: bool = False) -> None:
         """Location capabilities: server -> client signal asking the
         browser to take a fresh navigator.geolocation fix right now (see
         main.py's _get_current_location()) -- reuses the EXISTING /ws
@@ -1031,8 +1031,17 @@ class DashboardServer:
         new transport. Same reasoning as broadcast_state() for staying
         out of self._history: this is a live, one-off request, not
         conversation content worth replaying to a client that connects
-        later."""
-        await self._send_to_clients({"type": "location_refresh_request"})
+        later.
+
+        Pre-J4 fix: `fresh` carries _get_current_location()'s own
+        `require_fresh` through to the browser (see App.jsx's handler) --
+        False for an ordinary passive/background refresh (the browser's
+        normal maximumAge caching is fine), True for an explicit current-
+        position request ("where am I", "how far away is X", "find nearby
+        places"), which must bypass the OS/browser position cache
+        (maximumAge: 0) and ask for enableHighAccuracy: true, rather than
+        risk handing back a stale or coarse fix as if it were current."""
+        await self._send_to_clients({"type": "location_refresh_request", "fresh": fresh})
 
     async def broadcast_camera_vision_request(self, request_id: str, facing: str) -> None:
         """Web live camera vision: server -> client signal asking the

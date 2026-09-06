@@ -1557,7 +1557,23 @@ LOCATION_FRESH_ENOUGH_S = 30
 # before falling back (see that method) -- long enough for a real
 # getCurrentPosition() round trip, short enough not to stall a
 # conversation turn indefinitely.
-LOCATION_REFRESH_TIMEOUT_S = 5.0
+#
+# Pre-J4 fix: this used to be 5.0s, which is LESS than the browser's own
+# getCurrentPosition() timeout (frontend/src/lib/geolocation.js's
+# DEFAULT_TIMEOUT_MS = 8000ms) -- meaning the backend could give up and
+# report "location unavailable" before the browser's own attempt had even
+# finished, despite permission being genuinely granted. Set to that same
+# 8s plus ~2s slack for the /ws round trip in both directions (the
+# refresh-request message out, the sendLocation POST back). If
+# geolocation.js's own timeout ever changes, this should move with it.
+LOCATION_REFRESH_TIMEOUT_S = 10.0
+# A fix this imprecise (in meters) is honestly too coarse to state a
+# specific nearby distance with confidence (e.g. "you are 120 meters from
+# work" when the underlying fix could be off by kilometers) -- see
+# _location_accuracy_note(). Chosen well above ordinary GPS/Wi-Fi-
+# positioning jitter (tens of meters) so it only flags a genuinely poor
+# fix, not routine noise.
+LOCATION_POOR_ACCURACY_M = 1000.0
 # find_nearby_places' own short-lived result cache (see
 # JarvisLive._nearby_cache) -- avoids hammering Overpass for the same
 # query asked twice in a row, without pretending to be a general cache.
@@ -1858,7 +1874,18 @@ class JarvisLive:
         self._last_user_speech = time.monotonic()  # updated on every user utterance
         self._session_log: list[str] = []          # conversation turns for end-of-session summary
 
-        self._enhanced_live = True  # affective dialog + proactive audio; auto-disabled if the server rejects them
+        self._enhanced_live = True  # affective dialog (+ the v1alpha api_version it needs); auto-disabled if the server rejects it
+        # Pre-J4 voice-latency fix: proactive audio (Gemini deciding whether
+        # speech was actually addressed to it before responding at all) is a
+        # documented extra latency source, and was previously turned on
+        # unconditionally by _enhanced_live alongside affective dialog. Split
+        # out here as its own deliberate, OFF-by-default switch so "user
+        # finishes speaking -> JARVIS responds quickly" is the default web
+        # voice behavior. Affective dialog (tone-adaptive voice) is kept —
+        # it wasn't the thing implicated in the response-delay complaint.
+        # Flip this to True (see _build_config()) if a future mode genuinely
+        # wants JARVIS to stay silent for speech not addressed to it.
+        self._proactive_audio = False
         _core_names = {t["name"] for t in TOOL_DECLARATIONS}
         self._plugin_registry = discover_plugins(
             plugins_dir=Path(__file__).resolve().parent / "plugins",
@@ -2529,13 +2556,55 @@ class JarvisLive:
                     )
                 )
             ),
+            # Pre-J4 voice-latency fix: turn-taking used to rely entirely on
+            # Gemini Live's own UNCONFIGURED VAD defaults. Tuned explicitly
+            # here for "respond quickly once the user genuinely finishes,
+            # without cutting off a normal mid-sentence pause or over-
+            # reacting to background noise":
+            #   - start_of_speech_sensitivity=HIGH: don't miss a soft/quick
+            #     start of speech (helps both prompt-start-detection and the
+            #     noisy-environment goal of actually hearing the user).
+            #   - prefix_padding_ms=100: but require ~100ms of sustained
+            #     speech-like audio before committing to "speech started" —
+            #     long enough to filter a one-off noise transient (a car
+            #     horn blip, a cough), short enough not to clip real words.
+            #     This is what keeps HIGH start-sensitivity from just being
+            #     noise-triggered.
+            #   - end_of_speech_sensitivity=HIGH: once real trailing silence
+            #     has actually lasted silence_duration_ms below, commit to
+            #     "user is done" decisively instead of waiting for even more
+            #     confirmation on top of that window — this is the main
+            #     latency fix for "responds too slowly after I stop talking".
+            #   - silence_duration_ms=600: the actual pause length required.
+            #     Deliberately NOT minimized (that was explicitly rejected —
+            #     see the investigation) — 600ms is long enough to ride
+            #     through a normal in-sentence breath/hesitation pause
+            #     (typically well under 500ms) while still feeling prompt.
+            # activity_handling/turn_coverage are left at their existing
+            # defaults — barge-in behavior (main.py's own "Barge-in: Gemini's
+            # own server-side VAD detected..." handling) is unrelated to this
+            # fix and must not change.
+            realtime_input_config=types.RealtimeInputConfig(
+                automatic_activity_detection=types.AutomaticActivityDetection(
+                    start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                    end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                    prefix_padding_ms=100,
+                    silence_duration_ms=600,
+                ),
+            ),
         )
         if self._enhanced_live:
             # Affective dialog: JARVIS hears tone/emotion and adapts its voice.
-            # Proactive audio: JARVIS stays silent when speech isn't addressed
-            # to it (background chatter, talking to someone else in the room).
             cfg["enable_affective_dialog"] = True
-            cfg["proactivity"] = types.ProactivityConfig(proactive_audio=True)
+            if self._proactive_audio:
+                # Proactive audio: JARVIS stays silent when speech isn't
+                # addressed to it (background chatter, talking to someone
+                # else in the room). OFF by default (self._proactive_audio,
+                # set in __init__) — it adds a real extra latency step to
+                # every turn, which directly worked against the "respond
+                # quickly" goal above. Kept available, deliberately, for a
+                # future mode that explicitly wants it.
+                cfg["proactivity"] = types.ProactivityConfig(proactive_audio=True)
         return types.LiveConnectConfig(**cfg)
 
     async def _execute_tool(self, fc) -> types.FunctionResponse:
@@ -2778,7 +2847,12 @@ class JarvisLive:
                         )
 
             elif name == "get_current_place":
-                loc = await self._get_current_location()
+                # require_fresh=True: pre-J4 fix -- "where am I" is exactly
+                # the explicit current-position request _get_current_location()'s
+                # own docstring describes; a stale/passive fix here is how
+                # "quite near my workplace" got reported as "thousands of
+                # meters away" (a coarse fix from before the user moved).
+                loc = await self._get_current_location(require_fresh=True)
                 if not loc:
                     result = self._location_unavailable_result()
                 else:
@@ -2800,14 +2874,17 @@ class JarvisLive:
                         resolved["for"] = rounded
                         resolved["timestamp"] = time.monotonic()
                         self._place_cache = resolved
-                    result = format_place(resolved)
+                    result = format_place(resolved) + self._location_accuracy_note(loc)
 
             elif name == "find_nearby_places":
                 query = (args.get("query") or "").strip()
                 if not query:
                     result = "Please specify what to look for nearby."
                 else:
-                    loc = await self._get_current_location()
+                    # require_fresh=True: "near me" is distance-sensitive in
+                    # the same way get_directions is -- see that branch's
+                    # comment and _location_accuracy_note()'s docstring.
+                    loc = await self._get_current_location(require_fresh=True)
                     if not loc:
                         result = self._location_unavailable_result()
                     else:
@@ -2824,7 +2901,7 @@ class JarvisLive:
                                     query, loc["latitude"], loc["longitude"], radius_arg
                                 ),
                             )
-                            result = format_nearby_places(query, places)
+                            result = format_nearby_places(query, places) + self._location_accuracy_note(loc)
                             if len(self._nearby_cache) >= NEARBY_CACHE_MAX_ENTRIES:
                                 # Small, simple LRU-ish eviction -- no
                                 # library, this is a handful of entries at most.
@@ -2840,7 +2917,13 @@ class JarvisLive:
                 if not destination:
                     result = "Please specify a destination."
                 else:
-                    loc = await self._get_current_location()
+                    # require_fresh=True: pre-J4 fix -- "how far am I from
+                    # X"/"navigate me" is a genuinely distance-sensitive
+                    # request (see the investigation's "thousands of metres
+                    # away" report), so a stale passive fix is no longer
+                    # accepted silently here; see _get_current_location()'s
+                    # own require_fresh semantics.
+                    loc = await self._get_current_location(require_fresh=True)
                     if not loc:
                         result = self._location_unavailable_result()
                     else:
@@ -2849,6 +2932,7 @@ class JarvisLive:
                             result = f"I couldn't find a place called '{destination}'."
                         else:
                             dlat, dlon, dlabel = dest_geo
+                            accuracy_note = self._location_accuracy_note(loc)
                             try:
                                 route = await loop.run_in_executor(
                                     None,
@@ -2858,6 +2942,7 @@ class JarvisLive:
                                     f"Destination: {dlabel}. Mode: {route['mode']}. "
                                     f"Distance: {format_distance(route['distance_m'])}. "
                                     f"Estimated time: {round(route['duration_s'] / 60)} minutes."
+                                    f"{accuracy_note}"
                                 )
                             except Exception as e:
                                 # Honest degradation -- see actions/routing.py's
@@ -2871,6 +2956,7 @@ class JarvisLive:
                                     f"isn't available right now, but you may share this "
                                     f"approximate straight-line distance if useful. Never state "
                                     f"a travel time you don't actually have."
+                                    f"{accuracy_note}"
                                 )
 
             elif name == "refresh_location":
@@ -5101,6 +5187,31 @@ class JarvisLive:
             return LOCATION_DENIED_RESULT
         return LOCATION_UNAVAILABLE_RESULT
 
+    def _location_accuracy_note(self, loc: dict) -> str:
+        """Pre-J4 fix: the browser's own position.coords.accuracy (meters)
+        was captured in self._session_location and then never used
+        anywhere -- so a genuinely poor fix (e.g. accuracy=3000m, which can
+        happen with enableHighAccuracy=false network/IP-based positioning)
+        was presented with the same confidence as a precise one, letting
+        JARVIS state something like "you are 120 meters from work" when the
+        underlying fix could be off by kilometers.
+
+        Returns "" when accuracy is fine (including when it's missing/
+        unparseable -- an old fix predating this fix would have no
+        `accuracy` key; never invent one), or a short, honest caveat
+        sentence to append to a distance/place-dependent tool result when
+        accuracy is worse than LOCATION_POOR_ACCURACY_M. Deliberately just
+        a caveat, not a refusal -- an approximate answer clearly labeled as
+        approximate is still useful; a confidently wrong one isn't."""
+        acc = loc.get("accuracy") if loc else None
+        if not isinstance(acc, (int, float)) or acc <= LOCATION_POOR_ACCURACY_M:
+            return ""
+        return (
+            f" (Note: this device's location fix is only accurate to "
+            f"about {format_distance(acc)} right now, so treat this as "
+            f"approximate, not exact.)"
+        )
+
     async def _get_current_location(
         self, *, require_fresh: bool = False,
     ) -> dict | None:
@@ -5174,7 +5285,15 @@ class JarvisLive:
         self._location_refresh_waiters.append(waiter)
         try:
             try:
-                await self._dashboard.broadcast_location_refresh_request()
+                # Pre-J4 fix: `fresh=require_fresh` tells the browser side
+                # (App.jsx's "location_refresh_request" handler) whether
+                # this is a passive/background refresh (normal caching is
+                # fine) or an explicit current-position request -- which
+                # must ask navigator.geolocation for a genuinely NEW fix
+                # (maximumAge: 0) at enableHighAccuracy: true, rather than
+                # potentially handing back an OS-cached, possibly-coarse
+                # fix as if it were current. See geolocation.js/App.jsx.
+                await self._dashboard.broadcast_location_refresh_request(fresh=require_fresh)
             except Exception as e:
                 print(f"[JARVIS] Location refresh request failed to send: {e}")
                 return None if require_fresh else loc

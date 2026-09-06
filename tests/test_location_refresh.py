@@ -14,7 +14,7 @@ import time
 from unittest.mock import patch
 
 from core.headless_surface import HeadlessSurface
-from main import JarvisLive, LOCATION_MAX_AGE_S
+from main import JarvisLive, LOCATION_MAX_AGE_S, LOCATION_REFRESH_TIMEOUT_S
 
 
 class _FakeFunctionCall:
@@ -29,9 +29,11 @@ class _FakeDashboardForRefresh:
     refresh request without a real dashboard/WebSocket."""
     def __init__(self):
         self.broadcast_calls = 0
+        self.fresh_calls = []  # pre-J4 fix: records each `fresh` value passed through
 
-    async def broadcast_location_refresh_request(self):
+    async def broadcast_location_refresh_request(self, fresh: bool = False):
         self.broadcast_calls += 1
+        self.fresh_calls.append(fresh)
 
 
 def _stale_location(age_s: float) -> dict:
@@ -224,6 +226,62 @@ def test_logout_during_refresh_leaves_session_marked_logged_out() -> None:
     print("test_logout_during_refresh_leaves_session_marked_logged_out: PASS")
 
 
+# ── pre-J4 fix: backend refresh timeout aligned with the browser's own ─
+
+def test_refresh_timeout_is_bounded_and_covers_the_browsers_own_timeout() -> None:
+    """The confirmed bug: LOCATION_REFRESH_TIMEOUT_S (was 5.0s) used to be
+    LESS than frontend/src/lib/geolocation.js's own getCurrentPosition()
+    timeout (8s), so the backend could give up before the browser's own
+    attempt even finished. Must now be >= 8s (with round-trip slack), but
+    still bounded -- not blown out to an excessive value."""
+    assert LOCATION_REFRESH_TIMEOUT_S >= 8.0
+    assert LOCATION_REFRESH_TIMEOUT_S <= 15.0
+    print("test_refresh_timeout_is_bounded_and_covers_the_browsers_own_timeout: PASS")
+
+
+# ── pre-J4 fix: `fresh` passed through to the browser refresh request ──
+
+def test_passive_refresh_requests_fresh_false() -> None:
+    """require_fresh=False (weather/get_current_place/etc.'s stale-fix
+    case) must ask the browser for an ordinary refresh -- normal
+    maximumAge caching is fine, no need to force enableHighAccuracy."""
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._dashboard = _FakeDashboardForRefresh()
+        jarvis._session_location = _stale_location(LOCATION_MAX_AGE_S + 1)
+
+        async def _respond_soon():
+            await asyncio.sleep(0.02)
+            jarvis._set_session_location(9.0, 9.0, 5.0)
+
+        asyncio.create_task(_respond_soon())
+        await jarvis._get_current_location(require_fresh=False)
+        assert jarvis._dashboard.fresh_calls == [False]
+    asyncio.run(_run())
+    print("test_passive_refresh_requests_fresh_false: PASS")
+
+
+def test_explicit_fresh_refresh_requests_fresh_true() -> None:
+    """require_fresh=True ('where am I', 'how far away is X') must ask
+    the browser for a genuinely new, high-accuracy fix -- this is the
+    pre-J4 fix for a stale/coarse fix answering an explicit current-
+    location question (see App.jsx's location_refresh_request handler)."""
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._dashboard = _FakeDashboardForRefresh()
+        jarvis._session_location = _stale_location(100)   # older than LOCATION_FRESH_ENOUGH_S
+
+        async def _respond_soon():
+            await asyncio.sleep(0.02)
+            jarvis._set_session_location(9.0, 9.0, 5.0)
+
+        asyncio.create_task(_respond_soon())
+        await jarvis._get_current_location(require_fresh=True)
+        assert jarvis._dashboard.fresh_calls == [True]
+    asyncio.run(_run())
+    print("test_explicit_fresh_refresh_requests_fresh_true: PASS")
+
+
 def test_multiple_overlapping_refreshes_newest_fix_wins_regardless_of_arrival_order() -> None:
     """Race #3: an older fix arriving AFTER a newer one must not win --
     see test_location_context.py's dedicated fix_timestamp tests for the
@@ -263,6 +321,9 @@ if __name__ == "__main__":
     test_waiter_is_removed_after_use_no_leak()
     test_refresh_location_tool_success()
     test_refresh_location_tool_honest_failure_when_nothing_arrives()
+    test_refresh_timeout_is_bounded_and_covers_the_browsers_own_timeout()
+    test_passive_refresh_requests_fresh_false()
+    test_explicit_fresh_refresh_requests_fresh_true()
     test_identity_switch_during_refresh_never_leaks_into_waiting_call()
     test_logout_during_refresh_leaves_session_marked_logged_out()
     test_multiple_overlapping_refreshes_newest_fix_wins_regardless_of_arrival_order()

@@ -17,7 +17,7 @@ from actions.geo import (
     _match_tags, MAX_RADIUS_M, MIN_RADIUS_M,
 )
 from core.headless_surface import HeadlessSurface
-from main import JarvisLive
+from main import JarvisLive, LOCATION_POOR_ACCURACY_M
 
 
 class _FakeFunctionCall:
@@ -235,6 +235,98 @@ def test_format_nearby_places_lists_results() -> None:
     print("test_format_nearby_places_lists_results: PASS")
 
 
+# ── pre-J4 fix: accuracy caveat (main.py's _location_accuracy_note) ────
+
+def test_location_accuracy_note_empty_for_a_precise_fix() -> None:
+    jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+    assert jarvis._location_accuracy_note({"accuracy": 50.0}) == ""
+    print("test_location_accuracy_note_empty_for_a_precise_fix: PASS")
+
+
+def test_location_accuracy_note_flags_a_poor_fix() -> None:
+    jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+    note = jarvis._location_accuracy_note({"accuracy": 3000.0})
+    assert note != ""
+    assert "3.0 km" in note
+    print("test_location_accuracy_note_flags_a_poor_fix: PASS")
+
+
+def test_location_accuracy_note_boundary_at_threshold_is_not_poor() -> None:
+    jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+    assert jarvis._location_accuracy_note({"accuracy": LOCATION_POOR_ACCURACY_M}) == ""
+    print("test_location_accuracy_note_boundary_at_threshold_is_not_poor: PASS")
+
+
+def test_location_accuracy_note_never_invents_a_missing_value() -> None:
+    jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+    assert jarvis._location_accuracy_note({}) == ""
+    print("test_location_accuracy_note_never_invents_a_missing_value: PASS")
+
+
+def test_get_current_place_appends_accuracy_caveat_for_a_poor_fix() -> None:
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.1699, 24.9384, 3000.0)   # poor accuracy, but fresh
+        place = {"city": "Helsinki", "area": "Kallio", "country": "Finland", "label": "x"}
+        with patch("main.reverse_geocode", return_value=place):
+            fc = _FakeFunctionCall("get_current_place", {})
+            resp = await jarvis._execute_tool(fc)
+        assert "Kallio" in resp.response["result"]
+        assert "3.0 km" in resp.response["result"]
+    asyncio.run(_run())
+    print("test_get_current_place_appends_accuracy_caveat_for_a_poor_fix: PASS")
+
+
+def test_get_current_place_no_caveat_for_a_precise_fix() -> None:
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.1699, 24.9384, 50.0)
+        place = {"city": "Helsinki", "area": "Kallio", "country": "Finland", "label": "x"}
+        with patch("main.reverse_geocode", return_value=place):
+            fc = _FakeFunctionCall("get_current_place", {})
+            resp = await jarvis._execute_tool(fc)
+        assert "accurate to about" not in resp.response["result"]
+    asyncio.run(_run())
+    print("test_get_current_place_no_caveat_for_a_precise_fix: PASS")
+
+
+def test_find_nearby_places_appends_accuracy_caveat_for_a_poor_fix() -> None:
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.1699, 24.9384, 3000.0)
+        with patch("main.find_nearby_places", return_value=[{"name": "X", "category": "pharmacy",
+                                                               "distance_m": 100, "address": ""}]):
+            fc = _FakeFunctionCall("find_nearby_places", {"query": "pharmacy"})
+            resp = await jarvis._execute_tool(fc)
+        assert "3.0 km" in resp.response["result"]
+    asyncio.run(_run())
+    print("test_find_nearby_places_appends_accuracy_caveat_for_a_poor_fix: PASS")
+
+
+# ── pre-J4 fix: get_current_place/find_nearby_places now require_fresh ──
+
+def test_get_current_place_no_longer_accepts_a_stale_fix_without_a_dashboard() -> None:
+    """Deliberate behavior change: 'where am I' is an explicit current-
+    location request (see main.py's require_fresh=True call site), so a
+    fix older than LOCATION_FRESH_ENOUGH_S with no dashboard to refresh it
+    through now honestly reports unavailable, instead of silently handing
+    back however-stale-it-is data the way the old passive default did."""
+    from main import LOCATION_FRESH_ENOUGH_S
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._session_location = {
+            "latitude": 60.1699, "longitude": 24.9384, "accuracy": 50.0,
+            "timestamp": time.monotonic() - LOCATION_FRESH_ENOUGH_S - 1,
+            "fix_timestamp": None,
+        }
+        # jarvis._dashboard is None -- nothing to refresh through.
+        fc = _FakeFunctionCall("get_current_place", {})
+        resp = await jarvis._execute_tool(fc)
+        assert "[LOCATION_UNAVAILABLE]" in resp.response["result"]
+    asyncio.run(_run())
+    print("test_get_current_place_no_longer_accepts_a_stale_fix_without_a_dashboard: PASS")
+
+
 # ── main.py: get_current_place tool integration ───────────────────────
 
 def test_get_current_place_tool_resolves_and_caches() -> None:
@@ -371,6 +463,14 @@ if __name__ == "__main__":
     test_find_nearby_places_propagates_http_failure()
     test_format_nearby_places_empty()
     test_format_nearby_places_lists_results()
+    test_location_accuracy_note_empty_for_a_precise_fix()
+    test_location_accuracy_note_flags_a_poor_fix()
+    test_location_accuracy_note_boundary_at_threshold_is_not_poor()
+    test_location_accuracy_note_never_invents_a_missing_value()
+    test_get_current_place_appends_accuracy_caveat_for_a_poor_fix()
+    test_get_current_place_no_caveat_for_a_precise_fix()
+    test_find_nearby_places_appends_accuracy_caveat_for_a_poor_fix()
+    test_get_current_place_no_longer_accepts_a_stale_fix_without_a_dashboard()
     test_get_current_place_tool_resolves_and_caches()
     test_get_current_place_tool_without_location_is_honest()
     test_get_current_place_cache_expires_after_max_age()

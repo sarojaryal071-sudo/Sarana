@@ -155,6 +155,50 @@ def test_get_directions_tool_falls_back_to_straight_line_when_routing_fails() ->
     print("test_get_directions_tool_falls_back_to_straight_line_when_routing_fails: PASS")
 
 
+def test_get_directions_tool_appends_accuracy_caveat_for_a_poor_fix() -> None:
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.1699, 24.9384, 3000.0)   # poor accuracy, but fresh
+        with patch("main.geocode_place", return_value=(60.1710, 24.9414, "Helsinki Central Station")), \
+             patch("main.get_route", return_value={"distance_m": 1200.0, "duration_s": 900.0, "mode": "walking"}):
+            fc = _FakeFunctionCall("get_directions", {"destination": "Helsinki Central Station", "mode": "walking"})
+            resp = await jarvis._execute_tool(fc)
+        result = resp.response["result"]
+        assert "1.2 km" in result
+        assert "3.0 km" in result   # the accuracy caveat itself
+        assert "approximate" in result.lower()
+    asyncio.run(_run())
+    print("test_get_directions_tool_appends_accuracy_caveat_for_a_poor_fix: PASS")
+
+
+def test_get_directions_tool_no_caveat_for_a_precise_fix() -> None:
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.1699, 24.9384, 50.0)
+        with patch("main.geocode_place", return_value=(60.1710, 24.9414, "Helsinki Central Station")), \
+             patch("main.get_route", return_value={"distance_m": 1200.0, "duration_s": 900.0, "mode": "walking"}):
+            fc = _FakeFunctionCall("get_directions", {"destination": "Helsinki Central Station", "mode": "walking"})
+            resp = await jarvis._execute_tool(fc)
+        assert "accurate to about" not in resp.response["result"]
+    asyncio.run(_run())
+    print("test_get_directions_tool_no_caveat_for_a_precise_fix: PASS")
+
+
+def test_get_directions_tool_caveat_also_appears_on_straight_line_fallback() -> None:
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.1699, 24.9384, 3000.0)
+        with patch("main.geocode_place", return_value=(60.1710, 24.9414, "Helsinki Central Station")), \
+             patch("main.get_route", side_effect=RuntimeError("OSRM could not compute a 'walking' route.")):
+            fc = _FakeFunctionCall("get_directions", {"destination": "Helsinki Central Station", "mode": "walking"})
+            resp = await jarvis._execute_tool(fc)
+        result = resp.response["result"]
+        assert "[ROUTING_UNAVAILABLE]" in result
+        assert "approximate" in result.lower() and "accurate to about" in result
+    asyncio.run(_run())
+    print("test_get_directions_tool_caveat_also_appears_on_straight_line_fallback: PASS")
+
+
 def test_get_directions_tool_propagates_genuine_geocode_failure() -> None:
     async def _run():
         jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
@@ -178,5 +222,8 @@ if __name__ == "__main__":
     test_get_directions_tool_without_location_is_honest()
     test_get_directions_tool_unknown_destination_is_honest()
     test_get_directions_tool_falls_back_to_straight_line_when_routing_fails()
+    test_get_directions_tool_appends_accuracy_caveat_for_a_poor_fix()
+    test_get_directions_tool_no_caveat_for_a_precise_fix()
+    test_get_directions_tool_caveat_also_appears_on_straight_line_fallback()
     test_get_directions_tool_propagates_genuine_geocode_failure()
     print("\nAll routing-tool tests passed.")

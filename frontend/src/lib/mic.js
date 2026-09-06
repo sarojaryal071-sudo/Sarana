@@ -60,7 +60,12 @@ export class MicStreamer {
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        // autoGainControl: pre-J4 noisy-environment fix — was previously
+        // left unset (falling back to whatever the browser defaults to,
+        // not guaranteed across browsers/versions). Explicit here so a
+        // quieter voice against a raised outdoor noise floor still gets
+        // boosted consistently. echoCancellation/noiseSuppression unchanged.
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
     } catch (e) {
       this._onState?.(e?.name === "NotAllowedError" ? "denied" : "error");
