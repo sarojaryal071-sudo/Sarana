@@ -96,12 +96,21 @@ from actions import system_shortcuts
 from actions.office_control import office_control
 
 # Bounded per-task step budget. Deliberately a small, LOCAL constant for
-# this pilot scope (one primary attempt + one recovery attempt) rather
-# than importing main.py's _JARVIS_MAX_ACTIONS_PER_TURN — task_engine.py
-# must not import main.py (main.py imports THIS module; the reverse
-# would be circular). Unifying the two governors into one shared bound
-# is real follow-up work once the Task Engine covers more than one
-# domain, not done here — see docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md.
+# this pilot scope rather than importing main.py's
+# _JARVIS_MAX_ACTIONS_PER_TURN — task_engine.py must not import main.py
+# (main.py imports THIS module; the reverse would be circular). Unifying
+# the two governors into one shared bound is real follow-up work once
+# the Task Engine covers more than one domain, not done here — see
+# docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md.
+#
+# J5 note: this is the SAME bound _execute_step()'s tiered fallback loop
+# already used pre-J5 (a value of 3 was already headroom for one primary
+# attempt plus up to TWO recovery hops, i.e. a 2-tier fallback chain —
+# the pilot-scope comment this replaced undersold it as "one recovery
+# attempt"). No _RECOVERY_CHAIN entry deep enough to actually use the
+# second hop exists today (see that dict's own comment) — this bound was
+# simply never the limiting factor, and raising it further would only
+# matter once a real 2-hop chain exists.
 _MAX_STEPS_PER_TASK = 3
 
 # Bounded PLAN length (Phase 5A) — a SEPARATE cap from _MAX_STEPS_PER_TASK
@@ -729,11 +738,30 @@ _HANDLERS = {
     "system_shortcut": _run_system_shortcut,
 }
 
-# Bounded, ordered recovery chain: if the PRIMARY domain's result is
-# escalatable (INCONCLUSIVE/UI_AMBIGUOUS — never a known VERIFIED_FAILURE,
-# which is a real, already-known outcome, not something retrying a
-# DIFFERENT method would fix), try the next domain down — never the SAME
-# domain again. Matches this project's own no-blind-retry rule.
+# Bounded, ordered, TIERED recovery chain (J5's own name for what this
+# already was): _execute_step()'s while-loop re-looks-up this dict on
+# whatever `domain` it's currently holding, so a chain deeper than one
+# hop (a -> b -> c) already works mechanically today, bounded by
+# _MAX_STEPS_PER_TASK and by `tried` (a domain already attempted this
+# PlanStep is never eligible again, which also makes a cyclic
+# misconfiguration like {"a": "b", "b": "a"} self-terminating rather than
+# an infinite bounce — see tests/test_task_engine_j5.py's own cycle-
+# defense test). Only ONE real entry exists because only one genuine
+# alternative-method relationship exists in the capabilities this module
+# currently routes to (see the Office note below) — J5 does not invent a
+# second one to demonstrate depth (see docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md's
+# own J5 entry: "do not force a recovery relationship merely because it
+# looks good architecturally").
+#
+# Eligible for a hop (see _execute_step()): VERIFIED_FAILURE, INCONCLUSIVE,
+# UI_AMBIGUOUS — a known failure is still worth trying a DIFFERENT method
+# for, an ambiguous/unclear outcome even more so. Never eligible, and
+# never will be regardless of what this dict contains: VERIFIED_SUCCESS
+# (nothing to recover from), BLOCKED/CONFIRMATION_REQUIRED/CANCELLED
+# (hard safety-terminal states — see _execute_step()'s own explicit,
+# early-return handling for all three, checked BEFORE this dict is ever
+# consulted). Never the SAME domain again, matching this project's own
+# no-blind-retry rule (the live Calculator double-click bug).
 _RECOVERY_CHAIN = {
     "youtube": "browser",
 }
@@ -742,7 +770,8 @@ _RECOVERY_CHAIN = {
 # to word/excel (unlike youtube->browser's real "try the general web"
 # fallback) — a failed insert_text/set_cell falling back to browser or
 # system_shortcut would not be a sane recovery of anything. Same
-# no-artificial-recovery discipline as Phase 3's system domains.
+# no-artificial-recovery discipline as Phase 3's system domains — J5
+# reconfirmed this reasoning still holds, nothing new was invented.
 
 
 # ── Context extraction (Phase 5A) ───────────────────────────────────────
