@@ -470,6 +470,18 @@ class _BrowserSession:
         self._thread.start()
         self._ready.wait(timeout=20)
 
+    def is_alive(self) -> bool:
+        """Cheap, thread-safe liveness check used by _SessionRegistry
+        before handing back a CACHED session for reuse (confirmed
+        real-world bug: a dead session's background thread — crashed,
+        or the whole browser process gone — used to be reused blindly,
+        surfacing as 'a browser error' on the next call). Does NOT
+        guarantee the page/context itself is still usable — a closed
+        tab/window with the thread still alive is a separate case,
+        handled reactively at actual use time (see _get_page()'s own
+        closed-page recovery and open_media_url()'s retry-once)."""
+        return self._thread is not None and self._thread.is_alive()
+
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
@@ -866,12 +878,38 @@ class _SessionRegistry:
 
     def _get_or_create(self, browser_name: str) -> _BrowserSession:
         with self._lock:
-            if browser_name not in self._sessions:
+            existing = self._sessions.get(browser_name)
+            if existing is not None and not existing.is_alive():
+                # Confirmed real-world bug: a cached session whose
+                # background thread died (browser process crashed/was
+                # killed) used to be handed back for reuse as-is,
+                # surfacing as a real error on the next call instead of
+                # being detected up front. Never reuse it — discard so a
+                # fresh one gets created below.
+                print(f"[Registry] Discarding dead session: {browser_name}")
+                del self._sessions[browser_name]
+                existing = None
+            if existing is None:
                 sess = _BrowserSession(browser_name)
                 sess.start()
                 self._sessions[browser_name] = sess
                 print(f"[Registry] New session: {browser_name}")
             return self._sessions[browser_name]
+
+    def discard(self, browser_name: str) -> None:
+        """Drops a session without assuming it can still be gracefully
+        closed — used when the underlying browser/context is already
+        dead (see open_media_url()'s stale-session retry-once) so the
+        NEXT get() creates a fresh session instead of reusing a broken
+        one. close() itself is best-effort here; a session this broken
+        may not respond to a clean shutdown either."""
+        with self._lock:
+            sess = self._sessions.pop(browser_name, None)
+        if sess:
+            try:
+                sess.close()
+            except Exception:
+                pass
 
     def get(self, browser_name: str | None = None) -> _BrowserSession:
         if not browser_name:
@@ -947,14 +985,35 @@ def open_media_url(url: str, browser: str | None = None) -> str:
     within the same tab, not a new window) and close/close_all can
     actually act on it afterward, exactly like any other browser_control
     session.
+    Confirmed real-world bug fixed alongside this: a CACHED session
+    whose thread was still alive but whose underlying browser window/
+    context had been closed (e.g. by the user, externally) used to be
+    reused blindly on the next call, surfacing as a real navigation
+    error ("a browser error") instead of self-healing. On any failure
+    here, the session is discarded and this retries EXACTLY ONCE with a
+    freshly created one before reporting failure — never retried more
+    than once, matching this project's own bounded-recovery discipline.
+    A genuinely dead THREAD (the other stale-session case) is already
+    caught earlier, before this even runs — see _SessionRegistry.
+    _get_or_create()'s own is_alive() check.
     """
+    sess = None
     try:
         sess = _registry.get(browser)
         return sess.run(sess.go_to(url))
     except concurrent.futures.TimeoutError:
         return f"Opening '{url}' timed out (60s)."
     except Exception as e:
-        return f"Could not open: {e}"
+        print(f"[Browser] open_media_url session failed ({e}), retrying once with a fresh session")
+        if sess is not None:
+            _registry.discard(sess.browser_name)
+        try:
+            sess = _registry.get(browser)
+            return sess.run(sess.go_to(url))
+        except concurrent.futures.TimeoutError:
+            return f"Opening '{url}' timed out (60s)."
+        except Exception as e2:
+            return f"Could not open: {e2}"
 
 
 def browser_control(

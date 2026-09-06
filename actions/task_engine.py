@@ -287,7 +287,19 @@ _DOMAINS = [
     {
         "name": "browser",
         "family": FAMILY_APPLICATION,
-        "keywords": ["website", "site", "browser", "open", "search", "google",
+        # "open" was deliberately removed (real-world bug found during
+        # JARVIS Part 2 diagnosis, not a guess): it's a generic verb
+        # every domain's objective can contain, and it was winning
+        # browser a false tie/outright score against genuinely more
+        # specific requests — confirmed live: "Open YouTube in a new tab
+        # in the currently open Chrome" scored browser 2 ("open"+
+        # "chrome") vs. youtube's 1 ("youtube"), routing a YouTube
+        # request to a literal Google search for the whole sentence.
+        # Every OTHER browser keyword below (google/search/webpage/site/
+        # website/url/navigate/chrome/firefox/edge) already carries
+        # genuine browser objectives on its own — verified against the
+        # full existing regression suite, nothing regressed.
+        "keywords": ["website", "site", "browser", "search", "google",
                      "url", "webpage", "page", "navigate", "chrome", "firefox", "edge"],
     },
     # ── SYSTEM family (Phase 3) ─────────────────────────────────────────
@@ -437,8 +449,80 @@ def _classify_office_result(result: str) -> str:
 # expected, default case, not a gap; _run_office is the one Phase 5A
 # opt-in consumer (see its own docstring).
 
+_YOUTUBE_CONTENT_RE = re.compile(r"\b(?:play|watch)\s+(.+)", re.IGNORECASE)
+_TRAILING_ON_YOUTUBE_RE = re.compile(r"\s+on\s+youtube[.!?]*\s*$", re.IGNORECASE)
+# Same six canonical names browser_control.py's own tool schema/_ALIASES
+# already recognize — detection only, resolution stays entirely inside
+# browser_control.py (no alias table duplicated here).
+_BROWSER_NAMES = ("chrome", "edge", "firefox", "opera", "brave", "vivaldi", "safari")
+
+
+def _extract_youtube_query(objective: str) -> str | None:
+    """Deterministic (objective -> YouTube search query) extraction —
+    JARVIS's own parsing, never a second LLM call, same technique as
+    _run_system_volume's numeric extraction / _parse_office_action's
+    parsing. Confirmed real-world bug this fixes: _run_youtube() used to
+    hand the WHOLE raw objective to youtube_video() as the search query
+    — 'open YouTube' literally searched YouTube for the phrase "open
+    YouTube" and played whatever ranked first (reproduced: a real video
+    titled "YouTube TV: Nothing but Net").
+
+    Returns None for a pure NAVIGATION objective ('open YouTube', 'open
+    YouTube TV', 'open YouTube in a new tab') — there is no play/watch
+    verb at all, so there is nothing to search or play; _run_youtube()
+    below must navigate instead, never search. Returns the actual
+    requested content for a PLAYBACK objective ('play X', 'watch X',
+    'open YouTube and play X', 'play X on YouTube') — everything after
+    the play/watch verb, with a trailing 'on YouTube' and stray
+    punctuation stripped, never the whole sentence."""
+    m = _YOUTUBE_CONTENT_RE.search(objective)
+    if not m:
+        return None
+    content = _TRAILING_ON_YOUTUBE_RE.sub("", m.group(1)).strip(" .!?")
+    return content or None
+
+
+def _extract_browser_name(objective: str) -> str | None:
+    """Best-effort, deterministic recognition of an explicitly-named
+    browser in the objective (e.g. '...in the currently open Chrome') so
+    navigation can be pointed at it. Reuses browser_control.py's OWN
+    alias/executable resolution (_ALIASES/_resolve_browser) — this only
+    detects WHICH name to pass through, it does not re-implement
+    resolving it."""
+    low = objective.lower()
+    for name in _BROWSER_NAMES:
+        if name in low:
+            return name
+    return None
+
+
 def _run_youtube(objective: str, confirmed: bool = False, context: "TaskContext | None" = None) -> str:
-    return youtube_video(parameters={"action": "play", "query": objective}, player=None)
+    """Distinguishes NAVIGATION intent ('open YouTube', 'open YouTube
+    TV', 'open YouTube in a new tab') from PLAYBACK intent ('play X',
+    'open YouTube and play X', 'play X on YouTube') — see
+    _extract_youtube_query()'s own docstring for the confirmed bug this
+    fixes. A pure navigation objective reuses the EXISTING
+    browser_control() go_to action (already native-first — it launches
+    the real browser, which hands off to an already-running one instead
+    of opening a second window — and already accepts an explicit
+    'browser' name) instead of ever calling youtube_video()'s play
+    action: no search, no video lookup, no playback, no accidental
+    YouTube TV. A playback objective still reuses youtube_video()
+    exactly as before, just with the actual requested content instead
+    of the whole sentence."""
+    query = _extract_youtube_query(objective)
+    if query is None:
+        url = "https://tv.youtube.com" if "youtube tv" in objective.lower() else "https://www.youtube.com"
+        params = {"action": "go_to", "url": url}
+        browser = _extract_browser_name(objective)
+        if browser:
+            params["browser"] = browser
+        result = browser_control(parameters=params)
+        tag = _classify_browser_result(result)
+        if status_of(result):
+            return result
+        return _envelope.envelope(tag, result)
+    return youtube_video(parameters={"action": "play", "query": query}, player=None)
 
 
 def _run_browser(objective: str, confirmed: bool = False, context: "TaskContext | None" = None) -> str:

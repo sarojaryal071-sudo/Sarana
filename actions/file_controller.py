@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import platform
 from pathlib import Path
@@ -80,10 +81,28 @@ def _resolve_path(raw: str) -> Path:
         "videos":    _get_videos(),
         "home":      Path.home(),
     }
-    lower = raw.strip().lower()
+    cleaned = raw.strip()
+    lower = cleaned.lower()
     if lower in shortcuts:
         return shortcuts[lower]
-    return Path(raw).expanduser()
+
+    # Shortcut-prefixed subpath, e.g. "Desktop/Consumer behaviour" or
+    # "Downloads\some-folder" — the confirmed bug this fixes: anything
+    # other than a BARE shortcut name used to fall straight through to
+    # Path(raw).expanduser(), which stays RELATIVE and resolves against
+    # the process's own working directory, not the real shortcut folder
+    # (reproduced live: it resolved to a nonexistent path under this
+    # project's own directory instead of the user's real Desktop).
+    # Split on either separator (users type both) and recognize a
+    # LEADING shortcut segment, then join whatever real directory it
+    # names with the remainder — no shortcut names are hard-coded here
+    # beyond the same six already defined above.
+    parts = [p for p in re.split(r"[\\/]+", cleaned) if p]
+    if parts and parts[0].lower() in shortcuts:
+        base = shortcuts[parts[0].lower()]
+        return base.joinpath(*parts[1:]) if len(parts) > 1 else base
+
+    return Path(cleaned).expanduser()
 
 def _format_size(b: int) -> str:
     for unit in ["B", "KB", "MB", "GB", "TB"]:
@@ -318,6 +337,19 @@ def find_files(name: str = "", extension: str = "",
             if item.is_dir():
                 dir_count += 1
                 if dir_count > max_dirs:
+                    break
+                # Confirmed bug this fixes: folders were never matched at
+                # all here, regardless of where they lived — find_files()
+                # could only ever locate FILES. extension is meaningless
+                # for a folder, so an extension search still matches only
+                # files (existing file-search behavior is unchanged); a
+                # plain name search now matches folders too.
+                if extension:
+                    continue
+                if name and name.lower() not in item.name.lower():
+                    continue
+                results.append(f"📁 {item.name}/ — {item.parent}")
+                if len(results) >= max_results:
                     break
                 continue
             if not item.is_file():
