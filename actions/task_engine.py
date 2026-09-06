@@ -114,6 +114,7 @@ from actions.computer_settings import computer_settings
 from actions import system_shortcuts
 from actions.office_control import office_control
 from actions.file_controller import file_controller
+from actions.repo_agent import repo_agent
 # J6: the EXISTING perception primitives, reused as-is — see inspect()'s
 # own docstring. Never a new controller/screenshot engine.
 from actions.computer_control import get_active_window_title, list_ui_elements
@@ -345,12 +346,16 @@ class Task:
 #                   remain conceptual — J7 deliberately did not build an
 #                   arbitrary shell-execution capability (no safe
 #                   existing mechanism for one exists in this repo).
-#   DEVELOPMENT  — repo agent / git. Concept only, not built.
+#   DEVELOPMENT  — repo agent / git. `repo_agent` (J8) is the first real
+#                   member — search/test-run/edit over an explicit
+#                   repository boundary. Git itself (status/commit/push/
+#                   branch/merge) remains conceptual — that's J9, not J8.
 #   DEPLOYMENT   — deploy + verify. Concept only, not built.
 
 FAMILY_SYSTEM      = "system"
 FAMILY_APPLICATION = "application"
 FAMILY_RESOURCE    = "resource"
+FAMILY_DEVELOPMENT = "development"
 
 # ── Capability router (deterministic, no LLM) ───────────────────────────
 # Same scoring shape as system_shortcuts.py's _score()/resolve() — a
@@ -389,6 +394,21 @@ _DOMAINS = [
         "keywords": ["word", "excel", "spreadsheet", "workbook", "worksheet",
                      "cell", "document", "paragraph", "insert", "replace",
                      "bold", "italic", "underline", "formatting", "save"],
+    },
+    # repo_agent is declared BEFORE browser so a phrase like "search the
+    # repository for X" (which ties 1-1: "search" for browser vs.
+    # "repository" for repo_agent) resolves to repo_agent, not browser —
+    # confirmed live during J8 testing (not assumed), same tie-break-by-
+    # declaration-order technique already used for youtube/office above.
+    {
+        "name": "repo_agent",
+        "family": FAMILY_DEVELOPMENT,
+        # Deliberately EXCLUDES "search" itself (already a real browser
+        # keyword) and generic verbs that could over-match unrelated
+        # requests. "repository"/"repo"/"codebase" are specific nouns
+        # naming exactly this domain; "tests" (plural, as in "run the
+        # tests") doesn't collide with anything today.
+        "keywords": ["repository", "repo", "codebase", "tests"],
     },
     {
         "name": "browser",
@@ -481,13 +501,34 @@ def _normalize(text: str) -> set:
 # hack. Deliberately a fixed, small, common-extension allowlist (never a
 # bare "\.\w+" pattern) so it can't false-positive on a decimal number
 # ("12.5 percent") or an IP/version string ("192.168.1.1") — verified
-# both stay unaffected, see tests/test_task_engine_j7.py.
+# both stay unaffected, see tests/test_task_engine_j7.py. Deliberately
+# EXCLUDES source-code extensions (py/js/ts/etc.) as of J8 — see
+# _CODE_EXTENSION_HINT_RE below for why those moved to their own hint.
 _FILE_EXTENSION_HINT_RE = re.compile(
     r"\.(txt|pdf|docx?|xlsx?|pptx?|csv|json|xml|ya?ml|"
     r"jpe?g|png|gif|bmp|svg|webp|heic|"
     r"mp3|mp4|wav|avi|mov|mkv|webm|flac|"
     r"zip|rar|7z|tar|gz|"
-    r"py|js|ts|html|css|log|md|ini|cfg|bat|sh|exe|dll)\b",
+    r"log|md|ini|cfg|exe|dll)\b",
+    re.IGNORECASE,
+)
+
+# J8 real-world routing fix, same technique/reasoning as the file-
+# extension hint above: "fix the bug in helper.py"/"edit main.py"
+# contain no bare "repository"/"repo"/"codebase" noun at all. Source-
+# code extensions were deliberately SPLIT OUT of _FILE_EXTENSION_HINT_RE
+# above into their own hint (injecting "repo" instead of "file") because
+# a .py/.js/.ts/etc. mention is much more often a development/code
+# context than a "manage this as a generic file" one — before this
+# split, "fix the bug in helper.py" incorrectly scored file_system a
+# point (from the extension) with repo_agent scoring zero. Known,
+# disclosed residual ambiguity: a genuine "delete script.py from
+# downloads"-style request now honestly returns [INCONCLUSIVE] from
+# repo_agent's own parser rather than being deleted — safe (never a
+# wrong destructive action), just less convenient for that rare phrasing
+# — see tests/test_task_engine_j8.py's own test for this trade-off.
+_CODE_EXTENSION_HINT_RE = re.compile(
+    r"\.(py|js|ts|jsx|tsx|java|cpp|cs|go|rs|rb|php)\b",
     re.IGNORECASE,
 )
 
@@ -506,6 +547,8 @@ def route(objective: str) -> str | None:
     words = _normalize(objective)
     if _FILE_EXTENSION_HINT_RE.search(objective or ""):
         words = words | {"file"}
+    if _CODE_EXTENSION_HINT_RE.search(objective or ""):
+        words = words | {"repo"}
     if not words:
         return None
     best_name, best_score = None, 0
@@ -985,6 +1028,92 @@ def _run_file_system(objective: str, confirmed: bool = False, context: "TaskCont
     return _envelope.envelope(tag, result)
 
 
+def _classify_repo_result(result: str) -> str:
+    """repo_agent.py's own repo_agent() returns a Result-Envelope-tagged
+    string for every path — same defensive-but-normally-unreachable
+    fallback discipline as the other classifiers in this module."""
+    tag = status_of(result)
+    if tag:
+        return tag
+    return _envelope.STATUS_INCONCLUSIVE
+
+
+# ── J8: Software Development Agent ──────────────────────────────────────
+_SEARCH_QUOTED_RE   = re.compile(r"[\"']([^\"']+)[\"']")
+_REFERENCE_TO_RE    = re.compile(r"\breferences?\s+to\s+(.+?)(?:\s+(?:in|inside|within)\b.*)?[.!?]*$", re.IGNORECASE)
+_SEARCH_FOR_RE      = re.compile(r"\bfor\s+(.+?)[.!?]*$", re.IGNORECASE)
+
+
+def _extract_search_query(objective: str) -> str | None:
+    """Deterministic (objective -> ONE search query) extraction, same
+    conservative technique/discipline as _extract_file_name() — a
+    request with nothing confidently extractable never reaches
+    repo_agent.search_repository() with an empty/guessed query."""
+    m = _SEARCH_QUOTED_RE.search(objective)
+    if m:
+        return m.group(1).strip()
+    m = _REFERENCE_TO_RE.search(objective)
+    if m:
+        return m.group(1).strip()
+    m = _SEARCH_FOR_RE.search(objective)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _parse_repo_action(objective: str) -> dict | None:
+    """Deterministic (objective -> repo_agent() parameters) parsing —
+    JARVIS's own extraction, never a second LLM call for WHICH action to
+    take (the edit action's own CONTENT generation still legitimately
+    uses Gemini inside code_helper.py — a generative task, not a routing
+    decision; see repo_agent.py's own module docstring on that
+    distinction). Returns None when nothing can be confidently
+    determined — most commonly a search with no extractable query, or an
+    edit naming no specific existing file — same honesty discipline as
+    _parse_file_action/_parse_office_action."""
+    words = _normalize(objective)
+
+    if words & {"test", "tests"}:
+        return {"action": "run_tests"}
+
+    low = objective.lower()
+    if (words & {"find", "search", "locate"}) or "reference" in low:
+        query = _extract_search_query(objective)
+        return {"action": "search", "query": query} if query else None
+
+    if words & {"edit", "fix", "modify", "update"}:
+        m = _FILENAME_TOKEN_RE.search(objective)
+        if not m:
+            return None
+        return {"action": "edit", "file_path": m.group(1), "instruction": objective}
+
+    return None
+
+
+def _run_repo_agent(objective: str, confirmed: bool = False, context: "TaskContext | None" = None) -> str:
+    """Parses the objective into repo_agent.py's own (action, query/
+    file_path/instruction, ...) parameter shape, then calls it in-process
+    exactly as it already exists — no second repository agent. `confirmed`
+    is threaded straight through to repo_agent.py's EXISTING
+    is_consequential()/is_confirmed() gate for its edit action, the same
+    way _run_file_system already does for file_controller.py's delete."""
+    params = _parse_repo_action(objective)
+    if params is None:
+        return _envelope.envelope(
+            _envelope.STATUS_INCONCLUSIVE,
+            "no specific repository action could be determined from this "
+            "objective — repo_agent.py needs either a specific search query, "
+            "'run the tests', or an edit naming one specific existing file; "
+            "ask the user to be concrete before trying again",
+        )
+    params["confirmed"] = confirmed
+    result = repo_agent(parameters=params)
+    tag = _classify_repo_result(result)
+    if status_of(result):
+        return result
+    return _envelope.envelope(tag, result)
+
+
 _HANDLERS = {
     "youtube": _run_youtube,
     "browser": _run_browser,
@@ -993,6 +1122,7 @@ _HANDLERS = {
     "system_power": _run_system_power,
     "system_shortcut": _run_system_shortcut,
     "file_system": _run_file_system,
+    "repo_agent": _run_repo_agent,
 }
 
 # Bounded, ordered, TIERED recovery chain (J5's own name for what this
@@ -1033,6 +1163,9 @@ _RECOVERY_CHAIN = {
 # operation has no sane alternative METHOD to fall back to (there is
 # only one way to delete/create/rename a file), so no file_system->*
 # entry exists either — same discipline, not an oversight.
+# J8 (repo_agent) same again: a failed search/test-run/edit has no
+# genuine alternative method either (there's one way to grep a repo, one
+# test command to run) — no repo_agent->* entry.
 
 
 # ── Context extraction (Phase 5A) ───────────────────────────────────────

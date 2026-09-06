@@ -113,6 +113,10 @@ _CONSEQUENTIAL_ACTION_NAMES = frozenset({
     # CURRENT state the user didn't explicitly re-confirm; same tier as
     # shutdown/restart, gated the same centralized way, not a new check.
     "delete",
+    # J8 (Software Development Agent): repo_agent.py's own edit action
+    # name — modifying source code is consequential (it can break a
+    # working repository), same tier as delete/shutdown/restart.
+    "repo_edit",
 })
 
 _CONSEQUENTIAL_GOAL_PATTERNS = (
