@@ -4200,8 +4200,20 @@ class JarvisUI:
         while not self._win._ready:
             time.sleep(0.1)
 
-    def show_content(self, title: str, text: str):
-        """Thread-safe: display content in the panel below the HUD."""
+    def show_content(self, title: str, text: str, presentation: dict | None = None):
+        """Thread-safe: display content in the panel below the HUD.
+
+        `presentation` (Track 3's structured payload — see
+        core/assistant_surface.py's own Protocol signature) is accepted
+        for call-site compatibility with the web frontend's
+        PresentationSurface but deliberately NOT rendered here: the
+        desktop HUD keeps showing plain title/text exactly as before.
+        Building an equivalent PyQt6 glass-surface renderer for weather/
+        calendar/table/etc. is a genuinely separate, disproportionate
+        effort from this phase's actual scope (the web frontend is
+        where the cinematic HUD work already lives — see
+        IdentityTransition.jsx) and is a documented future extension,
+        not a silent gap."""
         self._win._content_sig.emit(title[:48], text[:4000])
 
     def prompt_reconfig(self):

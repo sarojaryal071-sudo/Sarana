@@ -217,6 +217,68 @@ def test_get_calendar_events_success_uses_resolved_tzinfo() -> None:
     print("test_get_calendar_events_success_uses_resolved_tzinfo: PASS")
 
 
+def test_get_calendar_events_broadcasts_a_calendar_presentation_with_real_marked_dates() -> None:
+    """Track 3 (Presentation Engine): the web frontend's calendar grid
+    gets real, separately-queried month-wide marked dates (never
+    invented), plus a focus_date only when the caller's OWN requested
+    range is a single day — real gap check, not merely that the tool's
+    text reply still works."""
+    async def _run():
+        jarvis = _jarvis()
+        fake_dashboard = MagicMock()
+        fake_dashboard.broadcast_content = MagicMock(return_value=asyncio.sleep(0))
+        jarvis._dashboard = fake_dashboard
+        fake_creds = _valid_credentials()
+        day_events = [{"id": "ev1", "title": "Standup", "start": "2026-09-18T09:00:00+00:00",
+                       "end": "2026-09-18T09:30:00+00:00", "location": "", "all_day": False}]
+
+        with patch("main.calendar_store.is_configured", return_value=True), \
+             patch.object(JarvisLive, "_get_calendar_credentials", return_value=fake_creds), \
+             patch("main.calendar_actions.get_events", return_value=day_events), \
+             patch("main.calendar_actions.get_month_marked_dates", return_value=["2026-09-05", "2026-09-18"]) as mock_marked:
+            fc = _FakeFunctionCall("get_calendar_events", {"start": "2026-09-18T00:00:00", "end": "2026-09-19T00:00:00"})
+            await jarvis._execute_tool(fc)
+        await asyncio.sleep(0)  # let the create_task()'d broadcast actually run
+
+        mock_marked.assert_called_once()
+        assert mock_marked.call_args.kwargs["year"] == 2026
+        assert mock_marked.call_args.kwargs["month"] == 9
+        fake_dashboard.broadcast_content.assert_called_once()
+        presentation = fake_dashboard.broadcast_content.call_args.args[2]
+        assert presentation["type"] == "calendar"
+        assert presentation["data"]["month"] == "2026-09"
+        assert presentation["data"]["marked_dates"] == ["2026-09-05", "2026-09-18"]
+        assert presentation["data"]["focus_date"] == "2026-09-18"
+        assert presentation["data"]["events"] == day_events
+    asyncio.run(_run())
+    print("test_get_calendar_events_broadcasts_a_calendar_presentation_with_real_marked_dates: PASS")
+
+
+def test_get_calendar_events_multi_day_range_has_no_focus_date() -> None:
+    """A month-wide (or any multi-day) query is a grid overview, not a
+    'what's on THIS day' drill-down — focus_date must stay None rather
+    than guessing which day the caller actually cares about."""
+    async def _run():
+        jarvis = _jarvis()
+        fake_dashboard = MagicMock()
+        fake_dashboard.broadcast_content = MagicMock(return_value=asyncio.sleep(0))
+        jarvis._dashboard = fake_dashboard
+        fake_creds = _valid_credentials()
+
+        with patch("main.calendar_store.is_configured", return_value=True), \
+             patch.object(JarvisLive, "_get_calendar_credentials", return_value=fake_creds), \
+             patch("main.calendar_actions.get_events", return_value=[]), \
+             patch("main.calendar_actions.get_month_marked_dates", return_value=[]):
+            fc = _FakeFunctionCall("get_calendar_events", {"start": "2026-09-01T00:00:00", "end": "2026-09-30T00:00:00"})
+            await jarvis._execute_tool(fc)
+        await asyncio.sleep(0)
+
+        presentation = fake_dashboard.broadcast_content.call_args.args[2]
+        assert presentation["data"]["focus_date"] is None
+    asyncio.run(_run())
+    print("test_get_calendar_events_multi_day_range_has_no_focus_date: PASS")
+
+
 def test_get_calendar_events_invalid_dates_asks_instead_of_guessing() -> None:
     async def _run():
         jarvis = _jarvis()
@@ -528,6 +590,8 @@ if __name__ == "__main__":
     test_calendar_tzinfo_never_defaults_to_utc_when_web_timezone_set()
     test_get_calendar_events_not_connected()
     test_get_calendar_events_success_uses_resolved_tzinfo()
+    test_get_calendar_events_broadcasts_a_calendar_presentation_with_real_marked_dates()
+    test_get_calendar_events_multi_day_range_has_no_focus_date()
     test_get_calendar_events_invalid_dates_asks_instead_of_guessing()
     test_get_calendar_events_api_failure_propagates_honestly()
     test_get_calendar_events_empty_range_is_honest_not_fabricated()

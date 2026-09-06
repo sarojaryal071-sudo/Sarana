@@ -940,44 +940,171 @@ input {
   }
 }
 
-/* ── content panel (dismissible) ───────────────────────────────────── */
-.content-panel {
+/* ── Presentation Engine: the one glass information surface (Track 3) ─
+   Deliberately restrained -- one thin border, one soft shadow, a low-
+   opacity blur -- never the "giant glowing border" / "excessive
+   gradients" look the brief explicitly warns against. --surface-accent
+   is the ONE thing that actually varies between JARVIS/SARANA (see the
+   theme classes below), same technique IdentityTransition's own
+   --it-accent already established. */
+.pw-surface {
   flex-shrink: 0;
   max-height: 34%;
-  border-top: 1px solid var(--border);
-  background: var(--panel-2);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  border-top: 1px solid var(--border);
+  background: var(--panel-2);
+  background: linear-gradient(180deg, rgba(1, 15, 24, 0.86), rgba(1, 15, 24, 0.94));
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 -10px 28px -16px rgba(0, 0, 0, 0.65);
+  transition: opacity 240ms ease, transform 240ms ease, max-height 220ms ease;
+}
+.pw-surface-expanded { max-height: 62%; }
+
+.pw-surface-materializing { opacity: 0; transform: translateY(10px); }
+.pw-surface-active,
+.pw-surface-updating { opacity: 1; transform: translateY(0); }
+.pw-surface-dismissing { opacity: 0; transform: translateY(6px); }
+
+.pw-surface-updating .pw-surface-hdr { animation: pw-pulse 420ms ease; }
+@keyframes pw-pulse {
+  0% { box-shadow: inset 0 0 0 1px var(--surface-accent, var(--pri)); }
+  100% { box-shadow: inset 0 0 0 1px transparent; }
 }
 
-.content-panel .content-hdr {
+.pw-surface-theme-jarvis { --surface-accent: var(--acc); }
+.pw-surface-theme-sarana { --surface-accent: var(--face-glow); }
+
+.pw-surface-hdr {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
 }
-
-.content-panel .content-hdr .title {
+.pw-surface-title {
   font-size: 11px;
   font-weight: 700;
-  color: var(--pri);
-  letter-spacing: 1px;
+  color: var(--surface-accent, var(--pri));
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.pw-surface-spacer { flex: 1; }
+.pw-surface-btn {
+  background: transparent;
+  border: 1px solid var(--border-a);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.pw-surface-btn:hover { color: var(--surface-accent, var(--pri)); border-color: var(--surface-accent, var(--pri)); }
+.pw-surface-btn:focus-visible { outline: 2px solid var(--surface-accent, var(--pri)); outline-offset: 1px; }
+.pw-surface-btn:disabled { opacity: 0.4; cursor: default; }
 
-.content-panel .content-body {
+.pw-surface-body {
   flex: 1;
   overflow-y: auto;
+  overflow-x: auto;
   padding: 10px 14px;
   font-size: 12px;
   line-height: 1.6;
-  white-space: pre-wrap;
   color: var(--text);
 }
+.pw-surface-plain { white-space: pre-wrap; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pw-surface,
+  .pw-surface-hdr {
+    transition: none !important;
+    animation: none !important;
+  }
+  .pw-surface-materializing,
+  .pw-surface-dismissing { opacity: 1; transform: none; }
+}
+
+/* ── Weather ──────────────────────────────────────────────────────── */
+.pw-weather-location { font-size: 10px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
+.pw-weather-now { display: flex; align-items: baseline; gap: 14px; }
+.pw-weather-temp { font-size: 30px; font-weight: 700; color: var(--white); line-height: 1; }
+.pw-weather-unit { font-size: 14px; color: var(--text-dim); margin-left: 2px; }
+.pw-weather-now-detail { display: flex; flex-direction: column; gap: 2px; }
+.pw-weather-condition { color: var(--surface-accent, var(--pri)); text-transform: capitalize; }
+.pw-weather-meta { font-size: 11px; color: var(--text-dim); }
+.pw-weather-days { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.pw-weather-day {
+  flex: 1 1 90px;
+  min-width: 90px;
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+}
+.pw-weather-day-label { font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-dim); }
+.pw-weather-day-condition { font-size: 11px; text-transform: capitalize; margin: 2px 0; }
+.pw-weather-day-range { display: flex; gap: 8px; font-size: 12px; }
+.pw-weather-day-high { color: var(--white); font-weight: 700; }
+.pw-weather-day-low { color: var(--text-dim); }
+.pw-weather-day-precip { font-size: 10px; color: var(--text-med); margin-top: 2px; }
+
+/* ── Calendar: real dates, marked days in RED per the explicit brief ── */
+.pw-calendar-header { font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--surface-accent, var(--pri)); margin-bottom: 8px; }
+.pw-calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.pw-calendar-weekday { font-size: 9px; text-align: center; color: var(--text-dim); letter-spacing: 0.5px; padding-bottom: 4px; }
+.pw-calendar-cell {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  color: var(--text-med);
+}
+.pw-calendar-cell-empty { border-color: transparent; }
+.pw-calendar-cell-marked { color: var(--red); border-color: var(--red); font-weight: 700; }
+.pw-calendar-cell-focused { background: var(--surface-accent, var(--pri)); color: var(--bg); border-color: var(--surface-accent, var(--pri)); }
+.pw-calendar-events { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
+.pw-calendar-events-heading { font-size: 10px; letter-spacing: 1px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px; }
+.pw-calendar-events-empty { font-size: 11px; color: var(--text-dim); }
+.pw-calendar-event { display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 2px 0; }
+.pw-calendar-event-time { color: var(--text-dim); font-size: 10px; min-width: 62px; }
+.pw-calendar-event-title { color: var(--white); flex: 1; }
+.pw-calendar-event-location { color: var(--text-dim); font-size: 10px; }
+
+/* ── Table ────────────────────────────────────────────────────────── */
+.pw-table-wrap { overflow-x: auto; }
+.pw-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.pw-table th, .pw-table td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; }
+.pw-table th { color: var(--surface-accent, var(--pri)); font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase; }
+.pw-table td { color: var(--text); }
+
+/* ── Search results ───────────────────────────────────────────────── */
+.pw-search-meta { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
+.pw-search-mode { font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--surface-accent, var(--pri)); }
+.pw-search-query { font-size: 11px; color: var(--text-dim); }
+.pw-search-line { padding: 1px 0; }
+
+/* ── Generic information ──────────────────────────────────────────── */
+.pw-generic-body { white-space: pre-wrap; }
+.pw-generic-items { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.pw-generic-item { display: flex; gap: 10px; }
+.pw-generic-item-label { color: var(--text-dim); min-width: 90px; }
+.pw-generic-item-value { color: var(--white); }
+
+/* ── Status / progress ────────────────────────────────────────────── */
+.pw-status-row { display: flex; align-items: center; gap: 10px; }
+.pw-status-pill { font-size: 10px; letter-spacing: 1px; padding: 2px 8px; border: 1px solid var(--border-a); }
+.pw-status-pill-in_progress { color: var(--pri); border-color: var(--pri); }
+.pw-status-pill-done { color: var(--green); border-color: var(--green); }
+.pw-status-pill-failed { color: var(--red); border-color: var(--red); }
+.pw-status-pill-blocked { color: var(--acc-2); border-color: var(--acc-2); }
+.pw-status-bar-track { margin-top: 8px; height: 3px; background: var(--border); }
+.pw-status-bar-fill { height: 100%; background: var(--surface-accent, var(--pri)); transition: width 200ms ease; }
 
 /* ── right panel: log + controls ───────────────────────────────────── */
 .log-feed {

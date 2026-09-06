@@ -1104,6 +1104,15 @@ class DashboardServer:
         defaulting to "off" until told otherwise is correct, not a gap)."""
         await self._send_to_clients({"type": "jarvis_mode_changed", "active": bool(active)})
 
+    async def broadcast_speech_mute(self, active: bool) -> None:
+        """Track 3/4 (presentation/audio phase): server -> client signal
+        that self._speech_muted just changed (see main.py's speech_mute
+        tool). Same non-history reasoning as broadcast_jarvis_mode()
+        above — session-scoped, resets to off on every fresh connection,
+        so a freshly-connected client defaulting to "not muted" until
+        told otherwise is correct, not a gap."""
+        await self._send_to_clients({"type": "speech_mute_changed", "active": bool(active)})
+
     async def broadcast_expression_override(self, expression: str, duration_seconds: float) -> None:
         """SARANA Face UI: server -> client signal that main.py's
         set_expression tool was just called (see main.py's own dispatch
@@ -1120,13 +1129,29 @@ class DashboardServer:
             "duration_ms": int(max(0.0, duration_seconds) * 1000),
         })
 
-    async def broadcast_content(self, title: str, text: str) -> None:
+    async def broadcast_content(self, title: str, text: str, presentation: dict | None = None) -> None:
         """Server→client "content" message — mirrors JarvisUI.show_content's
-        shape for a future web client. Nothing calls this yet (main.py is
-        untouched this phase); it exists so a later phase has a ready-made
-        method instead of hand-building the dict at each call site.
+        shape for the web client (see core/assistant_surface.py's own
+        `show_content(title, text, presentation=None)`).
+
+        Track 3 (Presentation Engine): `presentation`, when given, is the
+        structured payload the frontend's PresentationSurface renders
+        (`{type, data, ...}` — see frontend/src/components/presentation/
+        registry.js's own docstring for the exact shape/allowed types).
+        Omitted (None) for ordinary plain-text content — the frontend
+        falls back to its existing plain title/text rendering exactly as
+        before; this is purely additive, never a breaking change to the
+        message shape. Real gap fixed alongside this: main.py never
+        actually called this method before (see this function's own
+        prior docstring — "nothing calls this yet"), so the web
+        frontend's ContentPanel/state.content pipe was dead code in the
+        actual deployment; main.py now calls this at its real
+        show_content() call sites (search results, weather, calendar).
         """
-        await self.broadcast({"type": "content", "title": title, "text": text})
+        msg = {"type": "content", "title": title, "text": text}
+        if presentation is not None:
+            msg["presentation"] = presentation
+        await self.broadcast(msg)
 
     # ── Audio-out backpressure fix ───────────────────────────────────────
     # Root cause this replaces: _play_audio() used to fan audio out via a

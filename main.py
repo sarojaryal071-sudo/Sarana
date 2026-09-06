@@ -81,7 +81,7 @@ from core.latency_stats import LatencyStats
 from actions.file_processor import file_processor
 from actions.flight_finder     import flight_finder
 from actions.open_app          import open_app
-from actions.weather           import get_weather_text
+from actions.weather           import get_weather_text, get_weather_data, format_weather_text
 from actions.geo               import (
     geocode_place, reverse_geocode, format_place,
     find_nearby_places, format_nearby_places, haversine_m, format_distance,
@@ -1035,6 +1035,31 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "speech_mute",
+        "description": (
+            "Turns the assistant's own SPOKEN voice on or off for this "
+            "session — call action='on' ONLY when the user explicitly "
+            "asks to mute/stop talking/go quiet/be silent (e.g. 'JARVIS, "
+            "mute', 'stop talking', 'go silent'), and action='off' when "
+            "they explicitly ask you to speak again (e.g. 'you can speak "
+            "now', 'unmute'). This ONLY silences your voice output — you "
+            "keep listening, understanding, and executing every request "
+            "completely normally while muted; reply with text/visuals as "
+            "you normally would, you simply won't be heard until "
+            "unmuted. Do NOT confuse this with going to sleep or turning "
+            "off entirely — the user is still talking to you. Never call "
+            "this just because a response happens to be long or the "
+            "user is quiet — only on an explicit mute/unmute request."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {"type": "STRING", "description": "'on' to mute voice output, 'off' to unmute."},
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "set_expression",
         "description": (
             "Changes SARANA's visual facial expression on the SARANA face "
@@ -1873,6 +1898,24 @@ class JarvisLive:
         # tool's existing raw actions stay available exactly as before
         # regardless of this flag).
         self._jarvis_mode: bool = False
+        # Speech mute (Track 3/4 — presentation/audio phase): "JARVIS,
+        # mute" / "You can speak now." — output-only. Understanding,
+        # task execution, and the visual UI all continue completely
+        # normally; only the assistant's own SPOKEN voice is suppressed.
+        # This is deliberately NOT the same thing as a future SLEEP mode
+        # (which would suspend normal processing entirely — not built
+        # yet, see docs) and NOT the web frontend's own microphone-off
+        # "MUTED" display state (App.jsx's displayStatus) — a genuinely
+        # different axis (input vs. output). Gemini's live session is
+        # configured response_modalities=["AUDIO"] for the whole
+        # connection (see _build_config()) — there is no cheap per-turn
+        # text-only mode to switch into without a disruptive reconnect,
+        # so muting works by suppressing the ALREADY-GENERATED audio at
+        # its one real playback/broadcast choke point instead (see
+        # _play_audio()) rather than stopping generation. Session-scoped,
+        # never persisted, resets on every reconnect exactly like
+        # self._jarvis_mode above (see run()'s reconnect-reset block).
+        self._speech_muted: bool = False
         # Bounded autonomous-execution governor — see
         # _JARVIS_MAX_ACTIONS_PER_TURN's own docstring for the reasoning
         # and _execute_tool()'s gate for where this is enforced. Counts
@@ -2868,24 +2911,45 @@ class JarvisLive:
                 result = r or f"Opened {args.get('app_name')}."
 
             elif name == "get_weather":
+                # Track 3 (Presentation Engine): fetches the structured
+                # shape ONCE (get_weather_data()) and formats Gemini's
+                # own text reply from it (format_weather_text()) — never
+                # two Open-Meteo calls for one response — then broadcasts
+                # the SAME real data to the web frontend's
+                # WeatherPresentation, alongside (never instead of) the
+                # spoken/text reply. Desktop sessions (no self._dashboard)
+                # simply skip the broadcast; nothing else changes.
                 place = (args.get("place") or "").strip()
+                _weather_place_label = ""
+                _weather_geo_failed = False
                 if place:
                     geo = await loop.run_in_executor(None, lambda: geocode_place(place))
                     if geo is None:
                         result = f"I couldn't find a place called '{place}'."
+                        _weather_geo_failed = True
                     else:
                         glat, glon, glabel = geo
-                        result = await loop.run_in_executor(
-                            None, lambda: get_weather_text(glat, glon, glabel)
-                        )
+                        _weather_place_label = glabel
                 else:
                     loc = await self._get_current_location()
                     if not loc:
                         result = self._location_unavailable_result()
+                        _weather_geo_failed = True
                     else:
-                        result = await loop.run_in_executor(
-                            None, lambda: get_weather_text(loc["latitude"], loc["longitude"])
-                        )
+                        glat, glon = loc["latitude"], loc["longitude"]
+
+                if not _weather_geo_failed:
+                    # A real fetch failure still propagates to the
+                    # existing generic exception handler below, unchanged.
+                    _weather_data = await loop.run_in_executor(
+                        None, lambda: get_weather_data(glat, glon, _weather_place_label)
+                    )
+                    result = format_weather_text(_weather_data)
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast_content(
+                            _weather_place_label or "WEATHER", result,
+                            {"type": "weather", "data": _weather_data},
+                        ))
 
             elif name == "get_current_place":
                 # require_fresh=True: pre-J4 fix -- "where am I" is exactly
@@ -3034,6 +3098,38 @@ class JarvisLive:
                             lambda: calendar_actions.get_events(credentials, time_min=time_min, time_max=time_max),
                         )
                         result = calendar_actions.format_events(events)
+
+                        # Track 3 (Presentation Engine): a real calendar-
+                        # grid month view needs to know which days in the
+                        # month have something on them (get_month_marked_dates,
+                        # a second, bounded, real Google Calendar query —
+                        # see that function's own docstring for why this
+                        # can't be derived from the caller's own,
+                        # potentially narrower, requested range alone).
+                        # focus_date is set only when the caller's own
+                        # requested range IS a single day (e.g. "what's on
+                        # the 18th") — never guessed, never invented.
+                        if self._dashboard:
+                            _is_single_day = (time_max - time_min).total_seconds() <= 86400
+                            _focus_date = time_min.date().isoformat() if _is_single_day else None
+                            _marked = await loop.run_in_executor(
+                                None,
+                                lambda: calendar_actions.get_month_marked_dates(
+                                    credentials, year=time_min.year, month=time_min.month, tzinfo=tzinfo,
+                                ),
+                            )
+                            asyncio.create_task(self._dashboard.broadcast_content(
+                                "CALENDAR", result,
+                                {
+                                    "type": "calendar",
+                                    "data": {
+                                        "month": f"{time_min.year:04d}-{time_min.month:02d}",
+                                        "marked_dates": _marked,
+                                        "focus_date": _focus_date,
+                                        "events": events,
+                                    },
+                                },
+                            ))
 
             elif name == "find_free_time":
                 credentials = await self._get_calendar_credentials()
@@ -3268,6 +3364,39 @@ class JarvisLive:
                     )
                 else:
                     result = "jarvis_mode requires action='on' or action='off'."
+
+            elif name == "speech_mute":
+                # Track 3/4 (presentation/audio phase): output-only mute —
+                # see self._speech_muted's own docstring for the exact
+                # semantics and why this suppresses already-generated
+                # audio at _play_audio()'s own choke point rather than
+                # stopping generation. Cross-platform like jarvis_mode
+                # above — desktop and web sessions both get it.
+                _mute_action = (args.get("action") or "").strip().lower()
+                if _mute_action == "on":
+                    self._speech_muted = True
+                    self.ui.write_log("SYS: Speech muted")
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast_speech_mute(True))
+                    result = (
+                        "[SPEECH_MUTED] Voice output is now off. Keep "
+                        "listening, understanding, and executing requests "
+                        "exactly as before — only your SPOKEN voice is "
+                        "suppressed. Acknowledge with a short text "
+                        "reply (it will be shown, just not spoken), then "
+                        "continue normally."
+                    )
+                elif _mute_action == "off":
+                    self._speech_muted = False
+                    self.ui.write_log("SYS: Speech unmuted")
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast_speech_mute(False))
+                    result = (
+                        "[SPEECH_UNMUTED] Voice output is back on. "
+                        "Acknowledge briefly, then continue normally."
+                    )
+                else:
+                    result = "speech_mute requires action='on' or action='off'."
 
             elif name == "set_expression":
                 # SARANA Face UI — the gap the user directly hit: they
@@ -3720,7 +3849,16 @@ class JarvisLive:
                 if r and not r.startswith("No results") and not r.startswith("Search failed"):
                     _query = args.get("query") or ", ".join(args.get("items", []))
                     _label = f"{_mode.upper()} — {_query[:38]}" if _query else _mode.upper()
-                    self.ui.show_content(_label, r)
+                    _search_presentation = {"type": "search_results", "data": {"query": _query, "mode": _mode, "text": r}}
+                    self.ui.show_content(_label, r, _search_presentation)
+                    # Track 3: real gap fixed alongside this — main.py never
+                    # actually called broadcast_content() before (see that
+                    # method's own prior docstring), so the web frontend's
+                    # content panel never received search results (or
+                    # anything else) at all. Desktop-only sessions (no
+                    # self._dashboard) are unaffected either way.
+                    if self._dashboard:
+                        asyncio.create_task(self._dashboard.broadcast_content(_label, r, _search_presentation))
             elif name == "file_processor":
                 if not args.get("file_path") and self.ui.current_file:
                     args["file_path"] = self.ui.current_file
@@ -4444,6 +4582,19 @@ class JarvisLive:
                 else:
                     level = 0.0
                 self.ui.set_audio_level(level)
+
+                # Speech mute (Track 3/4): suppress the actual audio
+                # output — both local speaker and browser broadcast —
+                # while muted, without touching anything else in this
+                # loop (speaking-state tracking, level metering, queue
+                # draining all continue exactly as before, so nothing
+                # downstream needs to know muting happened). Gemini has
+                # already generated this audio regardless (see
+                # self._speech_muted's own docstring on why generation
+                # itself can't cheaply be skipped) — muting here is the
+                # one real choke point both playback paths share.
+                if self._speech_muted:
+                    continue
 
                 if stream is not None:
                     try:
@@ -6001,6 +6152,7 @@ class JarvisLive:
                     # reconnect — see self._jarvis_mode's own docstring.
                     self._jarvis_mode           = False
                     self.ui.set_jarvis_mode(False)  # revert the HUD too, in case a prior connection left it showing JARVIS
+                    self._speech_muted          = False
                     self._jarvis_action_count   = 0
                     self._interrupted          = False
                     self._pending_tool_calls   = {}

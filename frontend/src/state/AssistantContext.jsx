@@ -63,10 +63,21 @@ const initialState = {
   expressionOverride: null,
 
   messages: [], // {speaker: "user"|"jarvis"|"sys", text, ts}
-  content: null, // {title, text} | null
+  // Track 3 (Presentation Engine): `presentation` is the optional
+  // structured payload (`{type, data}`) PresentationSurface renders —
+  // see dashboard/server.py's broadcast_content(). Backward compatible:
+  // ordinary plain-text content (presentation undefined/null) renders
+  // exactly as it always has, via ContentPanel's own plain fallback.
+  content: null, // {title, text, presentation?: {type, data}} | null
 
   audioState: "idle", // idle | connecting | open | playing | error
   microphoneState: "idle", // idle | requesting | denied | unsupported | streaming | error
+
+  // Track 3/4: output-only speech mute (main.py's speech_mute tool) —
+  // backend-authoritative, mirrors jarvisMode's own reflect-only pattern
+  // above. Never confused with microphoneState (input) or a future SLEEP
+  // mode (this project's own docs draw the same distinction).
+  speechMuted: false,
 };
 
 function reducer(state, action) {
@@ -124,9 +135,11 @@ function reducer(state, action) {
         messages: appendMessage(state.messages, { speaker: "sys", text: action.text, ts: action.ts }),
       };
     case "CONTENT_MESSAGE":
-      return { ...state, content: { title: action.title, text: action.text } };
+      return { ...state, content: { title: action.title, text: action.text, presentation: action.presentation ?? null } };
     case "DISMISS_CONTENT":
       return { ...state, content: null };
+    case "SPEECH_MUTE":
+      return { ...state, speechMuted: !!action.value };
     case "RESET_FOR_LOGOUT":
       // Item 8: also doubles as "start a fresh session" on a new login, not
       // just logout — clears messages (activity log) and per-connection

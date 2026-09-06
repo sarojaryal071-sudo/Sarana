@@ -840,3 +840,62 @@ Adopted as stated in the brief, unmodified — this document is itself the ARCHI
 > **Can we continuously upgrade JARVIS for years without repeatedly redesigning its core?**
 
 **Yes, with one condition made explicit by this tracing exercise:** `main.py`'s `JarvisLive` class and its tool-dispatch plumbing (`_execute_tool`, `_tool_call_queue`, `_handle_tool_batch`) must remain the single, unforked execution core for the entire roadmap — every stage in § 16 was deliberately designed to extend it, never fork it. The only genuinely new long-lived subsystem introduced across all 12 stages is `task_engine.py` (J0), and even that is designed to sit ON TOP of the existing batch-execution plumbing, not replace it. If a future session ever proposes a second tool-dispatch loop, a second verification vocabulary, or a second agent framework "underneath" `JarvisLive` to implement any later stage, that is the signal this condition has been violated — and per § 20's own rule, that should stop, get documented, and get resolved by extending this document, not by building around it.
+
+---
+
+## 22. Presentation & Audio (Track 3/4)
+
+J0–J11 (§ 16) is the execution core and stays frozen. This track is a
+strictly presentational layer on top of it — it consumes existing
+runtime state/tool results and renders/sounds them; it never decides
+what JARVIS does. Concretely:
+
+```text
+JARVIS CORE (execution, J0-J11, frozen)
+        │
+        ├── existing tool results / Result Envelope text
+        │        │
+        │        ▼
+        │   dashboard/server.py broadcast_content()/broadcast_speech_mute()
+        │        │  (server -> client WS messages, additive to existing ones)
+        │        ▼
+        └── frontend PresentationSurface + audioFx  (this track)
+```
+
+### Presentation Engine
+
+**Transport (backend):** `core/assistant_surface.py`'s `show_content(title, text, presentation=None)` — the SAME method every capability already calls (`web_search`, `calorie_counter.py`, `pushup_counter.py`, desktop's `ui.py`), now with one additive, optional structured payload. `dashboard/server.py`'s `broadcast_content(title, text, presentation=None)` fans it to the web client over the existing `"content"` WS message type (`presentation` key added only when given — old clients/old payload shapes are unaffected). **Real gap found and fixed alongside this:** `broadcast_content()` existed since an earlier phase but nothing ever called it (its own prior docstring said so) — the web frontend's content panel was dead code in the actual deployment. `main.py` now calls it at three real capability call sites: `get_weather` (structured `weather` payload, reusing `actions/weather.py`'s new `get_weather_data()`), `get_calendar_events` (structured `calendar` payload, including a second, bounded, real Google Calendar query — `actions/calendar.py`'s `get_month_marked_dates()` — for the grid's marked days), and `web_search` (`search_results` payload, wrapping the same real result text the desktop panel already showed).
+
+**Payload shape:** `{type, data}` — `type` is one of `weather | calendar | table | search_results | generic_information | status`, validated against an explicit registry (`frontend/src/components/presentation/registry.js`); an unrecognized/missing type falls back to plain title/text rendering, never a crash or a guess.
+
+**Rendering (frontend):** ONE reusable glass surface, `PresentationSurface.jsx`, mounted from `ContentPanel.jsx` (the same, only, mount point `state.content` has always had) — never a second modal/panel per presentation type. It resolves `presentation.type` via the registry and renders the matching typed component (`WeatherPresentation`, `CalendarPresentation`, `TablePresentation`, `SearchResultsPresentation`, `GenericInfoPresentation`, `StatusPresentation`), all under `frontend/src/components/presentation/`. Every renderer displays only backend-supplied fields — none fabricates data (the calendar grid's marked days come from a real, second Google Calendar query; search results are the real formatted text, never re-parsed into invented structured cards).
+
+**Lifecycle:** `materializing -> active -> [updating -> active]* -> dismissing`, tracked as local component state in `PresentationSurface.jsx` (HIDDEN is simply "not mounted" — `ContentPanel` renders nothing while `content` is null). A later broadcast while the surface is already mounted triggers a brief `updating` pulse, never a remount. Expand/collapse is a separate, local toggle. CSS transitions drive `materializing`/`dismissing`; `prefers-reduced-motion: reduce` suppresses them (`.pw-surface` in `index.css`).
+
+**Theme:** `PresentationSurface` receives `theme` (`"jarvis" | "sarana"`) from `App.jsx`'s own already-computed `identity` — the SAME value `IdentityTransition`/`Orb`/`SaranaFace` already use, never a second theme source. One CSS custom property, `--surface-accent` (`var(--acc)` for JARVIS, `var(--face-glow)` for SARANA — both existing tokens), themes every typed renderer uniformly; no per-theme component duplication.
+
+### Audio event system (Track 4)
+
+**`frontend/src/lib/audioFx.js`** — semantic event name in (`assistant_wake`, `assistant_sleep`, `assistant_listening`, `assistant_thinking`, `confirmation_required`, `blocked`, `error`, `transition_sarana_to_jarvis`, `transition_jarvis_to_sarana`), a short cue out. Deliberately NOT a second audio engine beside `lib/audioOut.js` — that module streams Gemini's own live-session TTS PCM over `/ws/audio-out` (continuous, server-driven speech); this module plays short, local, one-shot UI cues via the browser's own Web Audio API, no server round-trip, no shared state with speech playback.
+
+**Asset strategy (disclosed, per this track's own instructions):** no `.mp3`/`.wav` files. Every cue is synthesized in real time from `OscillatorNode`/`BiquadFilterNode`/`GainNode` primitives (tone/sweep/click/click-burst helpers) — a deliberate sound-design choice (the same technique real product UI sound, e.g. macOS system sounds, is often built from), not a placeholder standing in for assets that couldn't be generated here. The Sarana→JARVIS transition (the key requirement) layers a metallic click-burst, a rising precision sweep, and a low final lock-tone, in that order (~450ms total); the JARVIS→Sarana transition is a genuinely mirrored synthesis (lock-tone first, descending sweep, scattering click-burst last), not the same sound reversed or merely re-pitched.
+
+**Priority/mixing:** three tiers — `CRITICAL` (confirmation/blocked/error/transitions) always plays; `NORMAL` (wake/sleep) ducks under active speech; `AMBIENT` (listening/thinking) is fully suppressed while speaking. Every event has a cooldown (spam guard). `confirmation_required`/`blocked`/`error` are derived from the SAME Result Envelope tags every backend capability already emits (`result_envelope.py`'s `"[STATUS] evidence"` convention) — no new backend signal invented for audio.
+
+**Wired from `App.jsx`:** the transition cues fire from the existing `identityPhase` effect (a dedicated, separate effect — see that file's own comment on why, found via a real test regression while wiring it inline); wake/sleep/listening/thinking derive from the existing `assistantStatus` broadcasts (`main.py`'s `_push_state()`) via a small comparison effect, which also feeds `audioFx`'s own speaking-aware ducking.
+
+**Genuine, disclosed limitation:** `task_started`/`task_completed` are NOT wired — no existing signal distinguishes "a tool call started" from ordinary THINKING/SPEAKING state without inventing new backend plumbing speculatively (this track's own "no unnecessary architectural expansion" instruction). Desktop audio-fx (the PyQt6 app) is not implemented in this pass either — the same procedural-synthesis architecture could extend there later without redesign; only the web frontend has it today, matching where the cinematic HUD work (`IdentityTransition.jsx`) already lived.
+
+### Speech mute (Track 3/4, section 15)
+
+`main.py` gained `self._speech_muted` (session-scoped, resets on reconnect exactly like `self._jarvis_mode`) and a new `speech_mute` tool (`action: "on"|"off"`), mirroring the existing `jarvis_mode` tool's own pattern exactly. Gemini's live session stays `response_modalities=["AUDIO"]` for the whole connection (no cheap per-turn text-only switch exists), so muting suppresses the already-generated audio at its one real playback/broadcast choke point (`_play_audio()`) instead of stopping generation — understanding, task execution, and the visual UI all continue unaffected. `dashboard/server.py` broadcasts `speech_mute_changed` (mirroring `jarvis_mode_changed`); the frontend reducer gained one `speechMuted` field.
+
+### Real bug found and fixed via this track's own real-browser verification
+
+`App.jsx` had an early `return` (the "cannot reach backend" screen) positioned BEFORE a large block of hooks (`identity`/`identityPhase`/the crossfade effects) — a pre-existing React Rules-of-Hooks violation that had never actually been exercised in practice. Adding this track's own new hooks in the same block made it throw ("Rendered fewer hooks than expected") the first time a real browser actually hit the backend-unreachable render path (Playwright, with no backend running). Fixed the standard way: every hook now runs unconditionally on every render; the render OUTPUT still branches on `sessionError`, checked once, after every hook has already run — verified via a real headless-Chromium load showing zero console/page errors before and after.
+
+### Future compatibility (documented, not implemented)
+
+**Modes** (`ACTIVE`/`MUTED`/`SLEEP`/`FOCUS`/`PRIVACY`/`MAINTENANCE`): only the minimal piece this track actually needed — output-only mute — was built. Nothing here blocks a later, fuller mode system: `speechMuted`/`jarvisMode` are independent boolean reducer fields today: a future mode enum would supersede them without this track's own architecture needing to change (the WS message pattern, the reducer, the tool-dispatch pattern all generalize directly).
+
+**Universal Web Agent / Home Intelligence:** not touched, not referenced. The Presentation Engine's registry (`type -> renderer`) is exactly the extension point either would use to add a new visual module (e.g. a `web_page`/`device_status` presentation type) without changing `PresentationSurface.jsx`, `ContentPanel.jsx`, or the WS transport at all — genuinely easy to add later, not merely claimed to be.

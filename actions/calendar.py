@@ -91,6 +91,50 @@ def get_events(
     return [_summarize_event(item) for item in resp.get("items", [])]
 
 
+# Track 3 (Presentation Engine): a genuine, real calendar-GRID month view
+# needs to know which DAYS in a month have something on them, separate
+# from the caller's own originally-requested (often narrower) event
+# range — one bounded, real Google Calendar query for the whole month,
+# never invented/sampled data (section 22's own explicit requirement).
+MAX_MONTH_EVENTS_FOR_MARKING = 200
+
+
+def get_month_marked_dates(credentials, *, year: int, month: int, tzinfo) -> list[str]:
+    """Real event dates (YYYY-MM-DD, deduplicated, sorted) anywhere in
+    the given calendar month -- exactly what a calendar-grid presentation
+    needs to mark which days contain events, nothing more (no titles/
+    times here; get_events() on the caller's own actual requested range
+    already provides those). All-day multi-day events are marked on
+    every date they span, not just their start date."""
+    first = datetime(year, month, 1, tzinfo=tzinfo)
+    next_month = datetime(year + 1, 1, 1, tzinfo=tzinfo) if month == 12 else datetime(year, month + 1, 1, tzinfo=tzinfo)
+    events = get_events(credentials, time_min=first, time_max=next_month, max_results=MAX_MONTH_EVENTS_FOR_MARKING)
+
+    marked: set[str] = set()
+    for event in events:
+        start_raw, end_raw = event.get("start", ""), event.get("end", "")
+        if not start_raw:
+            continue
+        try:
+            start_date = datetime.fromisoformat(start_raw.replace("Z", "+00:00")).date()
+        except ValueError:
+            continue
+        try:
+            end_date = datetime.fromisoformat(end_raw.replace("Z", "+00:00")).date() if end_raw else start_date
+        except ValueError:
+            end_date = start_date
+        # Google's own all-day "end" date is EXCLUSIVE (the day after the
+        # event actually ends) -- back it off by one so a single all-day
+        # event doesn't mark an extra, real-event-free day.
+        if event.get("all_day") and end_date > start_date:
+            end_date -= timedelta(days=1)
+        d = start_date
+        while d <= end_date and d.month == month and d.year == year:
+            marked.add(d.isoformat())
+            d += timedelta(days=1)
+    return sorted(marked)
+
+
 def format_events(events: list[dict]) -> str:
     """Natural-language-ready text for Gemini to summarize in its own
     words -- never a pre-written sentence, never fabricated data (an

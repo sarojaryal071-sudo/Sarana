@@ -10,6 +10,7 @@ import { prepareImageForUpload, readFileAsBase64 } from "./lib/image";
 import { permissionManager } from "./lib/permissions";
 import { JarvisSocket } from "./lib/websocket";
 import { AudioOutPlayer } from "./lib/audioOut";
+import { playAudioFx, setAudioFxTheme, setSpeaking as setAudioFxSpeaking } from "./lib/audioFx";
 import { setMouthLevel } from "./lib/mouthLevel";
 import { MicStreamer } from "./lib/mic";
 import { stopCameraVision } from "./lib/cameraVision";
@@ -64,6 +65,20 @@ function requestAndSendLocation(token, { fresh = false } = {}) {
         permissionManager.reportObserved("location", e.code);
       }
     });
+}
+
+// Track 4: derives a semantic audio cue from the SAME Result Envelope
+// tags every backend capability already emits (result_envelope.py's own
+// "[STATUS] evidence" convention — see that module's docstring) — never
+// a new backend signal invented for this. A message with no recognized
+// leading tag plays nothing; this is deliberately conservative (only
+// the three genuinely consequential/attention-worthy tags get a cue),
+// matching section 12's own "use silence when silence is better".
+function playResultTagAudioFx(text) {
+  const t = (text || "").trimStart();
+  if (t.startsWith("[CONFIRMATION_REQUIRED]")) playAudioFx("confirmation_required");
+  else if (t.startsWith("[BLOCKED]")) playAudioFx("blocked");
+  else if (t.startsWith("[VERIFIED_FAILURE]")) playAudioFx("error");
 }
 
 export default function App() {
@@ -226,15 +241,17 @@ export default function App() {
         switch (msg.type) {
           case "log":
             dispatch({ type: "LOG_MESSAGE", speaker: msg.speaker, text: msg.text, ts: msg.ts });
+            playResultTagAudioFx(msg.text);
             break;
           case "sys":
             dispatch({ type: "SYS_MESSAGE", text: msg.text, ts: msg.ts });
+            playResultTagAudioFx(msg.text);
             break;
           case "status":
             dispatch({ type: "STATUS_MESSAGE", state: msg.state });
             break;
           case "content":
-            dispatch({ type: "CONTENT_MESSAGE", title: msg.title, text: msg.text });
+            dispatch({ type: "CONTENT_MESSAGE", title: msg.title, text: msg.text, presentation: msg.presentation ?? null });
             break;
           case "file_received":
             dispatch({ type: "SYS_MESSAGE", text: `File received: ${msg.name}`, ts: null });
@@ -282,6 +299,13 @@ export default function App() {
             break;
           case "screen_vision_stop":
             setVisionRequest((cur) => (cur && cur.source === "screen" && cur.requestId === msg.request_id ? null : cur));
+            break;
+          case "speech_mute_changed":
+            // Track 3/4: backend is the authoritative source of
+            // self._speech_muted (see main.py's speech_mute tool) —
+            // mirrors jarvis_mode_changed's own reflect-only handling
+            // immediately below.
+            dispatch({ type: "SPEECH_MUTE", value: msg.active });
             break;
           case "jarvis_mode_changed":
             // JARVIS Mode: backend is the authoritative source of
@@ -690,24 +714,6 @@ export default function App() {
 
   useEffect(() => () => micRef.current?.stop(), []);
 
-  // Phase 9: the main shell renders regardless of auth state (matching the
-  // desktop app's own layout — the HUD/panels are always there, an overlay
-  // gates access on top of it), with the login card as a dimmed overlay
-  // instead of a full-screen replacement. sessionError still short-circuits
-  // to a minimal message since the shell can't do much without /api/session
-  // ever having loaded (no assistant name, no tool list).
-  if (sessionError && !sessionLoaded) {
-    return (
-      <div className="login-overlay">
-        <div className="login-card">
-          <h1>◈ SARANA</h1>
-          <p>{sessionError}</p>
-          <p>Make sure the backend is running: <code>python server_main.py</code></p>
-        </div>
-      </div>
-    );
-  }
-
   const authenticated = state.authenticationState === "authenticated";
   const disabled = !authenticated || state.connectionState !== "connected";
 
@@ -770,7 +776,42 @@ export default function App() {
     return () => clearTimeout(identityTimerRef.current);
   }, [targetIdentity, identity]);
 
+  // Track 4: the mechanical-assembly cue, kept in its own effect (not
+  // inlined above) so it never fires twice for one switch and never
+  // couples audio timing to the visual swap's own re-render deps.
+  useEffect(() => {
+    if (identityPhase !== "deconstruct") return;
+    playAudioFx(targetIdentity === "jarvis" ? "transition_sarana_to_jarvis" : "transition_jarvis_to_sarana", { force: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [identityPhase]);
+
   const identityFading = identityPhase === "deconstruct";
+
+  // Track 4: every OTHER cue (wake/sleep/listening/thinking/confirmation/
+  // blocked/error) is themed by whichever identity is CURRENTLY shown —
+  // deliberately `identity`, not `targetIdentity` (the transition cue
+  // above already uses targetIdentity directly, since it IS the theme
+  // change happening).
+  useEffect(() => { setAudioFxTheme(identity); }, [identity]);
+
+  // Track 4: wake/sleep/listening/thinking — derived from the SAME
+  // authoritative assistantStatus broadcasts the visual HUD already
+  // reacts to (main.py's _push_state(), see the "status" WS case
+  // above), never a separate signal invented for audio. Also feeds
+  // audioFx's own speaking-aware ducking (setSpeaking) so NORMAL/
+  // AMBIENT cues never fight an in-progress reply.
+  const prevStatusRef = useRef(state.assistantStatus);
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    const next = state.assistantStatus;
+    prevStatusRef.current = next;
+    setAudioFxSpeaking(next === "SPEAKING");
+    if (prev === next) return;
+    if (next === "SLEEPING") playAudioFx("assistant_sleep");
+    else if (prev === "SLEEPING") playAudioFx("assistant_wake");
+    else if (next === "LISTENING") playAudioFx("assistant_listening");
+    else if (next === "THINKING") playAudioFx("assistant_thinking");
+  }, [state.assistantStatus]);
 
   // SARANA Face UI: an active expression_override (see the WS handler
   // above) clears itself on a real timer rather than being silently
@@ -792,6 +833,29 @@ export default function App() {
     }, msLeft);
     return () => clearTimeout(t);
   }, [state.expressionOverride, dispatch]);
+
+  // Real bug found and fixed via this stage's own real-browser
+  // verification (not hypothetical): every hook below this line used to
+  // sit AFTER an early `return` (sessionError && !sessionLoaded), which
+  // is illegal — React requires the exact same hooks in the exact same
+  // order on every render. It never surfaced before because nothing had
+  // actually exercised a real "backend unreachable on load" render next
+  // to these hooks; adding Track 3/4's own new hooks here is what made
+  // the pre-existing violation throw ("Rendered fewer hooks than
+  // expected"). Fixed the standard way: every hook now runs
+  // unconditionally on every render; only the RENDER OUTPUT branches,
+  // checked here, after every hook has already run.
+  if (sessionError && !sessionLoaded) {
+    return (
+      <div className="login-overlay">
+        <div className="login-card">
+          <h1>◈ SARANA</h1>
+          <p>{sessionError}</p>
+          <p>Make sure the backend is running: <code>python server_main.py</code></p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -840,7 +904,7 @@ export default function App() {
               {identityPhase && <IdentityTransition phase={identityPhase} targetIdentity={targetIdentity} />}
             </div>
           )}
-          <ContentPanel content={state.content} onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })} />
+          <ContentPanel content={state.content} theme={identity} onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })} />
           <Controls
             onSend={handleSend}
             onSendImage={handleSendImage}

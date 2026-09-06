@@ -9,7 +9,7 @@ Run with:
 import asyncio
 from unittest.mock import patch, MagicMock
 
-from actions.weather import get_weather_text
+from actions.weather import get_weather_text, get_weather_data, format_weather_text
 from core.headless_surface import HeadlessSurface
 from main import JarvisLive
 
@@ -35,6 +35,28 @@ _OPEN_METEO_RESPONSE = {
         "precipitation_sum": [0.0, 4.2, 0.0],
     },
 }
+
+
+def _fake_weather_data(location: str = "") -> dict:
+    """A structured get_weather_data()-shaped dict for tests that patch
+    main.get_weather_data() directly — main.py's own get_weather dispatch
+    formats its text reply from exactly this shape (format_weather_text())
+    and broadcasts the same dict as the weather presentation payload
+    (Track 3), so patching at this level exercises both paths honestly."""
+    return {
+        "location": location,
+        "current": {
+            "temperature": 5.2, "unit": "°C", "feels_like": 2.1, "feels_like_unit": "°C",
+            "condition": "partly cloudy", "wind": 14.3, "wind_unit": "km/h",
+            "precipitation": 0.0, "precipitation_unit": "mm",
+        },
+        "daily": [
+            {"label": "Today", "date": "2026-08-27", "condition": "partly cloudy",
+             "high": 8.0, "low": 1.0, "temp_unit": "°C",
+             "precip_probability": 10, "precip_probability_unit": "%",
+             "precip_total": 0.0, "precip_total_unit": "mm"},
+        ],
+    }
 
 
 class _FakeFunctionCall:
@@ -106,11 +128,12 @@ def test_get_weather_tool_uses_current_session_location() -> None:
     async def _run():
         jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
         jarvis._set_session_location(60.17, 24.94, 50.0)
-        with patch("main.get_weather_text", return_value="sunny and mild") as mock_weather:
+        fake_data = _fake_weather_data()
+        with patch("main.get_weather_data", return_value=fake_data) as mock_weather:
             fc = _FakeFunctionCall("get_weather", {})
             resp = await jarvis._execute_tool(fc)
-        assert resp.response["result"] == "sunny and mild"
-        mock_weather.assert_called_once_with(60.17, 24.94)
+        assert resp.response["result"] == format_weather_text(fake_data)
+        mock_weather.assert_called_once_with(60.17, 24.94, "")
     asyncio.run(_run())
     print("test_get_weather_tool_uses_current_session_location: PASS")
 
@@ -118,15 +141,40 @@ def test_get_weather_tool_uses_current_session_location() -> None:
 def test_get_weather_tool_with_named_place_geocodes_first() -> None:
     async def _run():
         jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        fake_data = _fake_weather_data("Helsinki, Finland")
         with patch("main.geocode_place", return_value=(60.17, 24.94, "Helsinki, Finland")) as mock_geo, \
-             patch("main.get_weather_text", return_value="weather text") as mock_weather:
+             patch("main.get_weather_data", return_value=fake_data) as mock_weather:
             fc = _FakeFunctionCall("get_weather", {"place": "Helsinki"})
             resp = await jarvis._execute_tool(fc)
         mock_geo.assert_called_once_with("Helsinki")
         mock_weather.assert_called_once_with(60.17, 24.94, "Helsinki, Finland")
-        assert resp.response["result"] == "weather text"
+        assert resp.response["result"] == format_weather_text(fake_data)
     asyncio.run(_run())
     print("test_get_weather_tool_with_named_place_geocodes_first: PASS")
+
+
+def test_get_weather_tool_broadcasts_the_weather_presentation_to_the_dashboard() -> None:
+    """Track 3: the SAME structured data used for the spoken/text reply
+    is also broadcast to the web frontend as a weather presentation
+    payload — real gap check, not merely that text formatting works."""
+    async def _run():
+        jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
+        jarvis._set_session_location(60.17, 24.94, 50.0)
+        fake_data = _fake_weather_data()
+        fake_dashboard = MagicMock()
+        fake_dashboard.broadcast_content = MagicMock(return_value=asyncio.sleep(0))
+        jarvis._dashboard = fake_dashboard
+        with patch("main.get_weather_data", return_value=fake_data):
+            fc = _FakeFunctionCall("get_weather", {})
+            await jarvis._execute_tool(fc)
+        await asyncio.sleep(0)  # let the create_task()'d broadcast actually run
+        fake_dashboard.broadcast_content.assert_called_once()
+        call_args = fake_dashboard.broadcast_content.call_args.args
+        presentation = call_args[2]
+        assert presentation["type"] == "weather"
+        assert presentation["data"] == fake_data
+    asyncio.run(_run())
+    print("test_get_weather_tool_broadcasts_the_weather_presentation_to_the_dashboard: PASS")
 
 
 def test_get_weather_tool_unknown_place_is_honest() -> None:
@@ -171,7 +219,7 @@ def test_get_weather_tool_propagates_provider_failure_honestly() -> None:
     async def _run():
         jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
         jarvis._set_session_location(60.17, 24.94, 50.0)
-        with patch("main.get_weather_text", side_effect=RuntimeError("Open-Meteo unreachable")):
+        with patch("main.get_weather_data", side_effect=RuntimeError("Open-Meteo unreachable")):
             fc = _FakeFunctionCall("get_weather", {})
             resp = await jarvis._execute_tool(fc)
         assert "failed" in resp.response["result"].lower()
@@ -196,6 +244,7 @@ if __name__ == "__main__":
     test_unknown_weather_code_degrades_gracefully()
     test_get_weather_tool_uses_current_session_location()
     test_get_weather_tool_with_named_place_geocodes_first()
+    test_get_weather_tool_broadcasts_the_weather_presentation_to_the_dashboard()
     test_get_weather_tool_unknown_place_is_honest()
     test_get_weather_tool_without_location_reports_unavailable()
     test_get_weather_tool_desktop_without_location_is_honest_not_an_error()

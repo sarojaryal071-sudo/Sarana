@@ -73,8 +73,15 @@ class HeadlessSurface:
         # set_expression tool dispatch).
         print(f"[Headless] expression={expression} for {duration_seconds:.0f}s")
 
-    def show_content(self, title: str, text: str) -> None:
-        print(f"[Headless] content: {title}\n{text}")
+    def show_content(self, title: str, text: str, presentation: dict | None = None) -> None:
+        # Track 3: `presentation` is deliberately NOT forwarded to
+        # dashboard/server.py's broadcast_content() from in here — main.py
+        # itself calls broadcast_content() directly at each real call
+        # site (same explicit "surface call + dashboard broadcast, two
+        # separate calls" pattern set_jarvis_mode()/broadcast_jarvis_mode()
+        # already use), so this stays a pure, dashboard-unaware surface.
+        kind = f" ({presentation.get('type')})" if presentation else ""
+        print(f"[Headless] content: {title}{kind}\n{text}")
 
     def start_camera_stream(self) -> None:
         pass   # no camera hardware/preview widget headlessly

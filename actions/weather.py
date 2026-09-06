@@ -22,6 +22,16 @@ deliberately NOT caught here -- they propagate up to _execute_tool()'s
 existing generic exception handling, which already turns any tool
 failure into an honest, spoken explanation instead of silently
 fabricating an answer. This matches every other action in this codebase.
+
+Track 3 (Presentation Engine) addition: `get_weather_data()` is the SAME
+real Open-Meteo fetch, reshaped into a structured dict instead of prose --
+added so main.py can hand real weather data to the frontend's
+WeatherPresentation (see frontend/src/components/presentation/
+WeatherPresentation.jsx) without a second HTTP call or a second parser.
+`get_weather_text()` is now a thin formatter OVER `get_weather_data()` --
+same fetch, same fields, byte-identical output to before this change
+(verified via tests/test_weather.py) -- Gemini's own spoken-weather path
+is completely unaffected.
 """
 from __future__ import annotations
 
@@ -46,6 +56,8 @@ _WMO_DESCRIPTIONS = {
     95: "thunderstorm", 96: "thunderstorm with slight hail", 99: "thunderstorm with heavy hail",
 }
 
+_DAY_LABELS = ["Today", "Tomorrow", "Day after tomorrow"]
+
 
 def _describe_code(code) -> str:
     try:
@@ -54,12 +66,30 @@ def _describe_code(code) -> str:
         return "unknown conditions"
 
 
-def get_weather_text(latitude: float, longitude: float, place_label: str = "") -> str:
-    """Fetches current conditions + a short forecast from Open-Meteo for
-    the given coordinates and returns a compact, natural-language-ready
-    text block for Gemini to summarize in its own words -- never a
-    pre-written sentence spoken verbatim, and never fabricated data (see
-    this module's own docstring for how a failure is handled instead)."""
+def get_weather_data(latitude: float, longitude: float, place_label: str = "") -> dict:
+    """Fetches current conditions + a 3-day forecast from Open-Meteo and
+    returns it as a structured dict -- the one real HTTP call/parse this
+    module makes; get_weather_text() below formats the SAME dict into
+    prose rather than fetching separately. Shape:
+        {
+          "location": str,               # place_label, "" if none given
+          "current": {
+            "temperature": float, "unit": str,
+            "feels_like": float, "feels_like_unit": str,
+            "condition": str,            # e.g. "partly cloudy"
+            "wind": float, "wind_unit": str,
+            "precipitation": float, "precipitation_unit": str,
+          },
+          "daily": [
+            {"label": str, "date": str, "condition": str,
+             "high": float, "low": float, "temp_unit": str,
+             "precip_probability": float, "precip_probability_unit": str},
+            ...
+          ],
+        }
+    Raises exactly what requests/the JSON parse would raise -- callers
+    (main.py's _execute_tool()) already handle that honestly; this
+    function never catches/hides a real failure (see module docstring)."""
     resp = requests.get(
         OPEN_METEO_URL,
         params={
@@ -67,6 +97,8 @@ def get_weather_text(latitude: float, longitude: float, place_label: str = "") -
             "longitude": longitude,
             "current": "temperature_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m",
             "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum",
+            # (kept identical to the pre-split request -- see the daily
+            # loop below, which still reports precipitation_sum per day)
             "timezone": "auto",
             "forecast_days": 3,
         },
@@ -76,29 +108,80 @@ def get_weather_text(latitude: float, longitude: float, place_label: str = "") -
     data = resp.json()
 
     current = data["current"]
-    lines = []
-    if place_label:
-        lines.append(f"Weather for {place_label}:")
-    lines.append(
-        f"Current: {current['temperature_2m']}{data['current_units']['temperature_2m']}, "
-        f"feels like {current['apparent_temperature']}{data['current_units']['apparent_temperature']}, "
-        f"{_describe_code(current['weather_code'])}, "
-        f"wind {current['wind_speed_10m']}{data['current_units']['wind_speed_10m']}, "
-        f"precipitation {current['precipitation']}{data['current_units']['precipitation']} right now."
-    )
+    current_units = data["current_units"]
+    structured = {
+        "location": place_label or "",
+        "current": {
+            "temperature": current["temperature_2m"],
+            "unit": current_units["temperature_2m"],
+            "feels_like": current["apparent_temperature"],
+            "feels_like_unit": current_units["apparent_temperature"],
+            "condition": _describe_code(current["weather_code"]),
+            "wind": current["wind_speed_10m"],
+            "wind_unit": current_units["wind_speed_10m"],
+            "precipitation": current["precipitation"],
+            "precipitation_unit": current_units["precipitation"],
+        },
+        "daily": [],
+    }
 
     daily = data.get("daily")
+    daily_units = data.get("daily_units", {})
     if daily and daily.get("time"):
-        day_labels = ["Today", "Tomorrow", "Day after tomorrow"]
         for i, date in enumerate(daily["time"][:3]):
-            label = day_labels[i] if i < len(day_labels) else date
-            lines.append(
-                f"{label} ({date}): {_describe_code(daily['weather_code'][i])}, "
-                f"high {daily['temperature_2m_max'][i]}{data['daily_units']['temperature_2m_max']}, "
-                f"low {daily['temperature_2m_min'][i]}{data['daily_units']['temperature_2m_min']}, "
-                f"chance of precipitation {daily['precipitation_probability_max'][i]}"
-                f"{data['daily_units']['precipitation_probability_max']}, "
-                f"total precipitation {daily['precipitation_sum'][i]}{data['daily_units']['precipitation_sum']}."
-            )
+            label = _DAY_LABELS[i] if i < len(_DAY_LABELS) else date
+            structured["daily"].append({
+                "label": label,
+                "date": date,
+                "condition": _describe_code(daily["weather_code"][i]),
+                "high": daily["temperature_2m_max"][i],
+                "low": daily["temperature_2m_min"][i],
+                "temp_unit": daily_units.get("temperature_2m_max", ""),
+                "precip_probability": daily["precipitation_probability_max"][i],
+                "precip_probability_unit": daily_units.get("precipitation_probability_max", ""),
+                "precip_total": daily["precipitation_sum"][i],
+                "precip_total_unit": daily_units.get("precipitation_sum", ""),
+            })
+
+    return structured
+
+
+def format_weather_text(w: dict) -> str:
+    """Pure formatter: structured get_weather_data() output -> the SAME
+    compact, natural-language-ready text get_weather_text() has always
+    returned (see that function's own docstring). Split out so a caller
+    that already has the structured dict (main.py -- see its own
+    presentation-broadcast use) never fetches Open-Meteo twice just to
+    get both the text and the structured shape for one response."""
+    cur = w["current"]
+
+    lines = []
+    if w["location"]:
+        lines.append(f"Weather for {w['location']}:")
+    lines.append(
+        f"Current: {cur['temperature']}{cur['unit']}, "
+        f"feels like {cur['feels_like']}{cur['feels_like_unit']}, "
+        f"{cur['condition']}, "
+        f"wind {cur['wind']}{cur['wind_unit']}, "
+        f"precipitation {cur['precipitation']}{cur['precipitation_unit']} right now."
+    )
+    for day in w["daily"]:
+        lines.append(
+            f"{day['label']} ({day['date']}): {day['condition']}, "
+            f"high {day['high']}{day['temp_unit']}, "
+            f"low {day['low']}{day['temp_unit']}, "
+            f"chance of precipitation {day['precip_probability']}{day['precip_probability_unit']}, "
+            f"total precipitation {day['precip_total']}{day['precip_total_unit']}."
+        )
 
     return "\n".join(lines)
+
+
+def get_weather_text(latitude: float, longitude: float, place_label: str = "") -> str:
+    """Compact, natural-language-ready text block for Gemini to summarize
+    in its own words -- never a pre-written sentence spoken verbatim, and
+    never fabricated data (see module docstring for how a failure is
+    handled instead). A thin fetch-then-format over get_weather_data()/
+    format_weather_text() -- same fetch, same fields, same output shape
+    as before this function was split."""
+    return format_weather_text(get_weather_data(latitude, longitude, place_label))
