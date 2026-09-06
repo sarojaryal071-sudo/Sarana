@@ -115,6 +115,7 @@ from actions import system_shortcuts
 from actions.office_control import office_control
 from actions.file_controller import file_controller
 from actions.repo_agent import repo_agent
+from actions.git_control import git_control
 # J6: the EXISTING perception primitives, reused as-is — see inspect()'s
 # own docstring. Never a new controller/screenshot engine.
 from actions.computer_control import get_active_window_title, list_ui_elements
@@ -346,10 +347,14 @@ class Task:
 #                   remain conceptual — J7 deliberately did not build an
 #                   arbitrary shell-execution capability (no safe
 #                   existing mechanism for one exists in this repo).
-#   DEVELOPMENT  — repo agent / git. `repo_agent` (J8) is the first real
-#                   member — search/test-run/edit over an explicit
-#                   repository boundary. Git itself (status/commit/push/
-#                   branch/merge) remains conceptual — that's J9, not J8.
+#   DEVELOPMENT  — repo agent / git. `repo_agent` (J8) — search/test-run/
+#                   edit over an explicit repository boundary — and now
+#                   `git` (J9) — status/diff/log/branch/stage/commit over
+#                   the SAME explicit repository boundary, reusing
+#                   repo_agent.py's own resolve_repo_root() — are both
+#                   real members. Push/pull/fetch/remote administration
+#                   remain out of scope (J9's own explicit boundary, not
+#                   a gap); merge/rebase/deployment automation are J11+.
 #   DEPLOYMENT   — deploy + verify. Concept only, not built.
 
 FAMILY_SYSTEM      = "system"
@@ -394,6 +399,24 @@ _DOMAINS = [
         "keywords": ["word", "excel", "spreadsheet", "workbook", "worksheet",
                      "cell", "document", "paragraph", "insert", "replace",
                      "bold", "italic", "underline", "formatting", "save"],
+    },
+    # git is declared BEFORE repo_agent (and both before browser, for the
+    # same reason repo_agent was moved ahead of browser in J8) so a
+    # phrase like "commit the repo changes" — which ties 1-1: "commit"
+    # for git vs. "repo" for repo_agent — resolves to git, since only
+    # git actually has a commit action; same tie-break-by-declaration-
+    # order technique already used throughout this list. Deliberately
+    # EXCLUDES "status" (already system_shortcut's own keyword, e.g.
+    # "check battery status") and "push"/"pull"/"fetch"/"reset"/"clean"/
+    # "force" (git_control.py's own permanently-blocked actions are
+    # reached only by an explicit action name, never invented a routing
+    # keyword for — see that module's docstring: J9 does not manufacture
+    # natural-language routing for operations it refuses to perform).
+    {
+        "name": "git",
+        "family": FAMILY_DEVELOPMENT,
+        "keywords": ["git", "commit", "commits", "branch", "branches",
+                     "diff", "stage", "staged", "unstaged", "checkout", "log"],
     },
     # repo_agent is declared BEFORE browser so a phrase like "search the
     # repository for X" (which ties 1-1: "search" for browser vs.
@@ -1225,6 +1248,108 @@ def _run_repo_agent(objective: str, confirmed: bool = False, context: "TaskConte
     return _envelope.envelope(tag, result)
 
 
+# ── J9: Git ──────────────────────────────────────────────────────────────
+# Reuses _SEARCH_QUOTED_RE (defined above for repo_agent's search query
+# extraction) for the commit message too — same conservative shape
+# ("only an explicit quoted string, never a guessed message") applied a
+# second time rather than writing a near-identical regex.
+
+def _classify_git_result(result: str) -> str:
+    """git_control.py's own git_control() returns a Result-Envelope-
+    tagged string for every path — same defensive-but-normally-
+    unreachable fallback discipline as every other classifier here."""
+    tag = status_of(result)
+    if tag:
+        return tag
+    return _envelope.STATUS_INCONCLUSIVE
+
+
+def _extract_commit_message(objective: str) -> str | None:
+    m = _SEARCH_QUOTED_RE.search(objective)
+    return m.group(1).strip() if m else None
+
+
+def _parse_git_action(objective: str) -> dict | None:
+    """Deterministic (objective -> git_control() parameters) parsing —
+    JARVIS's own extraction, no LLM call for WHICH Git action to take.
+    Order matters: checkout/switch is checked before branch so "checkout
+    the main branch" (which contains both words) maps to the honestly-
+    unsupported checkout action, not silently to a branch listing.
+    Returns None only when genuinely nothing can be determined (a commit
+    request with no extractable quoted message) — same honesty
+    discipline as _parse_file_action/_parse_repo_action."""
+    words = _normalize(objective)
+
+    # Checked FIRST and explicitly, even though these words are not
+    # among the git domain's own routing keywords (see that domain's
+    # comment — J9 deliberately does not invent routing keywords for
+    # operations it refuses to perform). Once an objective has already
+    # reached this function (meaning it DID contain "git"/"commit"/
+    # "branch"/etc.), a mention of push/pull/fetch/force/reset/clean/
+    # rebase/merge must still surface git_control.py's own explicit
+    # BLOCKED response — never silently fall through to the "status"
+    # default below, which would otherwise return a misleadingly
+    # unrelated but valid-looking success for something the user
+    # actually asked to push/reset/clean. Real gap found and fixed
+    # during J9's own live end-to-end verification (not hypothetical):
+    # "git push these changes" was silently answered with a git status
+    # report instead of an honest refusal.
+    if words & {"push", "pull", "fetch"}:
+        return {"action": "push" if "push" in words else ("pull" if "pull" in words else "fetch")}
+    if "force" in words:
+        return {"action": "force_push"}
+    if "reset" in words:
+        return {"action": "reset_hard"}
+    if "clean" in words:
+        return {"action": "clean"}
+    if "rebase" in words:
+        return {"action": "rebase"}
+    if "merge" in words:
+        return {"action": "merge"}
+
+    if words & {"checkout", "switch"}:
+        return {"action": "checkout"}
+    if words & {"branch", "branches"}:
+        return {"action": "branch"}
+    if words & {"diff"}:
+        return {"action": "diff"}
+    if words & {"log", "commits", "history"}:
+        return {"action": "log"}
+    if words & {"stage", "staged", "unstaged"}:
+        return {"action": "stage"}
+    if words & {"commit"}:
+        message = _extract_commit_message(objective)
+        return {"action": "commit", "message": message} if message else None
+    # Bare "git status"/"check git" with no more specific sub-action
+    # keyword — status is the safe, always-available, read-only default
+    # (route() already required at least one git-domain keyword to
+    # reach this function at all).
+    return {"action": "status"}
+
+
+def _run_git(objective: str, confirmed: bool = False, context: "TaskContext | None" = None) -> str:
+    """Parses the objective into git_control.py's own (action, message/
+    paths, ...) parameter shape, then calls it in-process exactly as it
+    already exists — no second Git controller. `confirmed` is threaded
+    straight through to git_control.py's EXISTING is_consequential()/
+    is_confirmed() gate for its commit action, the same way
+    _run_repo_agent already does for repo_agent.py's edit action."""
+    params = _parse_git_action(objective)
+    if params is None:
+        return _envelope.envelope(
+            _envelope.STATUS_INCONCLUSIVE,
+            "no specific Git action could be determined from this objective — "
+            "git_control.py needs a commit request to include an explicit "
+            "quoted message; ask the user to be concrete before trying again",
+        )
+    params["confirmed"] = confirmed
+    result = git_control(parameters=params)
+    tag = _classify_git_result(result)
+    if status_of(result):
+        return result
+    return _envelope.envelope(tag, result)
+
+
 _HANDLERS = {
     "youtube": _run_youtube,
     "browser": _run_browser,
@@ -1234,6 +1359,7 @@ _HANDLERS = {
     "system_shortcut": _run_system_shortcut,
     "file_system": _run_file_system,
     "repo_agent": _run_repo_agent,
+    "git": _run_git,
 }
 
 # Bounded, ordered, TIERED recovery chain (J5's own name for what this
@@ -1277,6 +1403,13 @@ _RECOVERY_CHAIN = {
 # J8 (repo_agent) same again: a failed search/test-run/edit has no
 # genuine alternative method either (there's one way to grep a repo, one
 # test command to run) — no repo_agent->* entry.
+# J9 (git) same reasoning again: a failed status/diff/log/branch/stage/
+# commit has no genuine alternative METHOD to fall back to (there is
+# only one way to run `git status`, one way to commit what's staged) —
+# no git->* entry. Recovery also must never be used to retry a commit
+# past CONFIRMATION_REQUIRED/BLOCKED — see _execute_step()'s own
+# early-return handling for those, checked before this dict is ever
+# consulted, unchanged by J9.
 
 
 # ── Context extraction (Phase 5A) ───────────────────────────────────────

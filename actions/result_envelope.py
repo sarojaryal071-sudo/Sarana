@@ -117,6 +117,13 @@ _CONSEQUENTIAL_ACTION_NAMES = frozenset({
     # name — modifying source code is consequential (it can break a
     # working repository), same tier as delete/shutdown/restart.
     "repo_edit",
+    # J9 (Git): git_control.py's own commit action name — creating a
+    # commit changes repository HISTORY (unlike stage/add, which is
+    # trivially reversible), same tier as delete/repo_edit/shutdown/
+    # restart. Named "git_commit" rather than the bare "commit" so it
+    # can never collide with an unrelated future "commit" action name in
+    # a different module.
+    "git_commit",
 })
 
 _CONSEQUENTIAL_GOAL_PATTERNS = (
