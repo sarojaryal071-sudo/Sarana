@@ -144,8 +144,20 @@ _MAX_STEPS_PER_TASK = 3
 # objective; this one bounds how many objectives a single jarvis_task
 # call may contain at all. Deliberately small — this is a guard against a
 # malformed/runaway objectives list, not a workflow-engine capacity
-# limit; today's real compound objectives (see Phase 5B) need 2-3.
-_MAX_OBJECTIVES_PER_TASK = 4
+# limit.
+#
+# J10 finding, real not speculative: this was 4 (Phase 5A's own estimate
+# — "today's real compound objectives need 2-3" — made before J8/J9
+# existed). A genuine composed technical objective (section 4's own
+# worked example: "find why X is broken, fix it, run the relevant
+# tests, ... commit the fix") needs search -> edit -> run_tests ->
+# stage -> commit, five steps at minimum — 4 silently rejected exactly
+# this workflow with a bare "more than the bounded maximum" refusal,
+# discovered directly via this stage's own composed-workflow test.
+# Raised to 6 (one step of headroom beyond the 5-step minimum) — still a
+# small, deliberate guard against a malformed/runaway list, not an
+# unbounded workflow engine.
+_MAX_OBJECTIVES_PER_TASK = 6
 
 # ── Task state ───────────────────────────────────────────────────────
 
@@ -1230,7 +1242,13 @@ def _run_repo_agent(objective: str, confirmed: bool = False, context: "TaskConte
     exactly as it already exists — no second repository agent. `confirmed`
     is threaded straight through to repo_agent.py's EXISTING
     is_consequential()/is_confirmed() gate for its edit action, the same
-    way _run_file_system already does for file_controller.py's delete."""
+    way _run_file_system already does for file_controller.py's delete.
+
+    J10: also records, into the SAME task's TaskContext, whether a code
+    edit has happened that no subsequent test run has verified yet — see
+    `_PENDING_TEST_VERIFICATION_KEY`'s own comment below for why this is
+    the one genuine invariant J10 adds (repo_agent.py itself is NOT
+    modified; this is purely Task-Engine-level bookkeeping)."""
     params = _parse_repo_action(objective)
     if params is None:
         return _envelope.envelope(
@@ -1243,9 +1261,58 @@ def _run_repo_agent(objective: str, confirmed: bool = False, context: "TaskConte
     params["confirmed"] = confirmed
     result = repo_agent(parameters=params)
     tag = _classify_repo_result(result)
+    if tag == _envelope.STATUS_VERIFIED_SUCCESS:
+        action = params.get("action")
+        if action == "edit":
+            _mark_repo_edit_pending_verification(context)
+        elif action == "run_tests":
+            _mark_tests_verified(context)
     if status_of(result):
         return result
     return _envelope.envelope(tag, result)
+
+
+# ── J10: technical-objective composition — test-before-commit invariant ──
+# The one concrete gap left open by J9's own report ("that composition is
+# J10's job" — see this file's own `git` domain comment and
+# docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md's J9 entry): within ONE
+# task, a repo_agent EDIT (J8) that succeeds must be followed by a
+# repo_agent RUN_TESTS (J8) that ALSO succeeds before a git COMMIT (J9)
+# in the SAME task is allowed to even reach git_control.py's own
+# confirmation gate — matching section 8/9's own "JARVIS must not commit
+# a code change merely because the edit succeeded" requirement literally.
+#
+# Reuses TaskContext (Phase 5A's existing cross-step, runtime-only
+# mechanism, exactly what section 15 of this stage's own instructions
+# names) — no new state/memory system, no new class. Deliberately scoped
+# to ONLY engage when THIS SAME task actually touched repo_agent's edit
+# action: a bare, standalone "commit these changes with message X" task
+# (nothing in this task's own context marks a pending edit) is completely
+# unaffected — J9's own already-tested, already-frozen standalone commit
+# behavior (tests/test_git_control.py's own commit tests, none of which
+# run inside a multi-step Task at all) is preserved exactly. Neither
+# repo_agent.py nor git_control.py is modified for this — both stay
+# exactly as J8/J9 shipped them; this is pure Task-Engine orchestration
+# around them, per section 5/16's own "compose, don't redesign" rule.
+_PENDING_TEST_VERIFICATION_KEY = "pending_test_verification"
+
+
+def _mark_repo_edit_pending_verification(context: "TaskContext | None") -> None:
+    if context is not None:
+        context.values[_PENDING_TEST_VERIFICATION_KEY] = "true"
+
+
+def _mark_tests_verified(context: "TaskContext | None") -> None:
+    """Only a VERIFIED_SUCCESS test run clears the pending flag — a
+    VERIFIED_FAILURE/INCONCLUSIVE run leaves it set, since the code is
+    either confirmed still broken or not confirmed fixed either way;
+    commit must remain refused in both cases."""
+    if context is not None:
+        context.values[_PENDING_TEST_VERIFICATION_KEY] = "false"
+
+
+def _commit_blocked_by_unverified_edit(context: "TaskContext | None") -> bool:
+    return bool(context is not None and context.values.get(_PENDING_TEST_VERIFICATION_KEY) == "true")
 
 
 # ── J9: Git ──────────────────────────────────────────────────────────────
@@ -1333,7 +1400,12 @@ def _run_git(objective: str, confirmed: bool = False, context: "TaskContext | No
     already exists — no second Git controller. `confirmed` is threaded
     straight through to git_control.py's EXISTING is_consequential()/
     is_confirmed() gate for its commit action, the same way
-    _run_repo_agent already does for repo_agent.py's edit action."""
+    _run_repo_agent already does for repo_agent.py's edit action.
+
+    J10: a commit is refused (never even reaching git_control.py, so
+    nothing is staged/committed) if THIS SAME task's context shows a
+    code edit that no subsequent test run has verified yet — see
+    `_commit_blocked_by_unverified_edit()`'s own comment above."""
     params = _parse_git_action(objective)
     if params is None:
         return _envelope.envelope(
@@ -1341,6 +1413,13 @@ def _run_git(objective: str, confirmed: bool = False, context: "TaskContext | No
             "no specific Git action could be determined from this objective — "
             "git_control.py needs a commit request to include an explicit "
             "quoted message; ask the user to be concrete before trying again",
+        )
+    if params.get("action") == "commit" and _commit_blocked_by_unverified_edit(context):
+        return _envelope.envelope(
+            _envelope.STATUS_INCONCLUSIVE,
+            "a code change was made earlier in this task but no test run has "
+            "verified it since — run the relevant tests and confirm they "
+            "pass before committing this fix",
         )
     params["confirmed"] = confirmed
     result = git_control(parameters=params)
