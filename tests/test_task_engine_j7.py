@@ -337,6 +337,152 @@ def test_single_objective_file_result_is_still_byte_for_byte_the_raw_result() ->
     print("test_single_objective_file_result_is_still_byte_for_byte_the_raw_result: PASS")
 
 
+# ── Pre-J8-hardening fix: natural-language subpath/name extraction ─────
+# Confirmed real live-usage gap: _extract_file_shortcut() only ever
+# returned the BARE shortcut ("desktop"), silently discarding any
+# subfolder/name the user actually stated, and _extract_file_name()
+# could not extract an unquoted multi-word name next to "folder". Every
+# test below exercises the REAL, unpatched _parse_file_action() —
+# _extract_file_shortcut() is deliberately NEVER mocked here (that
+# exact mistake is what let the original bug through J7's own tests).
+# Generalization is proven with MULTIPLE distinct names, not just the
+# one example ("Consumer behaviour") the bug was originally reported with.
+
+def test_list_preserves_an_explicit_slash_subpath() -> None:
+    assert te._parse_file_action("list files in Desktop/Consumer behaviour") == {
+        "action": "list", "path": "desktop/Consumer behaviour",
+    }
+    assert te._parse_file_action("list Desktop/Consumer behaviour") == {
+        "action": "list", "path": "desktop/Consumer behaviour",
+    }
+    print("test_list_preserves_an_explicit_slash_subpath: PASS")
+
+
+def test_list_preserves_an_unquoted_multi_word_named_folder() -> None:
+    assert te._parse_file_action("list the Consumer behaviour folder on my desktop") == {
+        "action": "list", "path": "desktop/Consumer behaviour",
+    }
+    print("test_list_preserves_an_unquoted_multi_word_named_folder: PASS")
+
+
+def test_find_extracts_an_unquoted_multi_word_folder_name_as_the_search_term() -> None:
+    # Per this fix's own required example: find's PATH stays the search
+    # ROOT (the shortcut) -- the named folder becomes the search NAME,
+    # not appended to the path (unlike list's direct-navigation semantics).
+    assert te._parse_file_action("find Consumer behaviour folder on my desktop") == {
+        "action": "find", "path": "desktop", "name": "Consumer behaviour",
+    }
+    assert te._parse_file_action("find the Consumer behaviour folder") == {
+        "action": "find", "path": "desktop", "name": "Consumer behaviour",
+    }
+    print("test_find_extracts_an_unquoted_multi_word_folder_name_as_the_search_term: PASS")
+
+
+def test_extraction_generalizes_to_other_multi_word_names_not_just_one_example() -> None:
+    # The fix must not be hardcoded to "Consumer behaviour".
+    assert te._parse_file_action("list Desktop/My Important Folder") == {
+        "action": "list", "path": "desktop/My Important Folder",
+    }
+    assert te._parse_file_action("list files in Desktop/Project Documents") == {
+        "action": "list", "path": "desktop/Project Documents",
+    }
+    assert te._parse_file_action("find the Tax Documents folder on my desktop") == {
+        "action": "find", "path": "desktop", "name": "Tax Documents",
+    }
+    assert te._parse_file_action("find the Research Project folder") == {
+        "action": "find", "path": "desktop", "name": "Research Project",
+    }
+    print("test_extraction_generalizes_to_other_multi_word_names_not_just_one_example: PASS")
+
+
+def test_create_folder_and_rename_also_benefit_from_the_shared_name_extraction() -> None:
+    assert te._parse_file_action("create the Tax Documents folder on my desktop") == {
+        "action": "create_folder", "path": "desktop", "name": "Tax Documents",
+    }
+    assert te._parse_file_action("rename the Consumer behaviour folder to Consumer Research") == {
+        "action": "rename", "path": "desktop", "name": "Consumer behaviour", "new_name": "Consumer Research",
+    }
+    print("test_create_folder_and_rename_also_benefit_from_the_shared_name_extraction: PASS")
+
+
+def test_existing_quoted_name_behavior_is_unaffected() -> None:
+    assert te._parse_file_action('find "My Custom Report" on my desktop') == {
+        "action": "find", "path": "desktop", "name": "My Custom Report",
+    }
+    print("test_existing_quoted_name_behavior_is_unaffected: PASS")
+
+
+def test_existing_bare_shortcut_behavior_is_unaffected() -> None:
+    assert te._parse_file_action("list my downloads") == {"action": "list", "path": "downloads"}
+    assert te._parse_file_action("list my desktop") == {"action": "list", "path": "desktop"}
+    print("test_existing_bare_shortcut_behavior_is_unaffected: PASS")
+
+
+def test_existing_file_extension_behavior_is_unaffected() -> None:
+    assert te._parse_file_action("delete notes.txt from my desktop") == {
+        "action": "delete", "path": "desktop", "name": "notes.txt",
+    }
+    print("test_existing_file_extension_behavior_is_unaffected: PASS")
+
+
+def test_referencing_a_bare_shortcut_as_a_folder_is_not_double_applied() -> None:
+    # "the Desktop folder" must not become path="desktop/Desktop" --
+    # a name that IS just a shortcut on its own is recognized as such,
+    # not treated as a subfolder of itself.
+    assert te._parse_file_action("list files in the Desktop folder") == {
+        "action": "list", "path": "desktop",
+    }
+    print("test_referencing_a_bare_shortcut_as_a_folder_is_not_double_applied: PASS")
+
+
+def test_conservative_delete_policy_is_unaffected_by_the_new_extraction() -> None:
+    # The words "folder"/"files" are present in both, but neither names
+    # anything specific -- must still honestly refuse, exactly as J7
+    # already established.
+    assert te._parse_file_action("delete the old files") is None
+    assert te._parse_file_action("delete everything in this folder") is None
+    print("test_conservative_delete_policy_is_unaffected_by_the_new_extraction: PASS")
+
+
+def test_real_end_to_end_list_with_a_real_natural_language_subpath() -> None:
+    # The full chain, objective -> _parse_file_action() (REAL, unpatched
+    # -- this is the exact function under test) -> file_controller ->
+    # real filesystem, with a real nested subfolder matching a genuine
+    # multi-word name. Only file_controller._get_desktop() is redirected
+    # to a disposable temp dir (the one existing seam _resolve_path()
+    # itself already uses to answer "where is the real Desktop" --
+    # there's no way to exercise a "Desktop" shortcut at all without
+    # either this or the user's real Desktop); the task_engine parser
+    # under test, and file_controller's own path-joining/safety-check
+    # logic, run completely for real and unpatched.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "Consumer behaviour").mkdir()
+        (tmp_path / "Consumer behaviour" / "report.docx").write_text("x")
+        with patch.object(fc, "_get_desktop", return_value=tmp_path):
+            result = te.execute_task(parameters={"objective": "list files in Desktop/Consumer behaviour"})
+    assert result.startswith("[VERIFIED_SUCCESS]")
+    assert "report.docx" in result
+    print("test_real_end_to_end_list_with_a_real_natural_language_subpath: PASS")
+
+
+def test_extraction_never_bypasses_existing_path_safety() -> None:
+    # Whatever string the new subpath/name extraction produces for a
+    # traversal-laced objective, it must still resolve to somewhere
+    # file_controller._is_safe_path() (completely unmodified by this fix)
+    # actually allows -- proving no bypass was introduced, regardless of
+    # whether the extraction carries the ".." fragment through at all (it
+    # doesn't, in practice: the extraction regexes exclude "." from a
+    # captured subpath, so a traversal sequence never survives into the
+    # constructed path string in the first place -- a real, additional
+    # layer of defense, not a substitute for _is_safe_path() itself).
+    params = te._parse_file_action("list files in Desktop/../../../../../../Windows")
+    assert params is not None
+    resolved = fc._resolve_path(params["path"])
+    assert fc._is_safe_path(resolved)
+    print("test_extraction_never_bypasses_existing_path_safety: PASS")
+
+
 def _run() -> None:
     test_route_resolves_file_related_objectives_to_file_system()
     test_route_unsupported_objective_is_rejected_honestly()
@@ -368,6 +514,18 @@ def _run() -> None:
     test_real_end_to_end_list_through_execute_task()
     test_multi_objective_task_combining_file_system_and_another_domain()
     test_single_objective_file_result_is_still_byte_for_byte_the_raw_result()
+    test_list_preserves_an_explicit_slash_subpath()
+    test_list_preserves_an_unquoted_multi_word_named_folder()
+    test_find_extracts_an_unquoted_multi_word_folder_name_as_the_search_term()
+    test_extraction_generalizes_to_other_multi_word_names_not_just_one_example()
+    test_create_folder_and_rename_also_benefit_from_the_shared_name_extraction()
+    test_existing_quoted_name_behavior_is_unaffected()
+    test_existing_bare_shortcut_behavior_is_unaffected()
+    test_existing_file_extension_behavior_is_unaffected()
+    test_referencing_a_bare_shortcut_as_a_folder_is_not_double_applied()
+    test_conservative_delete_policy_is_unaffected_by_the_new_extraction()
+    test_real_end_to_end_list_with_a_real_natural_language_subpath()
+    test_extraction_never_bypasses_existing_path_safety()
     print("\nAll task_engine_j7 tests passed.")
 
 

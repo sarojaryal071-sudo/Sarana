@@ -105,12 +105,52 @@ def test_word_insert_text_with_no_text_is_inconclusive_calls_nothing() -> None:
     assert result.startswith("[INCONCLUSIVE]")
     print("test_word_insert_text_with_no_text_is_inconclusive_calls_nothing: PASS")
 
-def test_word_insert_text_with_no_open_document_is_verified_failure() -> None:
+def test_word_insert_text_cold_start_creates_a_blank_document_when_none_is_open() -> None:
+    # Pre-J8-hardening fix (confirmed live): Documents.Count == 0 used to
+    # be an immediate, unconditional VERIFIED_FAILURE, even though this
+    # SAME call could trivially create a document to act on -- now it
+    # does, via the app's own Documents.Add(), and still verifies the
+    # real insertion afterward exactly as before.
+    content = _FakeRange("")
+    new_doc = MagicMock()
+    new_doc.Content = content
     app = _fake_word_app(doc=None)
+    app.Documents.Add.return_value = new_doc
+    app.Selection.Range = content
+    with patch.object(oc, "_get_app", return_value=(app, True)):
+        result = oc.word_insert_text("hello")
+    app.Documents.Add.assert_called_once_with()
+    assert content.text == "hello"
+    assert result.startswith("[VERIFIED_SUCCESS]")
+    assert "new blank document" in result
+    print("test_word_insert_text_cold_start_creates_a_blank_document_when_none_is_open: PASS")
+
+
+def test_word_insert_text_reports_honest_failure_when_a_new_document_cannot_be_created() -> None:
+    app = _fake_word_app(doc=None)
+    app.Documents.Add.side_effect = Exception("Word refused")
     with patch.object(oc, "_get_app", return_value=(app, True)):
         result = oc.word_insert_text("hello")
     assert result.startswith("[VERIFIED_FAILURE]")
-    print("test_word_insert_text_with_no_open_document_is_verified_failure: PASS")
+    assert "no open document" in result.lower()
+    print("test_word_insert_text_reports_honest_failure_when_a_new_document_cannot_be_created: PASS")
+
+
+def test_word_insert_text_never_creates_a_second_document_when_one_is_already_open() -> None:
+    # Safety requirement: an existing document is used completely
+    # unchanged -- Documents.Add() must never even be called.
+    content = _FakeRange("existing content")
+    doc = MagicMock()
+    doc.Content = content
+    app = _fake_word_app(doc)
+    app.Selection.Range = content
+    with patch.object(oc, "_get_app", return_value=(app, True)):
+        result = oc.word_insert_text(" more")
+    app.Documents.Add.assert_not_called()
+    assert content.text == "existing content more"
+    assert result.startswith("[VERIFIED_SUCCESS]")
+    assert "new blank document" not in result
+    print("test_word_insert_text_never_creates_a_second_document_when_one_is_already_open: PASS")
 
 def test_word_insert_text_at_end_collapses_and_inserts_after_content() -> None:
     doc = MagicMock()
@@ -265,6 +305,48 @@ def test_excel_set_cell_verifies_plain_value_readback() -> None:
     assert result.startswith("[VERIFIED_SUCCESS]")
     print("test_excel_set_cell_verifies_plain_value_readback: PASS")
 
+
+def test_excel_set_cell_cold_start_creates_a_blank_workbook_when_none_is_open() -> None:
+    # Pre-J8-hardening fix, same as Word's own insert_text above:
+    # Workbooks.Count == 0 used to be an immediate VERIFIED_FAILURE even
+    # though this same call could trivially create a workbook to act on.
+    range_mock = MagicMock()
+    range_mock.Value = 42
+    new_wb = MagicMock()
+    new_wb.ActiveSheet.Range.return_value = range_mock
+    app = _fake_excel_app(wb=None)
+    app.Workbooks.Add.return_value = new_wb
+    with patch.object(oc, "_get_app", return_value=(app, True)):
+        result = oc.excel_set_cell("A1", 42)
+    app.Workbooks.Add.assert_called_once_with()
+    assert result.startswith("[VERIFIED_SUCCESS]")
+    assert "new blank workbook" in result
+    print("test_excel_set_cell_cold_start_creates_a_blank_workbook_when_none_is_open: PASS")
+
+
+def test_excel_set_cell_reports_honest_failure_when_a_new_workbook_cannot_be_created() -> None:
+    app = _fake_excel_app(wb=None)
+    app.Workbooks.Add.side_effect = Exception("Excel refused")
+    with patch.object(oc, "_get_app", return_value=(app, True)):
+        result = oc.excel_set_cell("A1", 42)
+    assert result.startswith("[VERIFIED_FAILURE]")
+    assert "no open workbook" in result.lower()
+    print("test_excel_set_cell_reports_honest_failure_when_a_new_workbook_cannot_be_created: PASS")
+
+
+def test_excel_set_cell_never_creates_a_second_workbook_when_one_is_already_open() -> None:
+    wb = MagicMock()
+    range_mock = MagicMock()
+    range_mock.Value = 42
+    wb.ActiveSheet.Range.return_value = range_mock
+    app = _fake_excel_app(wb)
+    with patch.object(oc, "_get_app", return_value=(app, True)):
+        result = oc.excel_set_cell("A1", 42)
+    app.Workbooks.Add.assert_not_called()
+    assert result.startswith("[VERIFIED_SUCCESS]")
+    assert "new blank workbook" not in result
+    print("test_excel_set_cell_never_creates_a_second_workbook_when_one_is_already_open: PASS")
+
 class _StubbornRange:
     """A Range stand-in whose Value assignment is silently ignored —
     models a real-world case (e.g. a protected sheet) where Excel
@@ -396,7 +478,9 @@ if __name__ == "__main__":
     test_get_app_returns_none_when_both_attach_and_launch_fail()
     test_word_insert_text_at_cursor_verifies_length_change()
     test_word_insert_text_with_no_text_is_inconclusive_calls_nothing()
-    test_word_insert_text_with_no_open_document_is_verified_failure()
+    test_word_insert_text_cold_start_creates_a_blank_document_when_none_is_open()
+    test_word_insert_text_reports_honest_failure_when_a_new_document_cannot_be_created()
+    test_word_insert_text_never_creates_a_second_document_when_one_is_already_open()
     test_word_insert_text_at_end_collapses_and_inserts_after_content()
     test_word_replace_text_reports_verified_success_when_found_and_replaced()
     test_word_replace_text_reports_verified_failure_when_not_found()
@@ -410,6 +494,9 @@ if __name__ == "__main__":
     test_word_save_succeeds_and_verifies_saved_state()
     test_excel_set_cell_with_no_cell_ref_calls_nothing()
     test_excel_set_cell_verifies_plain_value_readback()
+    test_excel_set_cell_cold_start_creates_a_blank_workbook_when_none_is_open()
+    test_excel_set_cell_reports_honest_failure_when_a_new_workbook_cannot_be_created()
+    test_excel_set_cell_never_creates_a_second_workbook_when_one_is_already_open()
     test_excel_set_cell_reports_failure_on_a_disagreeing_readback()
     test_excel_set_cell_with_a_formula_accepts_the_computed_readback()
     test_excel_get_cell_reports_the_real_value()

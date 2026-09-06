@@ -916,12 +916,89 @@ _CALLED_NAME_RE   = re.compile(
 _FILENAME_TOKEN_RE = re.compile(r"\b([\w\-]+\.[A-Za-z0-9]{1,6})\b")
 _RENAME_TO_RE       = re.compile(r"\bto\s+([A-Za-z0-9 _\-\.]+?)[.!?]*$", re.IGNORECASE)
 
+# Pre-J8-hardening fix: a confirmed, real live-usage gap (not a
+# hypothetical) — "list files in Desktop/Consumer behaviour" and "find
+# the Consumer behaviour folder on my desktop" both used to lose the
+# actual subfolder/name entirely, because _extract_file_shortcut() below
+# only ever finds the BARE shortcut word and _extract_file_name() only
+# recognized a quoted string / "called X" phrase / a file.ext token —
+# never an ordinary, unquoted multi-word name sitting next to "folder" or
+# a shortcut. Confirmed live: file_controller("Desktop/Consumer
+# behaviour") already worked correctly (J7's own fix) — the parser
+# simply never constructed that string. The two patterns below are
+# deliberately GENERAL (never hardcoded to "Consumer behaviour" or any
+# other specific example) — a small, bounded stop-word list is what
+# keeps them from over-capturing surrounding verbs/articles/prepositions,
+# same discipline as every other regex in this module.
+_FILE_STOP_WORDS = frozenset({
+    "list", "find", "search", "locate", "show", "contents", "delete", "remove",
+    "trash", "rename", "info", "information", "details", "metadata", "read",
+    "largest", "biggest", "create", "make", "new", "folder", "file", "files",
+    "the", "a", "an", "in", "on", "at", "my", "this", "that", "of", "and",
+})
+# Shortcut words (desktop/downloads/...) are deliberately NOT stop words
+# here — a real name can legitimately contain one ("Tax Documents", "My
+# Music Collection"); blocking them mid-scan would truncate exactly the
+# multi-word names this fix exists to support. The narrower, correct
+# check — "is the ENTIRE captured name just a bare shortcut on its own"
+# ('the Desktop folder' meaning the shortcut itself, not a subfolder of
+# it) — is applied once, after the full name is captured, in
+# _extract_file_path() below.
+
+_SHORTCUT_SLASH_RE = re.compile(
+    r"\b(" + "|".join(_FILE_SHORTCUTS) + r")[\\/]+([^,.!?]+)", re.IGNORECASE,
+)
+_TRAILING_PREP_RE  = re.compile(r"\s+\b(?:on|in|from|to|at)\b.*$", re.IGNORECASE)
+
 
 def _extract_file_shortcut(low_objective: str) -> str:
     for s in _FILE_SHORTCUTS:
         if s in low_objective:
             return s
     return "desktop"  # file_controller()'s own existing default
+
+
+def _extract_shortcut_and_subpath(objective: str) -> tuple[str, str] | None:
+    """Explicit shortcut/subpath syntax — 'Desktop/Consumer behaviour',
+    'Desktop\\Consumer behaviour' — the exact string shape
+    file_controller._resolve_path() has supported since J7. Captures
+    everything after the slash up to the next punctuation, then trims a
+    trailing prepositional tail ('... on my computer') a spoken objective
+    might append. Generalizes to ANY name, never hardcoded."""
+    m = _SHORTCUT_SLASH_RE.search(objective)
+    if not m:
+        return None
+    remainder = _TRAILING_PREP_RE.sub("", m.group(2)).strip()
+    if not remainder:
+        return None
+    return m.group(1).lower(), remainder
+
+
+def _extract_named_folder(objective: str) -> str | None:
+    """Finds '<name> folder' anywhere in the objective and returns
+    <name> — e.g. 'the Consumer behaviour folder on my desktop' ->
+    'Consumer behaviour', 'the Tax Documents folder' -> 'Tax Documents'.
+    <name> is whatever consecutive non-stop-word tokens immediately
+    precede the word 'folder'; hitting a stop word (an article, a verb,
+    a shortcut name, a preposition — see _FILE_STOP_WORDS) stops the
+    scan, so 'list files in the Desktop folder' correctly yields nothing
+    (the folder REFERENCED there is the shortcut itself, not a named
+    subfolder of it) rather than misreading a shortcut as a folder name.
+    Never hardcoded to one example name — purely positional/stop-word
+    driven, so it generalizes to any multi-word name the user states."""
+    tokens = objective.split()
+    lowered = [t.strip(".,!?").lower() for t in tokens]
+    for i, w in enumerate(lowered):
+        if w != "folder":
+            continue
+        j = i - 1
+        name_tokens: list[str] = []
+        while j >= 0 and lowered[j] not in _FILE_STOP_WORDS:
+            name_tokens.insert(0, tokens[j].strip(".,!?"))
+            j -= 1
+        if name_tokens:
+            return " ".join(name_tokens)
+    return None
 
 
 def _extract_file_name(objective: str) -> str | None:
@@ -933,7 +1010,13 @@ def _extract_file_name(objective: str) -> str | None:
     this IS the Conservative Destructive Policy's actual mechanism, not a
     separate blocklist of words like 'everything'/'old'/'all': a request
     with no confidently-extractable name never reaches file_controller()
-    at all, regardless of which vague words it happened to use."""
+    at all, regardless of which vague words it happened to use.
+
+    Order: an explicit quote wins outright; then 'called/named X'; then a
+    file.ext token; then (pre-J8-hardening addition) the unquoted
+    '<name> folder' pattern above — added LAST so it can never override a
+    more explicit, already-reliable signal, only fill in when nothing
+    else matched."""
     m = _QUOTED_NAME_RE.search(objective)
     if m:
         return m.group(1).strip()
@@ -943,7 +1026,28 @@ def _extract_file_name(objective: str) -> str | None:
     m = _FILENAME_TOKEN_RE.search(objective)
     if m:
         return m.group(1)
-    return None
+    return _extract_named_folder(objective)
+
+
+def _extract_file_path(objective: str) -> str:
+    """The most specific safe path the objective actually states, for
+    the DIRECT-NAVIGATION actions (list/largest — 'show me what's inside
+    X', not 'search for X somewhere under Y'). Tries, in order: explicit
+    shortcut/subpath syntax, then a bare shortcut plus a '<name> folder'
+    mention elsewhere in the sentence, then just the bare shortcut
+    (existing, unchanged behavior) — never hardcoded to one example, and
+    the result still passes through file_controller._resolve_path()'s/
+    _is_safe_path()'s own existing, unmodified safety boundary exactly
+    like any other path string always has."""
+    slash = _extract_shortcut_and_subpath(objective)
+    if slash:
+        shortcut, subpath = slash
+        return f"{shortcut}/{subpath}"
+    shortcut = _extract_file_shortcut(objective.lower())
+    name = _extract_named_folder(objective)
+    if name and name.lower() != shortcut:
+        return f"{shortcut}/{name}"
+    return shortcut
 
 
 def _parse_file_action(objective: str) -> dict | None:
@@ -963,16 +1067,23 @@ def _parse_file_action(objective: str) -> dict | None:
     limitation, not a capability gap in file_controller.py itself."""
     low   = objective.lower()
     words = _normalize(objective)
-    path  = _extract_file_shortcut(low)
+    # `path` — the search/query ROOT (bare shortcut, e.g. for find's own
+    # "locate X somewhere under this root" semantics). `nav_path` — the
+    # most specific DIRECT-NAVIGATION target (may include a subfolder,
+    # e.g. "Desktop/Consumer behaviour") for actions that mean "show me
+    # what's inside exactly this", not "search for something under here"
+    # — see _extract_file_path()'s own docstring for the distinction.
+    path     = _extract_file_shortcut(low)
+    nav_path = _extract_file_path(objective)
 
     if "largest" in words or "biggest" in words:
-        return {"action": "largest", "path": path}
+        return {"action": "largest", "path": nav_path}
 
     if words & {"find", "search", "locate"}:
         return {"action": "find", "path": path, "name": _extract_file_name(objective) or ""}
 
     if words & {"list", "show", "contents"}:
-        return {"action": "list", "path": path}
+        return {"action": "list", "path": nav_path}
 
     if words & {"info", "information", "details", "metadata"}:
         name = _extract_file_name(objective)

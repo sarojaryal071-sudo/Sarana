@@ -37,6 +37,19 @@ document opens a BLOCKING native "Save As" dialog that this process has
 no way to answer, which would hang the call indefinitely rather than
 fail cleanly — so that case is caught up front and reported honestly
 instead of risked.
+
+Pre-J8-hardening fix (confirmed live, not hypothetical): word_insert_text()/
+excel_set_cell() used to unconditionally fail with "no open document"/
+"no open workbook" whenever Word/Excel had zero documents/workbooks open
+— including immediately after THIS SAME function just launched it via
+_get_app(), since Dispatch() starts an app with nothing open. Both
+functions now create exactly ONE new blank document/workbook (via the
+app's own Documents.Add()/Workbooks.Add(), the same COM object, never a
+second controller) ONLY when none is already active — an existing
+document/workbook is always used completely unchanged, never replaced,
+never closed. The new document/workbook is never saved automatically;
+saving remains the existing, separate, explicit word_save()/excel_save()
+action.
 """
 from actions import result_envelope as _envelope
 
@@ -89,8 +102,25 @@ def word_insert_text(text: str, where: str = "cursor") -> str:
         doc = app.ActiveDocument
     except Exception:
         doc = None
+    # Pre-J8-hardening fix (confirmed live): a freshly-launched
+    # Word.Application (this process just started it, or attached to one
+    # sitting idle with no document) has Documents.Count == 0 — every
+    # real cold-start "open Word and type X" request failed here with
+    # "no open document" even though nothing was actually wrong. If an
+    # existing document IS active, it is used completely unchanged (this
+    # branch is never reached) — only the genuinely-empty case creates
+    # ONE new blank document via the SAME app instance (no second COM
+    # abstraction), never touching/replacing anything, never saved.
+    created_new = False
     if doc is None:
-        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, "Word has no open document to insert into")
+        try:
+            doc = app.Documents.Add()
+            created_new = True
+        except Exception as e:
+            return _envelope.envelope(
+                _envelope.STATUS_VERIFIED_FAILURE,
+                f"Word has no open document, and a new one could not be created: {e}",
+            )
     try:
         before_len = len(doc.Content.Text or "")
         if where == "end":
@@ -102,9 +132,10 @@ def word_insert_text(text: str, where: str = "cursor") -> str:
         after_len = len(doc.Content.Text or "")
     except Exception as e:
         return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"could not insert text: {e}")
+    note = " (a new blank document was created first)" if created_new else ""
     if after_len - before_len == len(text):
-        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"inserted {len(text)} character(s) into the document")
-    return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "text was inserted but the document's length change didn't match exactly")
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"inserted {len(text)} character(s) into the document{note}")
+    return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"text was inserted but the document's length change didn't match exactly{note}")
 
 
 def word_replace_text(find: str, replace: str) -> str:
@@ -229,8 +260,22 @@ def excel_set_cell(cell: str, value) -> str:
         wb = app.ActiveWorkbook
     except Exception:
         wb = None
+    # Pre-J8-hardening fix (same confirmed cold-start gap as Word's own
+    # insert_text above): a freshly-launched Excel.Application has
+    # Workbooks.Count == 0. An existing workbook, if one is active, is
+    # used completely unchanged (this branch is never reached); only the
+    # genuinely-empty case creates ONE new blank workbook via the SAME
+    # app instance, never saved.
+    created_new = False
     if wb is None:
-        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, "Excel has no open workbook")
+        try:
+            wb = app.Workbooks.Add()
+            created_new = True
+        except Exception as e:
+            return _envelope.envelope(
+                _envelope.STATUS_VERIFIED_FAILURE,
+                f"Excel has no open workbook, and a new one could not be created: {e}",
+            )
     try:
         sheet = wb.ActiveSheet
         sheet.Range(cell).Value = value
@@ -240,18 +285,19 @@ def excel_set_cell(cell: str, value) -> str:
         actual = sheet.Range(cell).Value
     except Exception:
         return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"{cell} was set but could not be read back")
+    note = " (a new blank workbook was created first)" if created_new else ""
     # A formula ("=SUM(A1:A5)") is what you SET; Excel then returns its
     # COMPUTED result on readback — that mismatch is expected/correct,
     # not a failure, so only value-compare non-formula writes.
     is_formula = isinstance(value, str) and value.strip().startswith("=")
     if is_formula:
-        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"{cell} now evaluates to {actual!r}")
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"{cell} now evaluates to {actual!r}{note}")
     numeric_match = (
         isinstance(value, (int, float)) and isinstance(actual, (int, float)) and abs(actual - value) < 1e-9
     )
     if actual == value or numeric_match:
-        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"{cell} is now {actual!r}")
-    return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"requested {value!r} but {cell} now reads {actual!r}")
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"{cell} is now {actual!r}{note}")
+    return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"requested {value!r} but {cell} now reads {actual!r}{note}")
 
 
 def excel_get_cell(cell: str) -> str:
