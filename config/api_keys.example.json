@@ -4,5 +4,7 @@
   "assistant_name": "Sarana",
   "user_name": "",
   "ui_color": "#00d4ff",
-  "morning_brief_enabled": true
+  "morning_brief_enabled": true,
+  "render_api_key": "YOUR_RENDER_API_KEY",
+  "render_service_id": "YOUR_RENDER_SERVICE_ID"
 }

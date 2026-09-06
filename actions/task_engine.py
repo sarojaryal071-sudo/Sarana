@@ -116,6 +116,7 @@ from actions.office_control import office_control
 from actions.file_controller import file_controller
 from actions.repo_agent import repo_agent
 from actions.git_control import git_control
+from actions.deployment_control import deployment_control
 # J6: the EXISTING perception primitives, reused as-is — see inspect()'s
 # own docstring. Never a new controller/screenshot engine.
 from actions.computer_control import get_active_window_title, list_ui_elements
@@ -366,13 +367,22 @@ class Task:
 #                   repo_agent.py's own resolve_repo_root() — are both
 #                   real members. Push/pull/fetch/remote administration
 #                   remain out of scope (J9's own explicit boundary, not
-#                   a gap); merge/rebase/deployment automation are J11+.
-#   DEPLOYMENT   — deploy + verify. Concept only, not built.
+#                   a gap); merge/rebase automation is out of scope by
+#                   design (J9's own frozen boundary).
+#   DEPLOYMENT   — deploy + verify. `deployment` (J11) is the first real
+#                   member — health_check/status/history (read-only) and
+#                   deploy/restart/rollback (confirmation-gated, real-
+#                   provider, real post-deploy health verification) over
+#                   deployment_providers.py's own provider abstraction.
+#                   Push/pull/arbitrary provider-API passthrough remain
+#                   out of scope — same explicit-boundary discipline as
+#                   DEVELOPMENT's own git domain.
 
 FAMILY_SYSTEM      = "system"
 FAMILY_APPLICATION = "application"
 FAMILY_RESOURCE    = "resource"
 FAMILY_DEVELOPMENT = "development"
+FAMILY_DEPLOYMENT  = "deployment"
 
 # ── Capability router (deterministic, no LLM) ───────────────────────────
 # Same scoring shape as system_shortcuts.py's _score()/resolve() — a
@@ -411,6 +421,44 @@ _DOMAINS = [
         "keywords": ["word", "excel", "spreadsheet", "workbook", "worksheet",
                      "cell", "document", "paragraph", "insert", "replace",
                      "bold", "italic", "underline", "formatting", "save"],
+    },
+    # ── DEPLOYMENT family (J11) ──────────────────────────────────────────
+    # Declared BEFORE `git` (and everything after it) so a genuine,
+    # real tie resolves correctly: "deploy the latest commit" — a
+    # phrasing straight out of this stage's own target-capability
+    # example — ties 1-1 ("deploy" for deployment vs. "commit" for git,
+    # found live while testing this stage's own routing, not assumed)
+    # and must resolve to deployment, since git has no deploy action at
+    # all (its own parser would otherwise misfire, trying to read this
+    # as a commit-message request with no quoted message, landing on a
+    # confusing INCONCLUSIVE instead of the intended domain). Declared
+    # BEFORE the SYSTEM family too: "restart the production service"
+    # wins outright on SCORE (production+service=2 vs. system_power's
+    # restart=1), but "check whether the backend is running" ties 1-1
+    # ("backend" here vs. "check" for system_shortcut) — declaration
+    # order settles that one in favor of deployment as well (a literal
+    # production backend has no other domain that could sanely answer
+    # it). Deliberately EXCLUDES "restart" itself (already system_power's
+    # own real keyword, for the LOCAL machine) and "status"/"check"
+    # (already system_shortcut's own keywords) — same "don't manufacture
+    # a routing collision" discipline as `git`'s own keyword list below.
+    # Also deliberately EXCLUDES "push"/"pull"/"fetch" and any
+    # destructive-operation word — deployment_control.py has no such
+    # action at all, so there is nothing for those words to route to
+    # (see that module's own docstring: no arbitrary passthrough).
+    {
+        "name": "deployment",
+        "family": FAMILY_DEPLOYMENT,
+        # "roll" (not just "rollback") is included so the natural
+        # two-word phrasing "roll back to dep-abc123" still routes here
+        # even with no OTHER deployment word present — a real gap found
+        # via this stage's own parser tests: _normalize() splits "roll
+        # back" into two separate tokens, neither of which is the
+        # single-word "rollback" keyword. "roll" alone is unclaimed
+        # elsewhere and specific enough not to false-positive on an
+        # unrelated request.
+        "keywords": ["deployment", "deploy", "redeploy", "render",
+                     "production", "backend", "service", "rollback", "roll"],
     },
     # git is declared BEFORE repo_agent (and both before browser, for the
     # same reason repo_agent was moved ahead of browser in J8) so a
@@ -1429,6 +1477,114 @@ def _run_git(objective: str, confirmed: bool = False, context: "TaskContext | No
     return _envelope.envelope(tag, result)
 
 
+# ── J11: Deployment & Production Operations ─────────────────────────────
+_COMMIT_REF_RE = re.compile(r"\bcommit\s+([0-9a-f]{7,40})\b", re.IGNORECASE)
+_COMMIT_BACKREF_RE = re.compile(r"\b(?:that|the latest|the verified|this)\s+commit\b", re.IGNORECASE)
+_DEPLOY_ID_RE = re.compile(r"\b(dep-[A-Za-z0-9]+)\b", re.IGNORECASE)
+
+
+def _extract_commit_reference(objective: str, context: "TaskContext | None") -> str:
+    """Deterministic (objective [+ prior context] -> ONE commit hash or
+    '') extraction — an explicit 'commit <hash>' phrase wins outright;
+    otherwise a back-reference ('deploy the latest commit'/'deploy that
+    commit') consumes whatever `git`'s own domain most recently recorded
+    into TaskContext.values['commit'] (see `_extract_context_values()`'s
+    new `git` rule below) — the SAME cross-step consumption mechanism
+    Phase 5B's 'battery percent -> cell A1' already established, applied
+    a second time (section 15's own explicit instruction). Empty ('')
+    when neither applies — deployment_control.deploy() then honestly
+    defers to Render's OWN documented 'latest on the connected branch'
+    default, never a hash JARVIS invents itself."""
+    m = _COMMIT_REF_RE.search(objective)
+    if m:
+        return m.group(1)
+    if context is not None and _COMMIT_BACKREF_RE.search(objective):
+        return context.values.get("commit", "")
+    return ""
+
+
+def _extract_deploy_id(objective: str) -> str:
+    m = _DEPLOY_ID_RE.search(objective)
+    if m:
+        return m.group(1)
+    m = _SEARCH_QUOTED_RE.search(objective)
+    return m.group(1).strip() if m else ""
+
+
+def _parse_deployment_action(objective: str, context: "TaskContext | None" = None) -> dict:
+    """Deterministic (objective -> deployment_control() parameters)
+    parsing — no LLM call for WHICH production action to take. Unlike
+    _parse_git_action/_parse_repo_action, this always returns a dict,
+    never None: the safe, credential-free, always-available default
+    (health_check) covers any deployment-domain objective too vague for
+    a more specific action — route() already required at least one
+    deployment-domain keyword to reach this function at all, so 'vague'
+    here still means 'about production', just not a specific mutation."""
+    words = _normalize(objective)
+
+    # "roll back" (the natural two-word phrasing) must be checked
+    # alongside the single-word "rollback" keyword — a real gap found
+    # via this stage's own parser tests: "roll back to deploy
+    # dep-abc123" contains no bare "rollback" token at all (_normalize()
+    # splits it into separate "roll"/"back" words), and ALSO happens to
+    # contain the literal word "deploy" — without this check, it fell
+    # through to the deploy branch below instead, an active mutation
+    # instead of the intended read-then-restore operation. Checked
+    # FIRST, before "deploy", for exactly that reason.
+    if (words & {"rollback"}) or ({"roll", "back"} <= words):
+        return {"action": "rollback", "deploy_id": _extract_deploy_id(objective)}
+    if "restart" in words:
+        return {"action": "restart"}
+    if (words & {"deploy", "redeploy", "deployment"}) and not (words & {"history", "status"}):
+        return {"action": "deploy", "commit_id": _extract_commit_reference(objective, context)}
+    if (words & {"history"}) or ("deploys" in words) or ("deployments" in words):
+        return {"action": "history"}
+    if words & {"status"}:
+        return {"action": "status"}
+    return {"action": "health_check"}
+
+
+def _classify_deployment_result(result: str) -> str:
+    """deployment_control.py's own deployment_control() returns a
+    Result-Envelope-tagged string for every path — same defensive-but-
+    normally-unreachable fallback discipline as every other classifier
+    in this module."""
+    tag = status_of(result)
+    if tag:
+        return tag
+    return _envelope.STATUS_INCONCLUSIVE
+
+
+def _run_deployment(objective: str, confirmed: bool = False, context: "TaskContext | None" = None) -> str:
+    """Parses the objective into deployment_control.py's own (action,
+    commit_id/deploy_id, ...) parameter shape, then calls it in-process
+    exactly as it already exists — no second deployment system.
+    `confirmed` is threaded straight through to deployment_control.py's
+    EXISTING is_consequential()/is_confirmed() gate for deploy/restart/
+    rollback, the same way _run_git already does for git_control.py's
+    commit action.
+
+    J11-J10 composition (section 14's own explicit requirement): `deploy`
+    is refused by the SAME test-before-commit invariant J10 introduced —
+    an unverified code edit earlier in THIS task blocks a deploy exactly
+    as it blocks a commit. Reuses `_commit_blocked_by_unverified_edit()`
+    verbatim; no second invariant, no new TaskContext key."""
+    params = _parse_deployment_action(objective, context)
+    if params.get("action") == "deploy" and _commit_blocked_by_unverified_edit(context):
+        return _envelope.envelope(
+            _envelope.STATUS_INCONCLUSIVE,
+            "a code change was made earlier in this task but no test run has "
+            "verified it since — run the relevant tests and confirm they "
+            "pass before deploying this fix",
+        )
+    params["confirmed"] = confirmed
+    result = deployment_control(parameters=params)
+    tag = _classify_deployment_result(result)
+    if status_of(result):
+        return result
+    return _envelope.envelope(tag, result)
+
+
 _HANDLERS = {
     "youtube": _run_youtube,
     "browser": _run_browser,
@@ -1439,6 +1595,7 @@ _HANDLERS = {
     "file_system": _run_file_system,
     "repo_agent": _run_repo_agent,
     "git": _run_git,
+    "deployment": _run_deployment,
 }
 
 # Bounded, ordered, TIERED recovery chain (J5's own name for what this
@@ -1489,6 +1646,17 @@ _RECOVERY_CHAIN = {
 # past CONFIRMATION_REQUIRED/BLOCKED — see _execute_step()'s own
 # early-return handling for those, checked before this dict is ever
 # consulted, unchanged by J9.
+# J11 (deployment) same reasoning again, and MORE conservatively: a
+# failed deploy/restart/rollback has no genuine alternative METHOD
+# either, AND section 15 of this stage's own instructions explicitly
+# forbids ever escalating a production failure into a different
+# mutation automatically ("deployment failed -> deploy again -> restart
+# -> rollback" is exactly the escalation chain that must NOT happen) —
+# no deployment->* entry. The only "recovery" deployment_control.py
+# performs is bounded POLLING of one already-in-flight operation's own
+# status (verification, not a new mutation) — see that module's own
+# _poll_deploy()/restart()'s docstrings, entirely internal to a single
+# deploy()/restart()/rollback() call, never a Task-Engine-level hop.
 
 
 # ── Context extraction (Phase 5A) ───────────────────────────────────────
@@ -1499,10 +1667,14 @@ _RECOVERY_CHAIN = {
 # parsing), just pointed at output instead of input. Not a generic
 # extraction framework: a new domain gets a rule added here ONLY when a
 # concrete later objective actually needs to consume it — nothing is
-# extracted speculatively. Today's one real rule exists specifically to
-# support Phase 5B's proof workflow (battery percent -> Office cell).
+# extracted speculatively. Phase 5B's original rule supports its own
+# proof workflow (battery percent -> Office cell); J11 adds a second,
+# concrete consumer (git commit hash -> deployment_control.deploy()'s
+# own commit_id — see _extract_commit_reference() above).
 
 _BATTERY_PERCENT_RE = re.compile(r"Percent:\s*(\d{1,3})")
+_GIT_COMMIT_HASH_RE = re.compile(r"\bcommit\s+([0-9a-f]{7,40})\b", re.IGNORECASE)
+_GIT_LOG_FIRST_HASH_RE = re.compile(r"^([0-9a-f]{7,40})\s", re.IGNORECASE | re.MULTILINE)
 
 
 def _extract_context_values(domain: str, result: str, context: TaskContext) -> None:
@@ -1510,6 +1682,16 @@ def _extract_context_values(domain: str, result: str, context: TaskContext) -> N
         m = _BATTERY_PERCENT_RE.search(result)
         if m:
             context.values["percent"] = m.group(1)
+    elif domain == "git":
+        # A successful `commit` result's own evidence ("commit <hash>
+        # created...") or a successful `log` result's own first line
+        # ("<hash> <date> <subject>") — either way, the most recently
+        # seen real commit hash from THIS task's own git activity,
+        # available for a later "deploy the latest commit" objective
+        # to consume (see _extract_commit_reference()).
+        m = _GIT_COMMIT_HASH_RE.search(result) or _GIT_LOG_FIRST_HASH_RE.search(result)
+        if m:
+            context.values["commit"] = m.group(1)
 
 
 def build_plan(objectives: list[str]) -> tuple[list[PlanStep] | None, str | None]:

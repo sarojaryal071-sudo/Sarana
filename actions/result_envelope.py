@@ -124,6 +124,17 @@ _CONSEQUENTIAL_ACTION_NAMES = frozenset({
     # can never collide with an unrelated future "commit" action name in
     # a different module.
     "git_commit",
+    # J11 (Deployment & Production Operations): deployment_control.py's
+    # own consequential action names — deploying/restarting/rolling back
+    # a REAL production service, same tier as delete/repo_edit/
+    # git_commit/shutdown/restart. Each named with a "provider_" prefix
+    # (never the bare "deploy"/"restart"/"rollback") so it can never
+    # collide with an unrelated action name in a different module —
+    # same disambiguation discipline "git_commit" already established,
+    # deliberately distinct from computer_settings.py's own bare
+    # "restart" (the LOCAL machine) even though both are, correctly,
+    # independently consequential.
+    "provider_deploy", "provider_restart", "provider_rollback",
 })
 
 _CONSEQUENTIAL_GOAL_PATTERNS = (
