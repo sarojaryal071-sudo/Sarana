@@ -107,6 +107,12 @@ def envelope(status: str, evidence: str) -> str:
 
 _CONSEQUENTIAL_ACTION_NAMES = frozenset({
     "shutdown", "restart",
+    # J7 (Terminal & File System): file_controller.py's own delete action
+    # name — a file/folder deletion (even though send2trash makes it
+    # recoverable via the Recycle Bin, not permanent) still destroys the
+    # CURRENT state the user didn't explicitly re-confirm; same tier as
+    # shutdown/restart, gated the same centralized way, not a new check.
+    "delete",
 })
 
 _CONSEQUENTIAL_GOAL_PATTERNS = (

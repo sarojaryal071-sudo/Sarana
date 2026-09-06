@@ -5,12 +5,35 @@ import platform
 from pathlib import Path
 from datetime import datetime
 
+from actions import result_envelope as _envelope
+
 try:
     import send2trash
     _SEND2TRASH = True
 except ImportError:
     _SEND2TRASH = False
 
+# J7 (Terminal & File System): every function below now returns a real
+# Result-Envelope-tagged string (see actions/result_envelope.py) instead
+# of a bare, untagged one — "Action sent != action completed" applies to
+# the filesystem exactly as it already does to Office/browser: a create/
+# delete/move/copy/rename/write is verified by re-checking the actual
+# filesystem afterward (does the target now exist / no longer exist),
+# never assumed successful just because no exception was raised.
+#   VERIFIED_SUCCESS — the operation happened AND was independently
+#     re-confirmed against the real filesystem (or, for a pure read
+#     like list/find/read/info, the real content itself IS the evidence).
+#   VERIFIED_FAILURE — a real, known failure (not found, OS error, a
+#     verification re-check that came back wrong).
+#   BLOCKED — refused by JARVIS's OWN policy, never something confirmed=
+#     true can override: outside _SAFE_ROOTS (_is_safe_path() below), or
+#     one of the top-level protected user folders themselves (delete_file()).
+#     Distinct from VERIFIED_FAILURE, which is the filesystem/OS saying no,
+#     not JARVIS refusing on principle.
+#   CONFIRMATION_REQUIRED — file_controller()'s dispatcher gates "delete"
+#     through the EXISTING is_consequential()/is_confirmed() classifier
+#     (see result_envelope.py's _CONSEQUENTIAL_ACTION_NAMES) before this
+#     module ever runs it — no second confirmation framework.
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
 
 _SAFE_ROOTS: list[Path] = [
@@ -127,11 +150,11 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
     try:
         target = _resolve_path(path)
         if not _is_safe_path(target):
-            return f"Access denied: {target}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied: {target}")
         if not target.exists():
-            return f"Path not found: {target}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Path not found: {target}")
         if not target.is_dir():
-            return f"Not a directory: {target}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Not a directory: {target}")
 
         items = []
         for item in sorted(target.iterdir()):
@@ -144,14 +167,17 @@ def list_files(path: str = "desktop", show_hidden: bool = False) -> str:
                 items.append(f"📄 {item.name} ({size})")
 
         if not items:
-            return f"Directory is empty: {target.name}/"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"Directory is empty: {target.name}/")
 
-        return f"Contents of {target.name}/ ({len(items)} items):\n" + "\n".join(items)
+        return _envelope.envelope(
+            _envelope.STATUS_VERIFIED_SUCCESS,
+            f"Contents of {target.name}/ ({len(items)} items):\n" + "\n".join(items),
+        )
 
     except PermissionError:
-        return f"Permission denied: {path}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Permission denied: {path}")
     except Exception as e:
-        return f"Error listing files: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Error listing files: {e}")
 
 
 def create_file(path: str, name: str = "", content: str = "") -> str:
@@ -159,12 +185,17 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
         base   = _resolve_path(path)
         target = (base / name) if name else base
         if not _is_safe_path(target):
-            return f"Access denied: {target}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied: {target}")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        return f"File created: {target.name}"
+        # Verify: the file must actually exist afterward — never assume
+        # write_text() succeeding (it would have raised otherwise) is
+        # the same thing as independently re-confirming it.
+        if target.is_file():
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"File created: {target.name}")
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"{target.name} was written but could not be re-confirmed on disk")
     except Exception as e:
-        return f"Could not create file: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not create file: {e}")
 
 
 def create_folder(path: str, name: str = "") -> str:
@@ -172,36 +203,62 @@ def create_folder(path: str, name: str = "") -> str:
         base   = _resolve_path(path)
         target = (base / name) if name else base
         if not _is_safe_path(target):
-            return f"Access denied: {target}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied: {target}")
         target.mkdir(parents=True, exist_ok=True)
-        return f"Folder created: {target.name}"
+        if target.is_dir():
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"Folder created: {target.name}")
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"{target.name} could not be re-confirmed on disk")
     except Exception as e:
-        return f"Could not create folder: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not create folder: {e}")
 
 
 def delete_file(path: str, name: str = "") -> str:
+    """Confirmation is gated ABOVE this function, in file_controller()'s
+    own dispatcher (the EXISTING is_consequential()/is_confirmed() gate —
+    see this module's own top-level note) — by the time this runs, the
+    user has already explicitly said yes. This function's own job is
+    just to perform the delete and independently VERIFY it actually
+    happened, same as every other mutating function here."""
     try:
         base   = _resolve_path(path)
         target = (base / name) if name else base
         if not _is_safe_path(target):
-            return f"Access denied: {target}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied: {target}")
         if not target.exists():
-            return f"Not found: {target.name}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Not found: {target.name}")
 
-        # Güvenli dizin kontrolü — kritik kullanıcı klasörlerini koru
+        # Güvenli dizin kontrolü — kritik kullanıcı klasörlerini koru.
+        # BLOCKED, not CONFIRMATION_REQUIRED: no confirmed=true makes
+        # deleting the user's ENTIRE Desktop/Downloads/Documents/home
+        # folder itself allowed — this is a permanent policy refusal
+        # (see result_envelope.py's own BLOCKED-vs-CONFIRMATION_REQUIRED
+        # distinction). Deleting something INSIDE one of these is fine —
+        # only the top-level folder itself is protected.
         protected = {
             _get_desktop(), _get_downloads(), _get_documents(),
             _get_pictures(), _get_music(), _get_videos(), Path.home()
         }
         if target.resolve() in {p.resolve() for p in protected}:
-            return f"Protected directory, cannot delete: {target.name}"
+            return _envelope.envelope(
+                _envelope.STATUS_BLOCKED, f"Protected directory, cannot delete: {target.name}"
+            )
 
-        return _safe_trash(target)
+        trash_result = _safe_trash(target)
+        if not _SEND2TRASH:
+            # Permanent deletion is deliberately never attempted as a
+            # fallback — see _safe_trash()'s own message.
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, trash_result)
+        # Verify: the target must actually be GONE afterward — never
+        # assume send2trash() succeeding (it would have raised otherwise)
+        # is the same thing as independently re-confirming it.
+        if not target.exists():
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, trash_result)
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"{trash_result} but {target.name} still appears to exist")
 
     except PermissionError:
-        return f"Permission denied: {path}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Permission denied: {path}")
     except Exception as e:
-        return f"Could not delete: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not delete: {e}")
 
 
 def move_file(path: str, name: str = "", destination: str = "") -> str:
@@ -211,23 +268,30 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
         dst    = _resolve_path(destination) if destination else None
 
         if not src.exists():
-            return f"Source not found: {src.name}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Source not found: {src.name}")
         if dst is None:
-            return "No destination specified."
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "No destination specified.")
         if not _is_safe_path(src):
-            return f"Access denied (source): {src}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied (source): {src}")
         if not _is_safe_path(dst):
-            return f"Access denied (destination): {dst}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied (destination): {dst}")
 
         if dst.is_dir():
             dst = dst / src.name
 
         dst.parent.mkdir(parents=True, exist_ok=True)
+        src_name = src.name
         shutil.move(str(src), str(dst))
-        return f"Moved: {src.name} → {dst.parent.name}/"
+        # Verify: destination must exist AND source must be gone —
+        # either half failing silently would be a partial, unreported move.
+        if dst.exists() and not src.exists():
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"Moved: {src_name} → {dst.parent.name}/")
+        return _envelope.envelope(
+            _envelope.STATUS_INCONCLUSIVE, f"move of {src_name} could not be fully re-confirmed"
+        )
 
     except Exception as e:
-        return f"Could not move: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not move: {e}")
 
 
 def copy_file(path: str, name: str = "", destination: str = "") -> str:
@@ -237,13 +301,13 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
         dst  = _resolve_path(destination) if destination else None
 
         if not src.exists():
-            return f"Source not found: {src.name}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Source not found: {src.name}")
         if dst is None:
-            return "No destination specified."
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "No destination specified.")
         if not _is_safe_path(src):
-            return f"Access denied (source): {src}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied (source): {src}")
         if not _is_safe_path(dst):
-            return f"Access denied (destination): {dst}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied (destination): {dst}")
 
         if dst.is_dir():
             dst = dst / src.name
@@ -255,10 +319,13 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
         else:
             shutil.copy2(str(src), str(dst))
 
-        return f"Copied: {src.name} → {dst.parent.name}/"
+        # Verify: the destination must actually exist afterward.
+        if dst.exists():
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"Copied: {src.name} → {dst.parent.name}/")
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"copy of {src.name} could not be re-confirmed")
 
     except Exception as e:
-        return f"Could not copy: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not copy: {e}")
 
 
 def rename_file(path: str, name: str = "", new_name: str = "") -> str:
@@ -266,21 +333,27 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
         base     = _resolve_path(path)
         target   = (base / name) if name else base
         if not _is_safe_path(target):
-            return f"Access denied: {target}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied: {target}")
         if not target.exists():
-            return f"Not found: {target.name}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Not found: {target.name}")
         if not new_name:
-            return "No new name provided."
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, "No new name provided.")
 
         new_path = target.parent / new_name
         if new_path.exists():
-            return f"A file named '{new_name}' already exists here."
+            return _envelope.envelope(
+                _envelope.STATUS_VERIFIED_FAILURE, f"A file named '{new_name}' already exists here."
+            )
 
+        old_name = target.name
         target.rename(new_path)
-        return f"Renamed: {target.name} → {new_name}"
+        # Verify: the new name must exist AND the old one must be gone.
+        if new_path.exists() and not target.exists():
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"Renamed: {old_name} → {new_name}")
+        return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"rename of {old_name} could not be re-confirmed")
 
     except Exception as e:
-        return f"Could not rename: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not rename: {e}")
 
 
 def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
@@ -288,19 +361,23 @@ def read_file(path: str, name: str = "", max_chars: int = 4000) -> str:
         base   = _resolve_path(path)
         target = (base / name) if name else base
         if not _is_safe_path(target):
-            return f"Access denied: {target}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied: {target}")
         if not target.exists():
-            return f"File not found: {target.name}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"File not found: {target.name}")
         if not target.is_file():
-            return f"Not a file: {target.name}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Not a file: {target.name}")
 
         content = target.read_text(encoding="utf-8", errors="ignore")
         if len(content) > max_chars:
             content = content[:max_chars] + f"\n\n[Truncated — {len(content)} total chars]"
-        return content
+        # The content itself, real and just read, IS the evidence —
+        # envelope() drops a genuinely empty evidence string entirely, so
+        # an empty file needs an explicit note rather than silently
+        # looking like any other bare, evidence-free success.
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, content or "(empty file)")
 
     except Exception as e:
-        return f"Could not read file: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not read file: {e}")
 
 
 def write_file(path: str, name: str = "", content: str = "",
@@ -309,15 +386,28 @@ def write_file(path: str, name: str = "", content: str = "",
         base   = _resolve_path(path)
         target = (base / name) if name else base
         if not _is_safe_path(target):
-            return f"Access denied: {target}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied: {target}")
         target.parent.mkdir(parents=True, exist_ok=True)
         mode = "a" if append else "w"
         with open(target, mode, encoding="utf-8") as f:
             f.write(content)
         action = "Appended to" if append else "Written to"
-        return f"{action}: {target.name}"
+        # Verify: read the file back and confirm the expected content is
+        # actually there — for write, the whole file must match; for
+        # append, the file must at least END with what was just added
+        # (its earlier content is untouched and irrelevant to this check).
+        try:
+            on_disk = target.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"{action}: {target.name}, but it could not be read back to confirm")
+        matches = on_disk.endswith(content) if append else on_disk == content
+        if matches:
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"{action}: {target.name}")
+        return _envelope.envelope(
+            _envelope.STATUS_VERIFIED_FAILURE, f"{target.name} was written but its content doesn't match what was requested"
+        )
     except Exception as e:
-        return f"Could not write file: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not write file: {e}")
 
 
 def find_files(name: str = "", extension: str = "",
@@ -325,9 +415,9 @@ def find_files(name: str = "", extension: str = "",
     try:
         search_path = _resolve_path(path)
         if not _is_safe_path(search_path):
-            return f"Access denied: {search_path}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied: {search_path}")
         if not search_path.exists():
-            return f"Search path not found: {path}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Search path not found: {path}")
 
         results    = []
         dir_count  = 0
@@ -365,12 +455,14 @@ def find_files(name: str = "", extension: str = "",
 
         if not results:
             query = name or extension or "files"
-            return f"No {query} found in {search_path.name}/"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, f"No {query} found in {search_path.name}/")
 
-        return f"Found {len(results)} file(s):\n" + "\n".join(results)
+        return _envelope.envelope(
+            _envelope.STATUS_VERIFIED_SUCCESS, f"Found {len(results)} file(s):\n" + "\n".join(results)
+        )
 
     except Exception as e:
-        return f"Search error: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Search error: {e}")
 
 
 def get_largest_files(path: str = "downloads", count: int = 10) -> str:
@@ -378,9 +470,9 @@ def get_largest_files(path: str = "downloads", count: int = 10) -> str:
     try:
         search_path = _resolve_path(path)
         if not _is_safe_path(search_path):
-            return f"Access denied: {search_path}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied: {search_path}")
         if not search_path.exists():
-            return f"Path not found: {path}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Path not found: {path}")
 
         files = []
         for item in search_path.rglob("*"):
@@ -394,16 +486,16 @@ def get_largest_files(path: str = "downloads", count: int = 10) -> str:
         top = files[:count]
 
         if not top:
-            return "No files found."
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, "No files found.")
 
         lines = [f"Top {len(top)} largest files in {search_path.name}/:"]
         for size, f in top:
             lines.append(f"  {_format_size(size):>10}  {f.name}  ({f.parent})")
 
-        return "\n".join(lines)
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, "\n".join(lines))
 
     except Exception as e:
-        return f"Error: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Error: {e}")
 
 
 def get_disk_usage(path: str = "home") -> str:
@@ -411,14 +503,14 @@ def get_disk_usage(path: str = "home") -> str:
         target = _resolve_path(path)
         usage  = shutil.disk_usage(target)
         pct    = usage.used / usage.total * 100
-        return (
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, (
             f"Disk usage ({target}):\n"
             f"  Total : {_format_size(usage.total)}\n"
             f"  Used  : {_format_size(usage.used)} ({pct:.1f}%)\n"
             f"  Free  : {_format_size(usage.free)}"
-        )
+        ))
     except Exception as e:
-        return f"Could not get disk usage: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not get disk usage: {e}")
 
 
 def organize_desktop() -> str:
@@ -469,10 +561,13 @@ def organize_desktop() -> str:
                 result += f"\n... and {len(moved) - 8} more."
         if skipped:
             result += f"\n{len(skipped)} file(s) skipped (name conflict)."
-        return result
+        # Each move above already either succeeded (shutil.move raises on
+        # failure) or was explicitly counted as skipped -- the counts
+        # themselves are the real, already-collected evidence.
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_SUCCESS, result)
 
     except Exception as e:
-        return f"Could not organize desktop: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not organize desktop: {e}")
 
 
 def get_file_info(path: str, name: str = "") -> str:
@@ -480,9 +575,9 @@ def get_file_info(path: str, name: str = "") -> str:
         base   = _resolve_path(path)
         target = (base / name) if name else base
         if not _is_safe_path(target):
-            return f"Access denied: {target}"
+            return _envelope.envelope(_envelope.STATUS_BLOCKED, f"Access denied: {target}")
         if not target.exists():
-            return f"Not found: {target.name}"
+            return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Not found: {target.name}")
 
         stat = target.stat()
         info = {
@@ -494,10 +589,12 @@ def get_file_info(path: str, name: str = "") -> str:
             "Modified":  datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
             "Extension": target.suffix or "—",
         }
-        return "\n".join(f"  {k}: {v}" for k, v in info.items())
+        return _envelope.envelope(
+            _envelope.STATUS_VERIFIED_SUCCESS, "\n".join(f"  {k}: {v}" for k, v in info.items())
+        )
 
     except Exception as e:
-        return f"Could not get file info: {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"Could not get file info: {e}")
 
 def file_controller(
     parameters: dict = None,
@@ -524,6 +621,18 @@ def file_controller(
             return create_folder(path, name=name)
 
         elif action == "delete":
+            # J7: the SAME centralized risk/confirmation gate
+            # computer_settings.py's shutdown/restart already use (see
+            # result_envelope.py's _CONSEQUENTIAL_ACTION_NAMES/
+            # is_consequential()/is_confirmed()) — never a second
+            # confirmation framework, never re-implemented per action.
+            # Checked here, before delete_file() ever runs, so an
+            # unconfirmed request never touches the filesystem at all.
+            target_desc = f"{name} in {path}" if name else path
+            if _envelope.is_consequential(action_name=action) and not _envelope.is_confirmed(params):
+                return _envelope.envelope(
+                    _envelope.STATUS_CONFIRMATION_REQUIRED, f"this will delete {target_desc}"
+                )
             return delete_file(path, name=name)
 
         elif action == "move":
@@ -569,7 +678,7 @@ def file_controller(
             return get_file_info(path, name=name)
 
         else:
-            return f"Unknown action: '{action}'"
+            return _envelope.envelope(_envelope.STATUS_INCONCLUSIVE, f"Unknown action: '{action}'")
 
     except Exception as e:
-        return f"File controller error ({action}): {e}"
+        return _envelope.envelope(_envelope.STATUS_VERIFIED_FAILURE, f"File controller error ({action}): {e}")

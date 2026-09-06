@@ -113,6 +113,7 @@ from actions.browser_control import browser_control
 from actions.computer_settings import computer_settings
 from actions import system_shortcuts
 from actions.office_control import office_control
+from actions.file_controller import file_controller
 # J6: the EXISTING perception primitives, reused as-is — see inspect()'s
 # own docstring. Never a new controller/screenshot engine.
 from actions.computer_control import get_active_window_title, list_ui_elements
@@ -325,7 +326,7 @@ class Task:
 # category as a "recovery" — a failed volume-set falling back to a
 # browser search would not be a sane recovery of anything.
 #
-# Only these two are actually populated by a real domain today. The
+# Three are populated by a real domain today (RESOURCE joined in J7). The
 # rest of the taxonomy is a documented placeholder for where future
 # capabilities go — deliberately not scaffolded into code until a real
 # domain needs them:
@@ -336,12 +337,20 @@ class Task:
 #                   (browser, YouTube, Office, VS Code/dev, ...).
 #                   youtube/browser live here today; Office joins this
 #                   SAME family in Phase 4 — not System.
-#   RESOURCE     — files / terminal / processes. Concept only, not built.
+#   RESOURCE     — files / terminal / processes. `file_system` (J7) is
+#                   the first real member — see that domain's own
+#                   comment for why no _RECOVERY_CHAIN entry exists for
+#                   it (same "no artificial recovery" reasoning Office
+#                   already established). Terminal/process capabilities
+#                   remain conceptual — J7 deliberately did not build an
+#                   arbitrary shell-execution capability (no safe
+#                   existing mechanism for one exists in this repo).
 #   DEVELOPMENT  — repo agent / git. Concept only, not built.
 #   DEPLOYMENT   — deploy + verify. Concept only, not built.
 
 FAMILY_SYSTEM      = "system"
 FAMILY_APPLICATION = "application"
+FAMILY_RESOURCE    = "resource"
 
 # ── Capability router (deterministic, no LLM) ───────────────────────────
 # Same scoring shape as system_shortcuts.py's _score()/resolve() — a
@@ -435,11 +444,52 @@ _DOMAINS = [
                      "airplane", "update", "security", "startup", "settings",
                      "check", "status", "ip", "address"],
     },
+    # ── RESOURCE family (J7) ─────────────────────────────────────────────
+    {
+        "name": "file_system",
+        "family": FAMILY_RESOURCE,
+        # Deliberately NOUNS only — no generic verbs (open/create/delete/
+        # read/write/find/move/copy/rename) that could tie against other
+        # domains' own keywords or over-match unrelated requests, same
+        # "open" lesson browser's own keyword list already learned (see
+        # that entry's comment). "disk"/"storage" are deliberately
+        # EXCLUDED even though file_controller.py has its own disk_usage
+        # action — those words already belong to system_shortcut above
+        # (a real, already-working "check disk space" query); adding them
+        # here would create a live routing regression, not just a
+        # theoretical collision (verified — see
+        # tests/test_task_engine_j7.py's own regression test for this).
+        "keywords": ["file", "files", "folder", "folders", "directory",
+                     "directories", "filesystem"],
+    },
 ]
 
 
 def _normalize(text: str) -> set:
     return set(re.sub(r"[^a-z0-9 ]", " ", (text or "").lower()).split())
+
+
+# J7 real-world routing fix: a genuinely common, natural phrasing —
+# "delete notes.txt from my desktop" — contains no bare "file"/"folder"
+# noun at all, so file_system's own keywords (deliberately noun-only, see
+# that domain's comment) would never match it, and _normalize() itself
+# destroys the dot ("notes.txt" -> "notes txt"), losing the one real clue.
+# A KNOWN file-extension token right after a dot is strong, unambiguous
+# evidence the objective is about a file — injecting the literal word
+# "file" into the scored word-set when one appears lets file_system's
+# existing keyword still be what matches, no domain-specific scoring
+# hack. Deliberately a fixed, small, common-extension allowlist (never a
+# bare "\.\w+" pattern) so it can't false-positive on a decimal number
+# ("12.5 percent") or an IP/version string ("192.168.1.1") — verified
+# both stay unaffected, see tests/test_task_engine_j7.py.
+_FILE_EXTENSION_HINT_RE = re.compile(
+    r"\.(txt|pdf|docx?|xlsx?|pptx?|csv|json|xml|ya?ml|"
+    r"jpe?g|png|gif|bmp|svg|webp|heic|"
+    r"mp3|mp4|wav|avi|mov|mkv|webm|flac|"
+    r"zip|rar|7z|tar|gz|"
+    r"py|js|ts|html|css|log|md|ini|cfg|bat|sh|exe|dll)\b",
+    re.IGNORECASE,
+)
 
 
 def _score_domain(objective_words: set, domain: dict) -> int:
@@ -454,6 +504,8 @@ def route(objective: str) -> str | None:
     shape is unchanged by the family addition — still a bare domain-name
     string (or None), exactly as before."""
     words = _normalize(objective)
+    if _FILE_EXTENSION_HINT_RE.search(objective or ""):
+        words = words | {"file"}
     if not words:
         return None
     best_name, best_score = None, 0
@@ -786,6 +838,153 @@ def _run_office(objective: str, confirmed: bool = False, context: "TaskContext |
     return _envelope.envelope(tag, result)
 
 
+def _classify_file_result(result: str) -> str:
+    """file_controller.py's file_controller() now returns a Result-
+    Envelope-tagged string for EVERY path (J7) — status_of() below
+    always catches it in practice; kept only for the same defensive-but-
+    normally-unreachable discipline _classify_office_result() above
+    already uses, in case a future file_controller.py change ever misses
+    a path."""
+    tag = status_of(result)
+    if tag:
+        return tag
+    return _envelope.STATUS_INCONCLUSIVE
+
+
+# ── J7: Terminal & File System ──────────────────────────────────────────
+# "Terminal" here means the safe, deterministic FILE side of that name —
+# section-by-section inspection found NO existing arbitrary shell/command
+# execution capability anywhere in this repository (actions/desktop.py's
+# _execute_generated_code() is a restricted PYAUTOGUI-code sandbox for
+# computer_control.py's own generated-automation tier, not a general
+# command runner, and explicitly forbids subprocess calls in its own
+# generated code). Building one now, just to fill out the name, would be
+# exactly the "generic unrestricted shell agent" this stage was told not
+# to build — so J7 implements only the file-system half, and terminal/
+# process capabilities remain a documented placeholder (see
+# FAMILY_RESOURCE's own comment) until a real, safe mechanism exists.
+
+_FILE_SHORTCUTS = ("desktop", "downloads", "documents", "pictures", "music", "videos", "home")
+_QUOTED_NAME_RE   = re.compile(r"[\"']([^\"']+)[\"']")
+_CALLED_NAME_RE   = re.compile(
+    r"\b(?:called|named)\s+([A-Za-z0-9 _\-\.]+?)(?:\s+(?:in|on|from|to|at)\b|[.!?]*$)",
+    re.IGNORECASE,
+)
+_FILENAME_TOKEN_RE = re.compile(r"\b([\w\-]+\.[A-Za-z0-9]{1,6})\b")
+_RENAME_TO_RE       = re.compile(r"\bto\s+([A-Za-z0-9 _\-\.]+?)[.!?]*$", re.IGNORECASE)
+
+
+def _extract_file_shortcut(low_objective: str) -> str:
+    for s in _FILE_SHORTCUTS:
+        if s in low_objective:
+            return s
+    return "desktop"  # file_controller()'s own existing default
+
+
+def _extract_file_name(objective: str) -> str | None:
+    """Deterministic (objective -> ONE specific file/folder name)
+    extraction — deliberately conservative, same technique as
+    _parse_office_action's own regex parsing. Returns None for anything
+    that doesn't unambiguously name a real target, so every action below
+    that requires a specific name simply can't proceed on a vague one —
+    this IS the Conservative Destructive Policy's actual mechanism, not a
+    separate blocklist of words like 'everything'/'old'/'all': a request
+    with no confidently-extractable name never reaches file_controller()
+    at all, regardless of which vague words it happened to use."""
+    m = _QUOTED_NAME_RE.search(objective)
+    if m:
+        return m.group(1).strip()
+    m = _CALLED_NAME_RE.search(objective)
+    if m:
+        return m.group(1).strip()
+    m = _FILENAME_TOKEN_RE.search(objective)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _parse_file_action(objective: str) -> dict | None:
+    """Deterministic (objective -> file_controller() parameters) parsing
+    — JARVIS's own extraction, never a second LLM call, same technique
+    and same honesty discipline as _parse_office_action: returns None
+    when nothing can be confidently determined, most commonly a
+    destructive/modifying request with no specific, extractable target
+    (see _extract_file_name's own docstring). Deliberately covers only
+    the read-only queries plus delete/create_folder/rename — move/copy/
+    write/create_file are NOT parsed from free text in this pass (their
+    source+destination+content combinations are genuinely harder to
+    extract reliably than a single name); an objective needing one of
+    those honestly returns INCONCLUSIVE here rather than guessing. All
+    13 file_controller() actions remain fully available directly (SARANA
+    mode, or a future parser extension) — this is a parsing-scope
+    limitation, not a capability gap in file_controller.py itself."""
+    low   = objective.lower()
+    words = _normalize(objective)
+    path  = _extract_file_shortcut(low)
+
+    if "largest" in words or "biggest" in words:
+        return {"action": "largest", "path": path}
+
+    if words & {"find", "search", "locate"}:
+        return {"action": "find", "path": path, "name": _extract_file_name(objective) or ""}
+
+    if words & {"list", "show", "contents"}:
+        return {"action": "list", "path": path}
+
+    if words & {"info", "information", "details", "metadata"}:
+        name = _extract_file_name(objective)
+        return {"action": "info", "path": path, "name": name} if name else None
+
+    if "read" in words:
+        name = _extract_file_name(objective)
+        return {"action": "read", "path": path, "name": name} if name else None
+
+    if words & {"delete", "remove", "trash"}:
+        # THE conservative-policy checkpoint: no confidently-extracted
+        # name means no delete attempt at all, regardless of phrasing.
+        name = _extract_file_name(objective)
+        return {"action": "delete", "path": path, "name": name} if name else None
+
+    if "rename" in words:
+        name  = _extract_file_name(objective)
+        m     = _RENAME_TO_RE.search(objective)
+        if not name or not m:
+            return None
+        return {"action": "rename", "path": path, "name": name, "new_name": m.group(1).strip()}
+
+    if "folder" in words and (words & {"create", "make", "new"}):
+        name = _extract_file_name(objective)
+        return {"action": "create_folder", "path": path, "name": name} if name else None
+
+    return None
+
+
+def _run_file_system(objective: str, confirmed: bool = False, context: "TaskContext | None" = None) -> str:
+    """Parses the objective into file_controller.py's own (action, path,
+    name, ...) parameter shape, then calls it in-process exactly as it
+    already exists — no second file controller, no reimplemented
+    filesystem logic. `confirmed` is threaded straight through to
+    file_controller()'s EXISTING is_consequential()/is_confirmed() gate
+    (J7's own fix — delete now requires it, see file_controller.py's own
+    dispatcher) exactly the way _run_system_power already does for
+    shutdown/restart; this handler does not reimplement or relax it."""
+    params = _parse_file_action(objective)
+    if params is None:
+        return _envelope.envelope(
+            _envelope.STATUS_INCONCLUSIVE,
+            "no specific file/folder target could be confidently determined "
+            "from this objective — ask the user exactly which file or "
+            "folder (and where) before trying again; never guess a broad "
+            "or destructive target",
+        )
+    params["confirmed"] = confirmed
+    result = file_controller(parameters=params)
+    tag = _classify_file_result(result)
+    if status_of(result):
+        return result
+    return _envelope.envelope(tag, result)
+
+
 _HANDLERS = {
     "youtube": _run_youtube,
     "browser": _run_browser,
@@ -793,6 +992,7 @@ _HANDLERS = {
     "system_volume": _run_system_volume,
     "system_power": _run_system_power,
     "system_shortcut": _run_system_shortcut,
+    "file_system": _run_file_system,
 }
 
 # Bounded, ordered, TIERED recovery chain (J5's own name for what this
@@ -829,6 +1029,10 @@ _RECOVERY_CHAIN = {
 # system_shortcut would not be a sane recovery of anything. Same
 # no-artificial-recovery discipline as Phase 3's system domains — J5
 # reconfirmed this reasoning still holds, nothing new was invented.
+# J7 (file_system) applies the identical reasoning: a failed file
+# operation has no sane alternative METHOD to fall back to (there is
+# only one way to delete/create/rename a file), so no file_system->*
+# entry exists either — same discipline, not an oversight.
 
 
 # ── Context extraction (Phase 5A) ───────────────────────────────────────

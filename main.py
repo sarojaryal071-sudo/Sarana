@@ -782,12 +782,16 @@ TOOL_DECLARATIONS = [
             "searching a video on YouTube; opening/searching a website; system volume/sleep/"
             "restart/shutdown and Settings shortcuts (Wi-Fi, Bluetooth, battery, display, etc.); "
             "Word/Excel content actions (insert/replace/format text, save, read or set a specific "
-            "spreadsheet cell). For anything this doesn't yet cover, use the specific existing tool "
-            "for that instead (this expands over time — it will return [INCONCLUSIVE] with 'no "
-            "known JARVIS capability' if the objective isn't covered yet, never a guess). Every "
-            "objective must be concrete enough for JARVIS to act on without guessing — e.g. for a "
-            "spreadsheet action say 'put it in cell A1', never just 'put it in Excel'; JARVIS will "
-            "not invent a cell/target you didn't specify. "
+            "spreadsheet cell); files/folders (list, find, largest, info, read, rename, create a "
+            "folder, delete — always within the user's own home folder; delete needs an explicit "
+            "confirmed=true after the user actually says yes). For anything this doesn't yet cover, "
+            "use the specific existing tool for that instead (this expands over time — it will "
+            "return [INCONCLUSIVE] with 'no known JARVIS capability' if the objective isn't covered "
+            "yet, never a guess). Every objective must be concrete enough for JARVIS to act on "
+            "without guessing — e.g. for a spreadsheet action say 'put it in cell A1', never just "
+            "'put it in Excel'; for a file action name the SPECIFIC file/folder ('delete notes.txt "
+            "from my desktop', never 'delete the old files') — JARVIS will not invent a cell/file/"
+            "target you didn't specify. "
             "For a request that genuinely needs several ordered actions (e.g. \"check my battery "
             "percentage, then put it in cell A1\"), use 'objectives' instead of 'objective' — JARVIS "
             "runs them in order, may pass a verified result from an earlier one into a later one "
@@ -900,7 +904,18 @@ TOOL_DECLARATIONS = [
     },
     {
         "name": "file_controller",
-        "description": "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, disk usage.",
+        "description": (
+            "Manages files and folders: list, create, delete, move, copy, rename, read, write, find, "
+            "disk usage. Only ever operates within the user's own home folder — anything outside it, "
+            "or a destructive operation on a protected top-level folder itself (Desktop/Downloads/"
+            "Documents/etc.), is refused. delete requires confirmed=true after the user has explicitly "
+            "said yes to deleting THIS specific item — never infer confirmation from unrelated speech; "
+            "it goes to the Recycle Bin, not permanent deletion. Returns a Result Envelope tag: "
+            "[VERIFIED_SUCCESS] means the outcome was actually re-confirmed on disk — read the evidence "
+            "and repeat it naturally. [VERIFIED_FAILURE]/[INCONCLUSIVE] mean it did NOT confirm success "
+            "— tell the user honestly, never claim it worked. [BLOCKED] means policy refused it outright "
+            "— do not suggest a workaround."
+        ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -912,6 +927,7 @@ TOOL_DECLARATIONS = [
                 "name":        {"type": "STRING", "description": "File name to search for"},
                 "extension":   {"type": "STRING", "description": "File extension to search (e.g. .pdf)"},
                 "count":       {"type": "INTEGER", "description": "Number of results for largest"},
+                "confirmed":   {"type": "BOOLEAN", "description": "Set true only after the user has explicitly confirmed a delete in THIS conversation — never infer it"},
             },
             "required": ["action"]
         }
@@ -3347,8 +3363,31 @@ class JarvisLive:
                     result = r or "Done."
 
             elif name == "file_controller":
-                r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=self.ui))
-                result = r or "Done."
+                # JARVIS-mode boundary enforcement (same pattern as
+                # browser_control/computer_settings/office_control above —
+                # see docs/JARVIS_IMPLEMENTATION_ARCHITECTURE.md §7/J7).
+                # Scoped to exactly the actions task_engine.py's J7
+                # file_system domain's parser actually produces (list/
+                # find/largest/info/read/delete/rename/create_folder) —
+                # create_file/write/move/copy/disk_usage/organize_desktop
+                # have no task_engine parsing path yet (see
+                # _parse_file_action's own docstring on why those were
+                # deliberately left for a later pass) and stay directly
+                # callable, same "don't redirect what has nothing to
+                # replace it" rule browser_control's own boundary uses.
+                _fc_action = (args.get("action") or "").lower().strip()
+                _fc_task_engine_actions = (
+                    "list", "find", "largest", "info", "read", "delete", "rename", "create_folder",
+                )
+                if self._jarvis_mode and _fc_action in _fc_task_engine_actions:
+                    result = (
+                        "[JARVIS_TASK_REQUIRED] In JARVIS mode, this goes through jarvis_task with a "
+                        "clarified objective — JARVIS's own Task Engine owns it, not this tool directly. "
+                        "Call jarvis_task with the user's goal instead."
+                    )
+                else:
+                    r = await loop.run_in_executor(None, lambda: file_controller(parameters=args, player=self.ui))
+                    result = r or "Done."
 
             elif name == "send_message":
                 r = await loop.run_in_executor(None, lambda: send_message(parameters=args, response=None, player=self.ui, session_memory=None))
