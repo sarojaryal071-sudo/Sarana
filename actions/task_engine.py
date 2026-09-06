@@ -76,13 +76,32 @@ recovery-chain path INCONCLUSIVE/UI_AMBIGUOUS correctly use. A
 single-objective Task is untouched by any of this — see
 execute_task()'s and _finalize_result()'s own docstrings.
 
+J6 (Computer/Application Perception — INSPECT): a composed, deterministic
+pre-action state query (inspect(), see its own docstring) reusing the
+EXISTING perception primitives (computer_control.py's
+get_active_window_title()/list_ui_elements(), screen_processor.py's
+_capture_screen()) exactly as they already exist — no new controller, no
+new screenshot/UI engine, nothing sent to Gemini for interpretation (that
+stays main.py's own, separate, async observe/verify-vision mechanism —
+genuinely a different thing, see inspect()'s own docstring for why it
+isn't reused here). Runs inside _execute_step(), right before a handler
+call, for whichever domains _INSPECT_CONFIG actually declares applicable
+(JARVIS's own deterministic config — Gemini never chooses this); its
+result is recorded on the Step it preceded (Step.observation), never fed
+into plan_step.status/task.state, so a perception failure/partial
+observation can never itself become a recovery trigger or a terminal
+outcome — VERIFY (the classifier) remains the only thing that decides
+success/failure, exactly as J4 established.
+
 Explicitly NOT this module's job, and never added here: a second AI/LLM
 choosing what to do: a second tool-execution queue: a second
 verification vocabulary; browser/UI-automation implementation itself
 (that stays owned by browser_control.py/computer_control.py); permanent
 personal memory (a Task's steps are runtime-only and are never written
 to memory/* — see Task.__init__'s own note); expanded tiered recovery
-across method hierarchies (J5); a new perception/vision subsystem (J6).
+across method hierarchies (J5); a new perception/vision subsystem or
+continuous/background screen monitoring (J6 composes what already
+exists, once, on demand, before an action — never a loop).
 """
 import re
 import time
@@ -94,6 +113,10 @@ from actions.browser_control import browser_control
 from actions.computer_settings import computer_settings
 from actions import system_shortcuts
 from actions.office_control import office_control
+# J6: the EXISTING perception primitives, reused as-is — see inspect()'s
+# own docstring. Never a new controller/screenshot engine.
+from actions.computer_control import get_active_window_title, list_ui_elements
+from actions.screen_processor import _capture_screen
 
 # Bounded per-task step budget. Deliberately a small, LOCAL constant for
 # this pilot scope rather than importing main.py's
@@ -157,6 +180,29 @@ def status_of(envelope_str: str) -> str:
     return ""
 
 
+class Observation:
+    """J6: the composed pre-action state query's OWN result — what did
+    the environment look like right before ONE Step's action ran.
+    Deliberately tiny, matches this module's own 'keep the model small'
+    rule, and deliberately NOT a general-purpose perception object: every
+    field is either the exact string an existing primitive already
+    returns (get_active_window_title()/list_ui_elements() are already
+    honest about failure in their own return value — an empty string or
+    a 'Could not ...'/'... is only available on ...' message respectively
+    — so this class does nothing extra to detect success/failure, it
+    just carries what those functions themselves already said) or a
+    short status word for screenshot (never the raw image bytes — see
+    inspect()'s own docstring for why those are discarded immediately).
+    Never persisted, never sent to memory/*, discarded with the Task it
+    was recorded on — see Step.observation."""
+    __slots__ = ("active_window", "ui_elements", "screenshot")
+
+    def __init__(self, active_window: str = "", ui_elements: str | None = None, screenshot: str = ""):
+        self.active_window = active_window
+        self.ui_elements = ui_elements
+        self.screenshot = screenshot
+
+
 class Step:
     """One attempted action within a Task — deliberately small fields
     only (matches the approved architecture's own 'keep the model small'
@@ -164,15 +210,23 @@ class Step:
     (Phase 5A) which PlanStep this attempt belongs to. task.steps is
     shared across every PlanStep in a multi-objective Task — plan_index
     is what lets a Step be traced back to the specific objective it was
-    trying to satisfy."""
-    __slots__ = ("domain", "result", "started_at", "elapsed_s", "plan_index")
+    trying to satisfy. (J6) `observation` is the Observation INSPECT
+    recorded right before this Step's action ran — None for a domain
+    _INSPECT_CONFIG doesn't declare applicable (see that dict's own
+    comment); never influences `status` (see the `status` property
+    below — it reads only from `result`, exactly as it always has)."""
+    __slots__ = ("domain", "result", "started_at", "elapsed_s", "plan_index", "observation")
 
-    def __init__(self, domain: str, result: str, started_at: float, plan_index: int = 0):
+    def __init__(
+        self, domain: str, result: str, started_at: float, plan_index: int = 0,
+        observation: "Observation | None" = None,
+    ):
         self.domain = domain
         self.result = result
         self.started_at = started_at
         self.elapsed_s = time.monotonic() - started_at
         self.plan_index = plan_index
+        self.observation = observation
 
     @property
     def status(self) -> str:
@@ -249,8 +303,11 @@ class Task:
         self.steps: list[Step] = []
         self.created_at = time.monotonic()
 
-    def record(self, domain: str, result: str, started_at: float, plan_index: int = 0) -> Step:
-        step = Step(domain, result, started_at, plan_index)
+    def record(
+        self, domain: str, result: str, started_at: float, plan_index: int = 0,
+        observation: "Observation | None" = None,
+    ) -> Step:
+        step = Step(domain, result, started_at, plan_index, observation)
         self.steps.append(step)
         return step
 
@@ -845,6 +902,95 @@ def build_plan(objectives: list[str]) -> tuple[list[PlanStep] | None, str | None
     return plan, None
 
 
+# ── J6: INSPECT — composed pre-action state query ───────────────────────
+# JARVIS's own, deterministic, per-DOMAIN declaration of which perception
+# signals (if any) are worth gathering before that domain's handler runs
+# — Gemini never chooses this, exactly like route()'s domain choice.
+# Deliberately empty for FIVE of today's six real domains, evidence-based,
+# not an oversight:
+#   youtube/browser — browser_control.py manages its own session/tab
+#     state (native-launch-respects-already-open-browser, its own
+#     registry) entirely independently of the OS foreground window; a
+#     window-title/UI-element read informs nothing it decides.
+#   system_volume/system_power/system_shortcut — pure OS-level settings
+#     that apply regardless of what window currently has focus; "what's
+#     the active window" is not relevant context for any of them.
+# office is the one real exception: it operates on an actual GUI
+# application (Word/Excel), so recording which window is focused right
+# before an attempt is genuinely relevant, low-risk, real context — even
+# though office_control() itself decides purely via COM's own
+# ActiveWorkbook/ActiveDocument, not this. Only `window` is requested for
+# it: `ui_elements`/`screenshot` are real, heavier primitives with no
+# actual consumer for ANY domain today (see inspect()'s own docstring on
+# why it still supports gathering them) — enabling them here would be
+# exactly the "unnecessary inspection" this stage was told not to add.
+_INSPECT_CONFIG: dict[str, dict[str, bool]] = {
+    "office": {"want_window": True},
+}
+
+
+def inspect(
+    want_window: bool = True, want_ui_elements: bool = False, want_screenshot: bool = False,
+) -> Observation:
+    """J6's composed pre-action state query — answers 'what does the
+    environment look like right now', never 'did my action work' (that
+    remains VERIFY's job, unchanged — see this module's own top-level
+    docstring). Composes the EXISTING perception primitives exactly as
+    they exist, calling only what's actually requested (never assumes
+    every caller needs every signal):
+      - get_active_window_title() (computer_control.py) — already
+        returns "" on failure; passed through as-is, never guessed at.
+      - list_ui_elements() (computer_control.py) — already returns an
+        honest descriptive string on failure (e.g. "Could not determine
+        the foreground window.", "UI Automation is only available on
+        Windows here..."); passed through as-is.
+      - _capture_screen() (screen_processor.py) — the ONE primitive that
+        RAISES rather than returning an honest failure string (no mss/
+        capture failure), so this is the one place a try/except is
+        needed to preserve that limitation honestly instead of crashing
+        the whole Step. The raw image bytes are deliberately discarded
+        immediately — nothing in this module interprets pixels (Task
+        Engine must never gain a vision/LLM decision step of its own —
+        see this file's top-level docstring); only whether capture
+        itself succeeded is recorded, as "captured" or "unavailable:
+        <reason>".
+
+    Deliberately NOT the same mechanism as main.py's own observe/verify
+    (self._pending_vision, JARVIS's Gemini-facing vision escalation for
+    computer_control.py's own click/type self-verification): that path
+    is async, tied to a live JarvisLive session, and hands the screenshot
+    to GEMINI for semantic interpretation — none of which this module
+    has or should have (it is a plain, synchronous function called from
+    inside a single run_in_executor call, with no event loop and no
+    Gemini session, and introducing an LLM call here would violate this
+    module's own 'no second AI/LLM choosing what to do' rule). INSPECT
+    here is the raw, structural, deterministic signal a domain handler's
+    surrounding Step can honestly record — not an interpreted one."""
+    active_window = ""
+    if want_window:
+        try:
+            active_window = get_active_window_title()
+        except Exception:
+            active_window = ""  # already the primitive's own honest "unavailable" value
+
+    ui_elements = None
+    if want_ui_elements:
+        try:
+            ui_elements = list_ui_elements()
+        except Exception as e:
+            ui_elements = f"UI element inspection failed: {e}"
+
+    screenshot = ""
+    if want_screenshot:
+        try:
+            _capture_screen()  # bytes intentionally discarded — see docstring above
+            screenshot = "captured"
+        except Exception as e:
+            screenshot = f"unavailable: {e}"
+
+    return Observation(active_window, ui_elements, screenshot)
+
+
 def _execute_step(task: Task, plan_index: int, plan_step: PlanStep, confirmed: bool) -> str:
     """Executes ONE PlanStep to a terminal Result Envelope status —
     Phase 0-4's entire former execute_task() body, extracted essentially
@@ -864,9 +1010,15 @@ def _execute_step(task: Task, plan_index: int, plan_step: PlanStep, confirmed: b
         attempts += 1
         tried.append(domain)
         handler = _HANDLERS[domain]
+        # J6: INSPECT, strictly before ACT — only for a domain
+        # _INSPECT_CONFIG actually declares applicable (see that dict's
+        # own comment); None for every other domain, exactly as before
+        # J6 existed. Never affects routing/execution/status below.
+        inspect_cfg = _INSPECT_CONFIG.get(domain)
+        observation = inspect(**inspect_cfg) if inspect_cfg else None
         started_at = time.monotonic()
         result = handler(objective, confirmed, task.task_context)
-        step = task.record(domain, result, started_at, plan_index)
+        step = task.record(domain, result, started_at, plan_index, observation)
         plan_step.status = step.status
 
         if step.status == _envelope.STATUS_VERIFIED_SUCCESS:
