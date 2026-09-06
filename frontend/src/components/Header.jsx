@@ -15,6 +15,7 @@ export default function Header({
   desktopConnected,
   username,
   authMode,
+  speechMuted,
   onMenuClick,
 }) {
   const now = useClock();
@@ -56,6 +57,20 @@ export default function Header({
         <span className="dot" />
         Desktop {desktopConnected ? "Online" : "Offline"}
       </div>
+      {/* Production polish (real gap, found via audit): main.py's
+          speech_mute tool / speech_mute_changed WS message / this
+          reducer's own speechMuted field all worked already — nothing
+          ever actually DISPLAYED the state. Only shown while true
+          (restrained — an "unmuted" pill has no information value the
+          rest of the UI doesn't already convey). Reuses the existing
+          .pill.warn class (the same --muted-c token SaranaFace's own
+          concerned expression already uses), not a new style. */}
+      {speechMuted && (
+        <div className="pill warn">
+          <span className="dot" />
+          Voice Muted
+        </div>
+      )}
       <div className="clock">
         <div>{time}</div>
         <div className="date">{date}</div>

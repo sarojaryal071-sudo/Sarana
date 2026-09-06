@@ -92,6 +92,20 @@ class HeadlessSurface:
     def notify_phone_connected(self) -> None:
         print("[Headless] Phone connected via Remote Dashboard.")
 
+    def request_native_location_permission(self) -> str:
+        # Native Windows desktop location has no meaning for a headless/
+        # web session -- there is no desktop to have it on, and no
+        # foreground/UI thread to show a Windows consent prompt from
+        # even if there were (see actions/native_location.py's own
+        # "CRITICAL THREADING REQUIREMENT"). Honestly reported as
+        # "unavailable" rather than silently returning "denied" (which
+        # would misleadingly suggest the user was actually asked and
+        # said no) -- main.py's own _try_native_location() treats
+        # anything other than "allowed" identically anyway (falls back
+        # to browser/paired-device location), so this distinction is
+        # purely for honest logging, not a behavior difference.
+        return "unavailable"
+
     def prompt_reconfig(self) -> None:
         print(
             "[Headless] ERR: Gemini API key invalid, but headless mode has "

@@ -114,6 +114,7 @@ from actions import result_envelope as _envelope
 _cc_ESCALATABLE_TAGS = _cc_INCONCLUSIVE_TAGS | frozenset(
     f"[{s}]" for s in _envelope.ESCALATABLE_STATUSES
 )
+from actions import native_location
 from actions.game_updater      import game_updater
 from actions.system_monitor    import SystemMonitor, get_system_status
 from actions.proactive         import ProactiveEngine
@@ -1697,28 +1698,50 @@ class JarvisLive:
         # reads the local machine's own clock/timezone correctly and needs
         # no override (see _local_now()).
         self._web_timezone: str | None = None
-        # Location foundation: the CURRENT session's browser geolocation
-        # fix, set via _set_session_location() (fired by dashboard/
-        # server.py's POST /api/location -> set_location_callback()).
-        # None on desktop always (no browser there — see
-        # _resolve_desktop_profile(), which never touches this), and on
-        # web until/unless the user actually grants permission. Privacy:
-        # session-only, RAM-only — NEVER written to Postgres, the legacy
-        # memory file, session summaries, the Activity Log, or anywhere
-        # else persistent; cleared on every new login (_set_user_profile())
+        # Location foundation: the CURRENT session's location fix, set
+        # via _set_session_location() — either fired by dashboard/
+        # server.py's POST /api/location -> set_location_callback() (a
+        # browser's/paired-device's navigator.geolocation fix), OR, on a
+        # real Windows desktop session, obtained directly from Windows'
+        # own Geolocator by _try_native_location() below (see
+        # actions/native_location.py — a real, confirmed gap this fixed:
+        # a standalone desktop session with nothing paired to it used to
+        # stay at None forever, see
+        # tests/test_location_context.py's own
+        # test_desktop_never_creates_location_state, which still holds —
+        # it only documents the state BEFORE this field is ever
+        # populated, native or otherwise). Privacy: session-only,
+        # RAM-only — NEVER written to Postgres, the legacy memory file,
+        # session summaries, the Activity Log, or anywhere else
+        # persistent; cleared on every new login (_set_user_profile())
         # and on logout (_clear_memory_session()) so no identity can ever
-        # inherit a previous one's coordinates. Shape:
+        # inherit a previous one's coordinates — this holds for a native
+        # fix exactly the same as a browser one, since both go through
+        # the SAME _set_session_location(). Shape:
         #   {"latitude": float, "longitude": float, "accuracy": float,
-        #    "timestamp": float, "fix_timestamp": float | None}
+        #    "timestamp": float, "fix_timestamp": float | None,
+        #    "source": "browser" | "paired_device" | "windows_native"}
         #   "timestamp" is time.monotonic(), for staleness comparisons
         #   only — never a wall-clock value (see _local_now()'s own
         #   docstring for that distinction). "fix_timestamp" is the
-        #   BROWSER's own fix time (epoch ms, may be None) — used only to
-        #   detect an out-of-order refresh response (see
+        #   ORIGINATING source's own fix time (epoch ms, may be None) —
+        #   used only to detect an out-of-order refresh response (see
         #   _set_session_location()'s own docstring).
         # No place name/city/address is ever resolved here — reverse
         # geocoding is explicitly a later phase; this is coordinates only.
         self._session_location: dict | None = None
+        # Native Windows location (see actions/native_location.py):
+        # "allowed" | "denied" | "unspecified" | None (never asked this
+        # session yet). Deliberately NOT reset on every user login/logout
+        # like self._session_location above — this is a PROCESS/OS-level
+        # permission grant (Settings > Privacy > Location), independent
+        # of which SARANA profile is currently active; it resets only on
+        # a fresh connection (see run()'s reconnect-reset block), same
+        # lifetime as self._jarvis_mode/self._speech_muted. Never
+        # persisted — a genuine Windows-level "denied" is honestly
+        # re-discovered (never remembered across a restart) rather than
+        # cached forever from one bad moment.
+        self._native_location_state: str | None = None
         # Permissions foundation: the CURRENT session's last-known REAL
         # browser/OS permission state for capabilities the client can
         # observe directly (see dashboard/server.py's POST /api/
@@ -5266,12 +5289,28 @@ class JarvisLive:
 
     def _set_session_location(
         self, latitude, longitude, accuracy, requester_owner: str = "",
-        fix_timestamp: float | None = None,
+        fix_timestamp: float | None = None, source: str = "browser",
     ) -> None:
-        """Location foundation: fired by dashboard/server.py's
+        """Location foundation: normally fired by dashboard/server.py's
         POST /api/location via set_location_callback(), given a one-shot
         navigator.geolocation fix (see frontend/src/lib/geolocation.js —
-        never a periodic stream, never continuous tracking). Mirrors
+        never a periodic stream, never continuous tracking) — OR, since
+        this stage, called directly by _try_native_location() with a
+        real Windows Geolocator fix (source="windows_native"). The ONE
+        shared validation/storage/wake-waiters path for every location
+        source (section 3's own "add native Windows location as another
+        source feeding the existing location context" requirement) —
+        never a second, parallel storage mechanism.
+
+        `source`: "browser" (the default, for the existing dashboard
+        call site — a real username-login web session) is automatically
+        downgraded to "paired_device" when `requester_owner` is empty
+        (dashboard/server.py's own documented convention: an empty
+        owner means a Remote Access/PIN-paired client, e.g. a phone —
+        see that module's own `_session_canonical_owner` docstring, "\"\"
+        for a Remote Access/PIN [token]"), so this one parameter still
+        distinguishes all three real sources honestly without the
+        caller needing to know that convention itself. Mirrors
         _set_web_timezone()'s shape: validated again here (the dashboard
         layer already validates too — never trust a single layer alone),
         stored purely as in-RAM session state (see self._session_location's
@@ -5313,17 +5352,28 @@ class JarvisLive:
                 return None
             return f if math.isfinite(f) else None
 
-        lat, lon, acc = _finite(latitude), _finite(longitude), _finite(accuracy)
+        lat, lon = _finite(latitude), _finite(longitude)
         fix_ts = _finite(fix_timestamp)
         if lat is None or not (-90.0 <= lat <= 90.0):
-            self.ui.write_log("SYS: Ignored an invalid browser location update.")
+            self.ui.write_log(f"SYS: Ignored an invalid {source} location update.")
             return
         if lon is None or not (-180.0 <= lon <= 180.0):
-            self.ui.write_log("SYS: Ignored an invalid browser location update.")
+            self.ui.write_log(f"SYS: Ignored an invalid {source} location update.")
             return
-        if acc is None or acc < 0:
-            self.ui.write_log("SYS: Ignored an invalid browser location update.")
-            return
+
+        # Accuracy is genuinely OPTIONAL (section 6's own "accuracy when
+        # available") -- a native Windows fix can honestly have none
+        # (actions/native_location.py returns None rather than guessing
+        # one). A given-but-invalid value (negative/non-finite) is still
+        # rejected outright; a plain ABSENT value is not the same as an
+        # invalid one and must not reject an otherwise-good fix.
+        if accuracy is None:
+            acc = None
+        else:
+            acc = _finite(accuracy)
+            if acc is None or acc < 0:
+                self.ui.write_log(f"SYS: Ignored an invalid {source} location update.")
+                return
 
         current_owner = (self._user_profile or {}).get("username", "")
         if requester_owner and requester_owner != current_owner:
@@ -5336,13 +5386,15 @@ class JarvisLive:
             self.ui.write_log("SYS: Ignored an out-of-order (older) location update.")
             return
 
+        resolved_source = "paired_device" if (source == "browser" and not requester_owner) else source
         self._session_location = {
             "latitude": lat, "longitude": lon, "accuracy": acc,
             "timestamp": time.monotonic(), "fix_timestamp": fix_ts,
+            "source": resolved_source,
         }
         # No raw coordinates in this log line — see the privacy contract
         # in self._session_location's own docstring.
-        self.ui.write_log("SYS: Browser location received for this session.")
+        self.ui.write_log(f"SYS: Location received for this session (source: {resolved_source}).")
         # Location capabilities: wake anything awaiting a fresh fix (see
         # _get_current_location()) -- each waiter is independent and
         # removes itself once woken, so this never "misses" a waiter that
@@ -5493,6 +5545,21 @@ class JarvisLive:
             if require_fresh and age < LOCATION_FRESH_ENOUGH_S:
                 return loc
 
+        # Native Windows desktop location (section: "Location source
+        # precedence" in the architecture doc) -- tried FIRST, ahead of
+        # the browser/paired-device mechanism below, but ONLY on a real
+        # desktop session (self._auto_start; never on web/headless,
+        # where there is no desktop to have a Windows location at all)
+        # and only while the platform/API is actually usable. A failed
+        # attempt (denied/disabled/no-data/timeout/error) falls through
+        # to the existing browser/paired-device flow below exactly as if
+        # native didn't exist -- never treated as a harder failure than
+        # the pre-existing behavior already was.
+        if self._auto_start and native_location.is_platform_supported():
+            native_loc = await self._try_native_location()
+            if native_loc is not None:
+                return native_loc
+
         if not self._dashboard:
             return None if require_fresh else loc
 
@@ -5522,6 +5589,65 @@ class JarvisLive:
                 self._location_refresh_waiters.remove(waiter)
             except ValueError:
                 pass
+
+    async def _try_native_location(self) -> dict | None:
+        """Real Windows native location, section "Location source
+        precedence" in the architecture doc. Returns the SAME shape
+        self._session_location already uses (see
+        _set_session_location()), or None on ANY failure — permission
+        never granted/denied/unspecified, Windows Location disabled, no
+        data, timeout, implausible coordinate, or a genuine exception —
+        so the caller (_get_current_location()) can honestly fall back
+        to the existing browser/paired-device mechanism. Never raises
+        past this point (a native-location failure must never take down
+        a tool call — same discipline as every other actions/*.py
+        module) and never guesses a value Windows didn't actually report.
+
+        Permission is requested AT MOST ONCE per connection (result
+        cached in self._native_location_state) — never re-prompted every
+        call, and never re-attempted at all once genuinely denied this
+        session (respects the user's answer instead of nagging).
+        request_native_location_permission() is threaded through
+        loop.run_in_executor() specifically because it BLOCKS this
+        background thread waiting for the foreground/Qt thread to
+        actually show and resolve the real Windows consent prompt (see
+        actions/native_location.py's own "CRITICAL THREADING
+        REQUIREMENT" and ui.py's own new signal/slot marshaling) —
+        awaiting it directly would block the whole asyncio event loop
+        for however long the user takes to answer the prompt."""
+        loop = asyncio.get_event_loop()
+        try:
+            if self._native_location_state is None:
+                self._native_location_state = await loop.run_in_executor(
+                    None, self.ui.request_native_location_permission
+                )
+                if self._native_location_state != "allowed":
+                    self.ui.write_log(
+                        f"SYS: Windows location permission {self._native_location_state} — "
+                        "falling back to browser/paired-device location if available."
+                    )
+            if self._native_location_state != "allowed":
+                return None
+
+            fix = await native_location.get_current_location()
+        except native_location.NativeLocationError as e:
+            self.ui.write_log(
+                f"SYS: Windows native location unavailable ({e}) — "
+                "falling back to browser/paired-device location if available."
+            )
+            return None
+        except Exception as e:
+            # A surface-layer error (e.g. the Qt marshaling itself) —
+            # same "never let this take down the tool call" discipline.
+            self.ui.write_log(f"SYS: Windows native location failed unexpectedly ({e}).")
+            return None
+
+        fix_timestamp_ms = fix["timestamp"].timestamp() * 1000.0
+        self._set_session_location(
+            fix["latitude"], fix["longitude"], fix["accuracy"],
+            fix_timestamp=fix_timestamp_ms, source="windows_native",
+        )
+        return self._session_location
 
     def _calendar_tzinfo(self):
         """Resolves the SAME device/session-local timezone _local_now()
@@ -6153,6 +6279,12 @@ class JarvisLive:
                     self._jarvis_mode           = False
                     self.ui.set_jarvis_mode(False)  # revert the HUD too, in case a prior connection left it showing JARVIS
                     self._speech_muted          = False
+                    # Native Windows location: re-discovered honestly on
+                    # each fresh connection, same lifetime as jarvis_mode/
+                    # speech_muted above — see self._native_location_state's
+                    # own docstring for why this is NOT the same reset
+                    # point as self._session_location's per-login clear.
+                    self._native_location_state = None
                     self._jarvis_action_count   = 0
                     self._interrupted          = False
                     self._pending_tool_calls   = {}

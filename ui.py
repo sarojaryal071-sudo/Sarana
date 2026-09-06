@@ -7,6 +7,7 @@ import platform
 import random
 import subprocess
 import sys
+import asyncio
 import threading
 import time
 from pathlib import Path
@@ -2463,6 +2464,16 @@ class MainWindow(QMainWindow):
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
     _jarvis_mode_sig = pyqtSignal(bool)      # main.py's self._jarvis_mode changed (thread-safe)
     _expression_sig  = pyqtSignal(str, float)  # main.py's set_expression tool call (expression, duration_seconds)
+    # Native Windows location: the ONE signal that carries a REQUEST
+    # (from main.py's background asyncio thread) rather than a plain
+    # notification, because Geolocator.request_access_async() must run
+    # on THIS thread (the real Qt GUI/foreground thread — see
+    # actions/native_location.py's own "CRITICAL THREADING REQUIREMENT")
+    # and its result must travel back to the calling thread. `object`
+    # carries a small _LocationPermissionRequest (below) — a
+    # threading.Event plus a mutable result/error slot — since a plain
+    # pyqtSignal has no return value of its own.
+    _location_permission_sig = pyqtSignal(object)
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -2634,6 +2645,7 @@ class MainWindow(QMainWindow):
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._jarvis_mode_sig.connect(self._apply_jarvis_mode)
         self._expression_sig.connect(self._apply_expression_override)
+        self._location_permission_sig.connect(self._handle_location_permission_request)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -4074,6 +4086,28 @@ class MainWindow(QMainWindow):
         updated here — this never touches self.hud."""
         self.sarana_face.set_expression_override(expression, duration_seconds)
 
+    def _handle_location_permission_request(self, request: "_LocationPermissionRequest"):
+        """Native Windows location — runs on THIS thread (the real Qt
+        GUI/foreground thread that owns app.exec(), see ui.py's main())
+        because it is delivered via a Qt signal/slot connection, exactly
+        like every other cross-thread call in this file. This is the
+        ONE place actions/native_location.request_access() is ever
+        invoked — see that module's own "CRITICAL THREADING REQUIREMENT"
+        for why calling it from main.py's background asyncio thread
+        directly would be wrong. asyncio.run() is safe to call here: the
+        GUI thread has no asyncio event loop of its own running (Qt owns
+        this thread's event loop, not asyncio), so this briefly runs a
+        fresh, temporary one just for this one WinRT round trip, then
+        closes it — the SAME technique this stage's own real-machine
+        verification already confirmed works for this exact API."""
+        from actions import native_location
+        try:
+            request.result = asyncio.run(native_location.request_access())
+        except Exception as e:
+            request.error = e
+        finally:
+            request.event.set()
+
     def _check_config(self) -> bool:
         if not API_FILE.exists(): return False
         try:
@@ -4108,6 +4142,22 @@ class MainWindow(QMainWindow):
         self._apply_state("LISTENING")
         self._assistant_name = _read_full_config().get("assistant_name", "SARANA") or "SARANA"
         self._log.append_log(f"SYS: Initialised. OS={os_name.upper()}. {self._assistant_name} online.")
+
+class _LocationPermissionRequest:
+    """Native Windows location — the small, plain cross-thread "envelope"
+    carried by MainWindow's own _location_permission_sig (a plain
+    pyqtSignal has no return value of its own): the background thread
+    creates one, emits it, and blocks on `.event`; the GUI-thread slot
+    (_handle_location_permission_request) fills in `.result`/`.error`
+    and sets `.event` when done. Not a queue/second event system — one
+    disposable object per request, exactly mirroring how every other
+    thread-safe call in this file already works, just needing an actual
+    answer back instead of firing and forgetting."""
+    def __init__(self):
+        self.event = threading.Event()
+        self.result: str | None = None
+        self.error: Exception | None = None
+
 
 class _RootShim:
     def __init__(self, app: QApplication):
@@ -4220,6 +4270,39 @@ class JarvisUI:
         """Thread-safe: show the API key setup overlay (e.g. after an auth error)."""
         self._win._ready = False
         self._win._reconfig_sig.emit()
+
+    def request_native_location_permission(self) -> str:
+        """Native Windows desktop location — the "clean user-facing way
+        to request native location permission" this stage's own "Desktop
+        UX" section asks for: the first time it's actually needed (see
+        main.py's own _try_native_location()), this triggers Windows'
+        REAL system consent prompt, exactly the same just-in-time pattern
+        the browser's own navigator.geolocation permission already uses
+        (never a separate new Settings/permission panel — see this
+        method's own docstring in core/assistant_surface.py for why a
+        giant new settings system was deliberately not built for this).
+
+        BLOCKS THE CALLING THREAD (main.py's background asyncio worker,
+        via loop.run_in_executor() — see _try_native_location()'s own
+        docstring) until the request actually completes on the Qt GUI
+        thread — this is intentional and correct: the caller is already
+        off the asyncio event loop specifically so this can block
+        without stalling anything else. Returns "allowed" | "denied" |
+        "unspecified" | "unavailable" (winsdk/WinRT itself unusable) —
+        never raises; a timeout waiting for the GUI thread (which should
+        never actually happen while the app is running, but is bounded
+        defensively) also reports "unspecified" rather than hanging
+        forever."""
+        request = _LocationPermissionRequest()
+        self._win._location_permission_sig.emit(request)
+        if not request.event.wait(timeout=30.0):
+            return "unspecified"
+        if request.error is not None:
+            from actions.native_location import NativeLocationUnavailable
+            if isinstance(request.error, NativeLocationUnavailable):
+                return "unavailable"
+            return "unspecified"
+        return request.result or "unspecified"
 
     def show_camera_frame(self, img_bytes: bytes):
         """Thread-safe: show a webcam frame in the small overlay (screen captures)."""

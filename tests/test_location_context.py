@@ -397,6 +397,193 @@ def test_desktop_never_creates_location_state() -> None:
     print("test_desktop_never_creates_location_state: PASS")
 
 
+# ── Native Windows desktop location (main.py integration) ────────────────
+# actions/native_location.py's own adapter logic is exhaustively covered
+# in isolation by tests/test_native_location.py (mocked winsdk) -- these
+# tests exercise main.py's own precedence/caching/fallback logic around
+# it, with `main.native_location` itself mocked (never the real WinRT
+# API — this machine genuinely has a working, already-granted native
+# location, confirmed live in this stage's own completion report; these
+# tests must stay deterministic regardless of that real, external state).
+# HeadlessSurface's own request_native_location_permission() already
+# always honestly returns "unavailable" (see that class's own docstring)
+# — a real desktop surface (ui.py's JarvisUI) is substituted directly on
+# the instance for these tests specifically to exercise the "native IS
+# available" precedence path.
+
+def _desktop_jarvis_with_native(permission_result: str):
+    """A HeadlessSurface-backed, auto_start=True ("desktop's default")
+    JarvisLive, with JUST request_native_location_permission()
+    overridden to return a controlled value -- every other surface
+    method stays the real, already-tested HeadlessSurface behavior."""
+    jarvis = JarvisLive(HeadlessSurface())
+    jarvis.ui.request_native_location_permission = lambda: permission_result
+    return jarvis
+
+
+def test_native_location_tried_first_on_desktop_when_available() -> None:
+    import asyncio
+    from datetime import datetime, timezone
+    fake_fix = {"latitude": 60.17, "longitude": 24.94, "accuracy": 42.0,
+                "timestamp": datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)}
+    jarvis = _desktop_jarvis_with_native("allowed")
+    with patch("main.native_location.is_platform_supported", return_value=True), \
+         patch("main.native_location.get_current_location", return_value=fake_fix):
+        loc = asyncio.run(jarvis._get_current_location())
+    assert loc is not None
+    assert loc["source"] == "windows_native"
+    assert loc["latitude"] == 60.17
+    print("test_native_location_tried_first_on_desktop_when_available: PASS")
+
+
+def test_native_location_denied_falls_back_to_no_location_when_nothing_else_exists() -> None:
+    import asyncio
+    jarvis = _desktop_jarvis_with_native("denied")
+    with patch("main.native_location.is_platform_supported", return_value=True):
+        loc = asyncio.run(jarvis._get_current_location())
+    assert loc is None
+    print("test_native_location_denied_falls_back_to_no_location_when_nothing_else_exists: PASS")
+
+
+def test_native_location_permission_asked_only_once_per_session() -> None:
+    import asyncio
+    from datetime import datetime, timezone
+    fake_fix = {"latitude": 60.17, "longitude": 24.94, "accuracy": 42.0,
+                "timestamp": datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)}
+    jarvis = _desktop_jarvis_with_native("allowed")
+    permission_calls = []
+    real_perm = jarvis.ui.request_native_location_permission
+    jarvis.ui.request_native_location_permission = lambda: (permission_calls.append(1), real_perm())[1]
+    with patch("main.native_location.is_platform_supported", return_value=True), \
+         patch("main.native_location.get_current_location", side_effect=lambda **_kw: fake_fix):
+        asyncio.run(jarvis._get_current_location(require_fresh=True))
+        jarvis._session_location["timestamp"] -= 10_000  # force staleness for a second attempt
+        asyncio.run(jarvis._get_current_location(require_fresh=True))
+    assert len(permission_calls) == 1, "permission must be requested at most once per session, not re-prompted every call"
+    print("test_native_location_permission_asked_only_once_per_session: PASS")
+
+
+def test_native_location_denied_is_never_reattempted() -> None:
+    import asyncio
+    jarvis = _desktop_jarvis_with_native("denied")
+    call_count = {"n": 0}
+    real_perm = jarvis.ui.request_native_location_permission
+    def _counting_perm():
+        call_count["n"] += 1
+        return real_perm()
+    jarvis.ui.request_native_location_permission = _counting_perm
+    with patch("main.native_location.is_platform_supported", return_value=True), \
+         patch("main.native_location.get_current_location") as m_fetch:
+        asyncio.run(jarvis._get_current_location())
+        asyncio.run(jarvis._get_current_location())
+    assert call_count["n"] == 1
+    m_fetch.assert_not_called()
+    print("test_native_location_denied_is_never_reattempted: PASS")
+
+
+def test_native_location_disabled_falls_back_honestly_never_a_crash() -> None:
+    import asyncio
+    import actions.native_location as nl
+    jarvis = _desktop_jarvis_with_native("allowed")
+    with patch("main.native_location.is_platform_supported", return_value=True), \
+         patch("main.native_location.get_current_location", side_effect=nl.NativeLocationDisabled("off")):
+        loc = asyncio.run(jarvis._get_current_location())
+    assert loc is None
+    print("test_native_location_disabled_falls_back_honestly_never_a_crash: PASS")
+
+
+def test_native_location_never_attempted_on_a_web_session() -> None:
+    import asyncio
+    jarvis = JarvisLive(HeadlessSurface(), auto_start=False)  # web session
+    with patch("main.native_location.is_platform_supported", return_value=True) as m_supported, \
+         patch("main.native_location.get_current_location") as m_fetch:
+        asyncio.run(jarvis._get_current_location())
+    m_fetch.assert_not_called()
+    print("test_native_location_never_attempted_on_a_web_session: PASS")
+
+
+def test_native_and_browser_paired_device_sources_can_coexist() -> None:
+    """Native fails/denied this session, but a real browser/paired-device
+    fix already exists and is still fresh -- the existing mechanism must
+    keep working exactly as before native location existed at all."""
+    import asyncio
+    jarvis = _desktop_jarvis_with_native("denied")
+    # A non-empty requester_owner is what genuinely distinguishes a real
+    # username-login browser session from a Remote Access/PIN-paired
+    # device (see _set_session_location()'s own docstring) -- matching
+    # current_owner so the identity-race guard doesn't drop this update.
+    jarvis._user_profile = {"username": "saroj"}
+    jarvis._set_session_location(1.23, 4.56, 10.0, requester_owner="saroj", source="browser")
+    with patch("main.native_location.is_platform_supported", return_value=True):
+        loc = asyncio.run(jarvis._get_current_location())
+    assert loc is not None
+    assert loc["source"] == "browser"
+    assert loc["latitude"] == 1.23
+    print("test_native_and_browser_paired_device_sources_can_coexist: PASS")
+
+
+def test_stale_native_location_is_refreshed_like_any_other_source() -> None:
+    import asyncio
+    from datetime import datetime, timezone
+    jarvis = _desktop_jarvis_with_native("allowed")
+    jarvis._set_session_location(1.0, 1.0, 10.0, source="windows_native")
+    jarvis._session_location["timestamp"] -= 10_000  # well past LOCATION_MAX_AGE_S
+    fresh_fix = {"latitude": 60.17, "longitude": 24.94, "accuracy": 42.0,
+                 "timestamp": datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)}
+    with patch("main.native_location.is_platform_supported", return_value=True), \
+         patch("main.native_location.get_current_location", return_value=fresh_fix) as m_fetch:
+        loc = asyncio.run(jarvis._get_current_location())
+    m_fetch.assert_called_once()
+    assert loc["latitude"] == 60.17
+    print("test_stale_native_location_is_refreshed_like_any_other_source: PASS")
+
+
+def test_native_location_source_metadata_is_recorded_accurately() -> None:
+    import asyncio
+    from datetime import datetime, timezone
+    fake_fix = {"latitude": 60.17, "longitude": 24.94, "accuracy": None,
+                "timestamp": datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)}
+    jarvis = _desktop_jarvis_with_native("allowed")
+    with patch("main.native_location.is_platform_supported", return_value=True), \
+         patch("main.native_location.get_current_location", return_value=fake_fix):
+        loc = asyncio.run(jarvis._get_current_location())
+    assert loc["source"] == "windows_native"
+    assert loc["accuracy"] is None  # "accuracy when available" -- honestly absent here
+    assert "latitude" in loc and "longitude" in loc and "timestamp" in loc
+    print("test_native_location_source_metadata_is_recorded_accurately: PASS")
+
+
+def test_no_ip_geolocation_hidden_fallback_anywhere_in_native_integration() -> None:
+    """Source-inspection: no HTTP client / geolocation-by-IP call exists
+    anywhere in the native location adapter or its main.py integration —
+    section 11's own explicit prohibition."""
+    import inspect
+    import actions.native_location as nl
+    src = inspect.getsource(nl)
+    # Checks actual CODE usage (an import or a real call), not prose --
+    # this module's own docstring legitimately explains, in words, that
+    # it does NOT make a hidden HTTP call, which would otherwise
+    # false-positive a naive blanket "http" substring search.
+    assert not any(line.strip().startswith(("import requests", "import urllib", "from requests", "from urllib"))
+                    for line in src.splitlines())
+    assert "requests.get(" not in src and "requests.post(" not in src and "urlopen(" not in src
+    print("test_no_ip_geolocation_hidden_fallback_anywhere_in_native_integration: PASS")
+
+
+def test_no_location_history_persisted_by_native_integration() -> None:
+    """Source-inspection: _try_native_location()/_set_session_location()
+    never write to disk/a database — the existing, already-audited
+    RAM-only privacy contract (test_location_never_appears_in_write_log_calls
+    above) extends to the native source unchanged, never a new
+    persistence mechanism."""
+    import inspect
+    import main as main_module
+    src = inspect.getsource(main_module.JarvisLive._try_native_location)
+    for forbidden in ("json.dump", "sqlite3", "INSERT INTO", "open(", ".write(", "save_memory"):
+        assert forbidden not in src, f"unexpected persistence call in _try_native_location: {forbidden}"
+    print("test_no_location_history_persisted_by_native_integration: PASS")
+
+
 # ── [LOCATION] context in _build_config() ─────────────────────────────────
 
 def test_build_config_location_available_never_leaks_raw_coordinates() -> None:
@@ -559,6 +746,17 @@ if __name__ == "__main__":
     test_new_login_clears_previous_location()
     test_same_user_relogin_also_clears_location()
     test_desktop_never_creates_location_state()
+    test_native_location_tried_first_on_desktop_when_available()
+    test_native_location_denied_falls_back_to_no_location_when_nothing_else_exists()
+    test_native_location_permission_asked_only_once_per_session()
+    test_native_location_denied_is_never_reattempted()
+    test_native_location_disabled_falls_back_honestly_never_a_crash()
+    test_native_location_never_attempted_on_a_web_session()
+    test_native_and_browser_paired_device_sources_can_coexist()
+    test_stale_native_location_is_refreshed_like_any_other_source()
+    test_native_location_source_metadata_is_recorded_accurately()
+    test_no_ip_geolocation_hidden_fallback_anywhere_in_native_integration()
+    test_no_location_history_persisted_by_native_integration()
     test_build_config_location_available_never_leaks_raw_coordinates()
     test_build_config_location_unavailable_says_so()
     test_prompt_documents_location_context()

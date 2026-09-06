@@ -32,6 +32,10 @@
 // closing line), not "play a sound for every state change".
 
 const PRIORITY = { CRITICAL: 2, NORMAL: 1, AMBIENT: 0 };
+// How much quieter a NORMAL-tier cue plays while the assistant is
+// speaking -- genuine ducking (still audible, just deferential to
+// speech), never full silence (that's AMBIENT's own, separate rule).
+const DUCK_GAIN = 0.32;
 
 // name -> {priority, cooldownMs, synth(ctx, dest, opts)}
 // Populated below, after the synthesis helpers exist.
@@ -141,6 +145,19 @@ export function setSpeaking(isSpeaking) {
   _speaking = !!isSpeaking;
 }
 
+// Production-polish note (explicit design decision, per the "mute
+// behavior" audit item -- not an oversight): this module deliberately
+// has NO awareness of state.speechMuted (main.py's speech_mute tool --
+// see App.jsx's own SPEECH_MUTE handling). Muting the assistant's
+// SPOKEN VOICE and muting cinematic UI cues (wake/sleep/transition
+// chimes) are different channels serving different purposes -- a user
+// who mutes JARVIS's voice mid-task most likely still wants to hear
+// the Sarana<->JARVIS transition chime or a BLOCKED cue; conflating the
+// two would mean "mute" silences MORE than the user actually asked for.
+// If a future request wants audioFx cues suppressed too, that is a
+// second, explicit setMuted()-style call site here, never inferred
+// from speechMuted implicitly.
+
 // ── event vocabulary (section 12) ─────────────────────────────────────
 // Only events with an honest, real triggering signal are wired from
 // App.jsx (see that file's own audio-fx effects) — task_started/
@@ -237,10 +254,17 @@ export function playAudioFx(name, { force = false } = {}) {
   const last = _lastPlayedAt.get(name) || 0;
   if (!force && now - last < spec.cooldownMs) return false; // spam guard, not a hard mute
 
+  // Production-polish fix (real bug, found via code audit, not
+  // hypothetical): NORMAL was previously fully SUPPRESSED while
+  // speaking, identical to AMBIENT, despite the code's own comment (and
+  // section 13's own "subtle UI sounds can duck under speech" — ducking
+  // means quieter, not silent) claiming otherwise. AMBIENT stays fully
+  // suppressed; NORMAL now genuinely ducks via a lower-gain intermediate
+  // node instead of returning early.
+  let duck = false;
   if (!force && _speaking && spec.priority < PRIORITY.CRITICAL) {
     if (spec.priority === PRIORITY.AMBIENT) return false; // fully suppressed under speech
-    // NORMAL ducks under speech rather than competing with it.
-    return false;
+    duck = true; // NORMAL: still plays, just quieter -- see DUCK_GAIN below
   }
 
   const ctx = _getContext();
@@ -249,7 +273,14 @@ export function playAudioFx(name, { force = false } = {}) {
   try {
     ctx.resume().catch(() => {});
     _lastPlayedAt.set(name, now);
-    spec.synth(ctx, _master, ctx.currentTime + 0.01);
+    let dest = _master;
+    if (duck) {
+      const duckGain = ctx.createGain();
+      duckGain.gain.value = DUCK_GAIN;
+      duckGain.connect(_master);
+      dest = duckGain;
+    }
+    spec.synth(ctx, dest, ctx.currentTime + 0.01);
     return true;
   } catch {
     return false; // a synthesis error must never propagate into the caller's own event handling

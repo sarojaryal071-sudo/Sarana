@@ -30,6 +30,16 @@ export default function PresentationSurface({ content, theme, onDismiss }) {
   const [dismissed, setDismissed] = useState(false);
   const prevContentRef = useRef(content);
   const timerRef = useRef(null);
+  const dismissTimerRef = useRef(null);
+
+  // Production-polish fix (real resource-cleanup gap, found via audit):
+  // handleDismiss()'s own setTimeout was previously untracked, so an
+  // unmount for any OTHER reason before it fired (e.g. the parent
+  // replacing `content` entirely) left it dangling — harmless in
+  // practice (onDismiss just re-dispatches an already-idempotent
+  // DISMISS_CONTENT), but not genuinely cleaned up. Tracked and cleared
+  // on unmount now, exactly like the other two timers in this component.
+  useEffect(() => () => clearTimeout(dismissTimerRef.current), []);
 
   // Fresh mount (ContentPanel only renders this component while
   // `content` is non-null, so a NEW PresentationSurface instance always
@@ -58,7 +68,7 @@ export default function PresentationSurface({ content, theme, onDismiss }) {
   function handleDismiss() {
     setPhase("dismissing");
     setDismissed(true);
-    setTimeout(onDismiss, DISMISS_MS);
+    dismissTimerRef.current = setTimeout(onDismiss, DISMISS_MS);
   }
 
   const presentation = content?.presentation;

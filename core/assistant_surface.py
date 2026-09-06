@@ -21,7 +21,15 @@ JarvisLive in main.py (grepped line by line, not assumed):
   Methods called during the session lifecycle / tool execution:
     write_log, set_state, set_audio_level, set_jarvis_mode, set_expression,
     show_content, start_camera_stream, stop_camera_stream,
-    notify_phone_connected, prompt_reconfig
+    notify_phone_connected, prompt_reconfig,
+    request_native_location_permission (native Windows desktop location —
+    see actions/native_location.py's own "CRITICAL THREADING REQUIREMENT":
+    this is the ONE place a real Windows consent prompt is ever requested,
+    which MUST happen on the surface's own foreground/UI thread, never
+    JarvisLive's background asyncio loop — JarvisUI (ui.py) marshals the
+    actual WinRT call onto the Qt GUI thread; HeadlessSurface reports it
+    honestly unavailable, since a headless/web session has no desktop to
+    have native location on)
 
   Read-only properties:
     muted, current_file
@@ -77,3 +85,4 @@ class AssistantSurface(Protocol):
     def stop_camera_stream(self) -> None: ...
     def notify_phone_connected(self) -> None: ...
     def prompt_reconfig(self) -> None: ...
+    def request_native_location_permission(self) -> str: ...

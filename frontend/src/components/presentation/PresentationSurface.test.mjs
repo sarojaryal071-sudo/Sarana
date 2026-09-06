@@ -79,7 +79,12 @@ test("an update pulse never fires while still materializing (no double-animation
 });
 
 test("dismiss unmounts via the caller's onDismiss after the dismiss transition, not instantly", () => {
-  assert.match(surfaceSrc, /setTimeout\(onDismiss, DISMISS_MS\)/);
+  assert.match(surfaceSrc, /dismissTimerRef\.current = setTimeout\(onDismiss, DISMISS_MS\)/);
+});
+
+test("production polish: the dismiss timer is tracked and cleared on unmount, not left dangling", () => {
+  assert.match(surfaceSrc, /const dismissTimerRef = useRef\(null\);/);
+  assert.match(surfaceSrc, /useEffect\(\(\) => \(\) => clearTimeout\(dismissTimerRef\.current\), \[\]\);/);
 });
 
 test("expand/collapse is a local toggle, independent of the lifecycle phase", () => {
@@ -140,13 +145,29 @@ test("WeatherPresentation renders only fields from `data` — no hardcoded tempe
 test("CalendarPresentation computes a REAL month grid from actual Date math — no calendar library, no invented events", () => {
   assert.match(calendarSrc, /function buildMonthGrid\(year, month\)/);
   assert.match(calendarSrc, /new Date\(year, month - 1, 1\)/);
-  assert.doesNotMatch(calendarSrc, /from ["'](?!\.\.?\/)/m, "no new dependency for solvable-with-plain-JS date math");
+  // "react" itself is not a NEW dependency (every component already
+  // uses it) -- CalendarPresentation legitimately needs useState for
+  // its own client-side day-selection (see that component's own
+  // "calendar interaction" production-polish addition). The actual
+  // guard is: no OTHER, genuinely new package for date math.
+  assert.doesNotMatch(calendarSrc, /from ["'](?!\.\.?\/|react["'])/m, "no new dependency for solvable-with-plain-JS date math");
   // marking uses the backend-supplied marked_dates set, never a guess
   assert.match(calendarSrc, /marked\.has\(iso\)/);
 });
 
 test("CalendarPresentation only shows a focus_date drill-down when the backend actually supplied one", () => {
   assert.match(calendarSrc, /const focusDate = data\?\.focus_date \|\| null;/);
+});
+
+test("production polish: clicking a day filters the ALREADY-FETCHED events client-side, never a new backend request", () => {
+  assert.match(calendarSrc, /const \[selectedDate, setSelectedDate\] = useState\(focusDate\);/);
+  assert.match(calendarSrc, /events\.filter\(\(ev\) => eventDateIso\(ev\) === selectedDate\)/);
+  assert.doesNotMatch(calendarSrc, /fetch\(|sendCommand|WebSocket|new XMLHttpRequest/, "day selection must stay entirely client-side");
+});
+
+test("day cells are real, keyboard-accessible buttons, not click-handler divs", () => {
+  assert.match(calendarSrc, /<button[\s\S]{0,40}type="button"/);
+  assert.match(calendarSrc, /aria-pressed=\{isSelected\}/);
 });
 
 test("SearchResultsPresentation never re-parses free text into fabricated structured result objects", () => {

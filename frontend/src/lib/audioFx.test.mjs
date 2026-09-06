@@ -70,6 +70,22 @@ test("priority model: three tiers, AMBIENT fully suppressed while speaking, CRIT
   assert.match(src, /spec\.priority < PRIORITY\.CRITICAL/);
 });
 
+test("production-polish fix: NORMAL genuinely DUCKS (plays quieter) while speaking, never fully suppressed like AMBIENT", () => {
+  // Real bug found via code audit: NORMAL used to `return false`
+  // (fully silent) under exactly the same condition as AMBIENT, despite
+  // being documented as "ducks under speech". Verifies the fix: a duck
+  // gain node is actually created and used as the synth destination
+  // instead of unconditionally returning early for NORMAL.
+  assert.match(src, /let duck = false;/);
+  assert.match(src, /duck = true;/);
+  assert.match(src, /const duckGain = ctx\.createGain\(\);/);
+  assert.match(src, /duckGain\.gain\.value = DUCK_GAIN;/);
+  assert.match(src, /const DUCK_GAIN = [\d.]+;/);
+  // The old bug's exact shape must not reappear: a bare early return
+  // immediately after detecting NORMAL-under-speech.
+  assert.doesNotMatch(src, /duck = true[\s\S]{0,20}return false/);
+});
+
 test("every event has a cooldown — a spam guard, never an unconditional re-trigger", () => {
   const entries = [...src.matchAll(/priority: PRIORITY\.\w+, cooldownMs: (\d+)/g)];
   assert.ok(entries.length >= 9, "expected a cooldownMs on every registered event");
@@ -77,7 +93,7 @@ test("every event has a cooldown — a spam guard, never an unconditional re-tri
 });
 
 test("a synthesis error is caught, never propagated into the caller's own event handling", () => {
-  assert.match(src, /try \{[\s\S]*?spec\.synth\(ctx, _master, ctx\.currentTime \+ 0\.01\);[\s\S]*?\} catch \{/);
+  assert.match(src, /try \{[\s\S]*?spec\.synth\(ctx, dest, ctx\.currentTime \+ 0\.01\);[\s\S]*?\} catch \{/);
 });
 
 test("missing/blocked Web Audio API degrades to a silent no-op, never a thrown error at import or first call", () => {

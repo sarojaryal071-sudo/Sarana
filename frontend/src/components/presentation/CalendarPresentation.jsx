@@ -17,6 +17,17 @@
 // no calendar library, matching this project's own "no new dependency
 // for a solvable-with-plain-JS problem" precedent (see
 // IdentityTransition.jsx's own trig-not-a-physics-library choice).
+//
+// Production-polish addition ("calendar interaction" audit item):
+// clicking any day in the grid re-filters the events list below to
+// that day — entirely client-side, from the SAME `events` array the
+// backend already sent, never a new backend round-trip/WS message
+// (section "important architectural constraints": no new event bus).
+// Clicking a day outside the originally-fetched range honestly shows
+// "No events" (this component genuinely doesn't know what's there,
+// having never been sent it) rather than fabricating anything.
+import { useState } from "react";
+
 const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 function buildMonthGrid(year, month) {
@@ -48,6 +59,19 @@ const MONTH_NAMES = [
   "July", "August", "September", "October", "November", "December",
 ];
 
+function eventDateIso(ev) {
+  const raw = ev?.start;
+  if (!raw) return null;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  // All-day events carry a bare "YYYY-MM-DD" (no time component) --
+  // `new Date()` parses that as UTC midnight, so read the date fields
+  // straight from the string rather than through the Date object's own
+  // (locale-shifted) getters to avoid an off-by-one-day near midnight.
+  if (ev.all_day && /^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 export default function CalendarPresentation({ data }) {
   const [yearStr, monthStr] = (data?.month || "").split("-");
   const year = parseInt(yearStr, 10);
@@ -57,11 +81,14 @@ export default function CalendarPresentation({ data }) {
   const focusDate = data?.focus_date || null;
   const events = Array.isArray(data?.events) ? data.events : [];
 
+  const [selectedDate, setSelectedDate] = useState(focusDate);
+
   if (!validMonth) {
     return <div className="pw-calendar-empty">No calendar month to show.</div>;
   }
 
   const cells = buildMonthGrid(year, month);
+  const shownEvents = selectedDate ? events.filter((ev) => eventDateIso(ev) === selectedDate) : events;
 
   return (
     <div className="pw-calendar">
@@ -74,24 +101,28 @@ export default function CalendarPresentation({ data }) {
           if (day == null) return <div className="pw-calendar-cell pw-calendar-cell-empty" key={`e${i}`} />;
           const iso = isoDate(year, month, day);
           const isMarked = marked.has(iso);
-          const isFocused = iso === focusDate;
+          const isSelected = iso === selectedDate;
           return (
-            <div
+            <button
               key={iso}
-              className={`pw-calendar-cell${isMarked ? " pw-calendar-cell-marked" : ""}${isFocused ? " pw-calendar-cell-focused" : ""}`}
+              type="button"
+              className={`pw-calendar-cell${isMarked ? " pw-calendar-cell-marked" : ""}${isSelected ? " pw-calendar-cell-focused" : ""}`}
+              onClick={() => setSelectedDate((cur) => (cur === iso ? null : iso))}
+              aria-pressed={isSelected}
+              aria-label={`${MONTH_NAMES[month - 1]} ${day}, ${year}${isMarked ? " (has events)" : ""}`}
             >
               {day}
-            </div>
+            </button>
           );
         })}
       </div>
-      {(focusDate || events.length > 0) && (
+      {(selectedDate || events.length > 0) && (
         <div className="pw-calendar-events">
-          {focusDate && <div className="pw-calendar-events-heading">{focusDate}</div>}
-          {events.length === 0 ? (
+          {selectedDate && <div className="pw-calendar-events-heading">{selectedDate}</div>}
+          {shownEvents.length === 0 ? (
             <div className="pw-calendar-events-empty">No events.</div>
           ) : (
-            events.map((ev) => (
+            shownEvents.map((ev) => (
               <div className="pw-calendar-event" key={ev.id || `${ev.title}-${ev.start}`}>
                 <span className="pw-calendar-event-time">{formatEventTime(ev.start, ev.all_day)}</span>
                 <span className="pw-calendar-event-title">{ev.title}</span>

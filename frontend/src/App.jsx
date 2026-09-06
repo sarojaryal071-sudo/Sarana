@@ -865,6 +865,7 @@ export default function App() {
         desktopConnected={state.desktopConnected}
         username={state.username}
         authMode={state.authMode}
+        speechMuted={authenticated && state.speechMuted}
         onMenuClick={() => setMenuOpen(true)}
       />
       {authenticated && <ConnectionBanner connectionState={state.connectionState} />}
