@@ -86,6 +86,13 @@ API_FILE   = CONFIG_DIR / "api_keys.json"
 
 _local_static_server = None   # keeps the ThreadingHTTPServer instance/thread alive
 
+# Bounded retry for the embedded Presentation Engine's first navigation —
+# see MainWindow._on_presentation_load_finished()'s own docstring for the
+# real bug this recovers from. 4 retries * 500ms is a couple of seconds of
+# genuine leeway for a transient failure, not an indefinite hang.
+_PRESENTATION_LOAD_MAX_RETRIES = 4
+_PRESENTATION_LOAD_RETRY_MS = 500
+
 
 def _start_local_static_server(directory: Path) -> int:
     """Desktop Presentation Engine integration: serves frontend/dist/ over
@@ -3719,6 +3726,26 @@ class MainWindow(QMainWindow):
                 # modules can load under.
                 port = _start_local_static_server(BASE_DIR / "frontend" / "dist")
                 self._content_webview.setUrl(QUrl(f"http://127.0.0.1:{port}/desktop.html"))
+                # Real, observed bug (confirmed via a live launch under a
+                # loaded system, QtWebEngine remote-debugging attached):
+                # this first navigation can fail transiently — the local
+                # server's accept thread not yet scheduled, a security
+                # tool momentarily intercepting the loopback connection —
+                # and QWebEngineView then just sits on Chromium's own
+                # native "ERR_EMPTY_RESPONSE" error page FOREVER, since
+                # nothing here ever checked whether the load actually
+                # succeeded. window.__jarvisBridge never gets installed
+                # on that broken page, so every later broadcast still
+                # arrives (see _push_to_presentation_webview()) but
+                # silently does nothing — exactly the "JARVIS replies by
+                # voice but no overlay ever appears" symptom. A bounded
+                # retry with a short backoff fixes the transient case
+                # outright; only after retries are truly exhausted does
+                # this fall back to an honest degraded message, same
+                # pattern as the missing-build case just above — never a
+                # silent, permanently-stuck error page.
+                self._presentation_load_attempts = 0
+                self._content_webview.loadFinished.connect(self._on_presentation_load_finished)
             else:
                 # Real, disclosed degraded state — never a silent blank
                 # panel: the frontend simply hasn't been built yet
@@ -3763,6 +3790,37 @@ class MainWindow(QMainWindow):
             lay.addWidget(self._content_display)
 
         return w
+
+    def _on_presentation_load_finished(self, ok: bool) -> None:
+        """Recovers from the real ERR_EMPTY_RESPONSE bug described in
+        _build_content_panel() above — a bounded retry with a short
+        backoff, then an honest degraded message if it genuinely never
+        recovers, never a silently-stuck native error page."""
+        if ok or self._content_webview is None:
+            self._presentation_load_attempts = 0
+            return
+        self._presentation_load_attempts += 1
+        if self._presentation_load_attempts > _PRESENTATION_LOAD_MAX_RETRIES:
+            self._content_webview.setHtml(
+                "<body style='background:#01131f;color:#7fa;"
+                "font-family:monospace;padding:16px;'>"
+                "Presentation Engine failed to load after several "
+                "attempts — restart JARVIS to try again.</body>"
+            )
+            return
+        url = self._content_webview.url()
+        webview = self._content_webview
+
+        def _retry():
+            # Guards against the app (or this panel) closing during the
+            # short retry window — webview would then be a deleted Qt
+            # C++ object underneath the still-live Python reference.
+            try:
+                webview.setUrl(url)
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(_PRESENTATION_LOAD_RETRY_MS, _retry)
 
     def _push_to_presentation_webview(self, msg_json: str) -> None:
         """Slot — runs on the Qt main thread (both _content_sig and
