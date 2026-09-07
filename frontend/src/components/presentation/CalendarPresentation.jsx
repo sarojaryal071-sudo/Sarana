@@ -59,6 +59,19 @@ const MONTH_NAMES = [
   "July", "August", "September", "October", "November", "December",
 ];
 
+// "FRIDAY, SEPTEMBER 11, 2026" — built from the ISO string's own y/m/d
+// fields via new Date(y, m-1, d) (LOCAL construction), never
+// new Date(isoString) directly: that parses a bare "YYYY-MM-DD" as UTC
+// midnight, which can print the WRONG day once shifted to a negative-
+// UTC-offset local zone — the exact off-by-one class of bug
+// eventDateIso()'s own comment already guards against for event dates.
+function formatDayHeading(iso) {
+  const [y, m, d] = (iso || "").split("-").map(Number);
+  if (!y || !m || !d) return iso || "";
+  const dt = new Date(y, m - 1, d);
+  return dt.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+}
+
 function eventDateIso(ev) {
   const raw = ev?.start;
   if (!raw) return null;
@@ -87,16 +100,65 @@ function todayIso() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+// Shared by the day view AND the month view's own "click a day to
+// preview it" list — one rendering of "compact/expanded event list, or
+// an honest empty state", never duplicated per view.
+function CalendarEventList({ events, expanded, emptyText }) {
+  const shown = expanded ? events : events.slice(0, COMPACT_EVENT_COUNT);
+  const hidden = events.length - shown.length;
+  if (events.length === 0) {
+    return <div className="pw-calendar-events-empty">{emptyText}</div>;
+  }
+  return (
+    <>
+      {shown.map((ev, i) => (
+        <div className="pw-calendar-event pw-reveal-item" style={{ "--pw-reveal-index": i }} key={ev.id || `${ev.title}-${ev.start}`}>
+          <span className="pw-calendar-event-time">{formatEventTime(ev.start, ev.all_day)}</span>
+          <span className="pw-calendar-event-title">{ev.title}</span>
+          {ev.location && <span className="pw-calendar-event-location">{ev.location}</span>}
+        </div>
+      ))}
+      {!expanded && hidden > 0 && (
+        <div className="pw-calendar-more-hint">+{hidden} more — expand for the full list</div>
+      )}
+    </>
+  );
+}
+
 export default function CalendarPresentation({ data, expanded = false }) {
+  const focusDate = data?.focus_date || null;
+  const events = Array.isArray(data?.events) ? data.events : [];
+  // Local, month-view-only preview state (clicking a day in the grid) —
+  // deliberately never seeded from focusDate: a real focusDate now
+  // renders the dedicated day view below instead, so this only ever
+  // matters for the grid's own "peek at a day without navigating away"
+  // interaction. Called unconditionally, before any early return, per
+  // React's own rules of hooks.
+  const [selectedDate, setSelectedDate] = useState(null);
+
+  // A specific single date was requested (main.py's own single-day
+  // range detection — see that file's get_calendar_events dispatch and
+  // this component's own header) — real, reported bug fixed: this used
+  // to always render the full month grid even for "open the 11th",
+  // with that day's events merely filtered into a list underneath it.
+  // Now a dedicated day view: just that date and its real events, or an
+  // honest "No events on this day" — never the month grid.
+  if (focusDate) {
+    return (
+      <div className="pw-calendar pw-calendar-day-view">
+        <div className="pw-calendar-day-heading">{formatDayHeading(focusDate)}</div>
+        <div className="pw-calendar-events pw-calendar-events-solo">
+          <CalendarEventList events={events} expanded={expanded} emptyText="No events on this day." />
+        </div>
+      </div>
+    );
+  }
+
   const [yearStr, monthStr] = (data?.month || "").split("-");
   const year = parseInt(yearStr, 10);
   const month = parseInt(monthStr, 10);
   const validMonth = Number.isInteger(year) && Number.isInteger(month) && month >= 1 && month <= 12;
   const marked = new Set(Array.isArray(data?.marked_dates) ? data.marked_dates : []);
-  const focusDate = data?.focus_date || null;
-  const events = Array.isArray(data?.events) ? data.events : [];
-
-  const [selectedDate, setSelectedDate] = useState(focusDate);
 
   if (!validMonth) {
     return <div className="pw-calendar-empty">No calendar month to show.</div>;
@@ -105,8 +167,6 @@ export default function CalendarPresentation({ data, expanded = false }) {
   const cells = buildMonthGrid(year, month);
   const today = todayIso();
   const filteredEvents = selectedDate ? events.filter((ev) => eventDateIso(ev) === selectedDate) : events;
-  const shownEvents = expanded ? filteredEvents : filteredEvents.slice(0, COMPACT_EVENT_COUNT);
-  const hiddenCount = filteredEvents.length - shownEvents.length;
 
   return (
     <div className="pw-calendar">
@@ -138,20 +198,7 @@ export default function CalendarPresentation({ data, expanded = false }) {
       {(selectedDate || events.length > 0) && (
         <div className="pw-calendar-events">
           {selectedDate && <div className="pw-calendar-events-heading">{selectedDate}</div>}
-          {shownEvents.length === 0 ? (
-            <div className="pw-calendar-events-empty">No events.</div>
-          ) : (
-            shownEvents.map((ev, i) => (
-              <div className="pw-calendar-event pw-reveal-item" style={{ "--pw-reveal-index": i }} key={ev.id || `${ev.title}-${ev.start}`}>
-                <span className="pw-calendar-event-time">{formatEventTime(ev.start, ev.all_day)}</span>
-                <span className="pw-calendar-event-title">{ev.title}</span>
-                {ev.location && <span className="pw-calendar-event-location">{ev.location}</span>}
-              </div>
-            ))
-          )}
-          {!expanded && hiddenCount > 0 && (
-            <div className="pw-calendar-more-hint">+{hiddenCount} more — expand for the full list</div>
-          )}
+          <CalendarEventList events={filteredEvents} expanded={expanded} emptyText="No events." />
         </div>
       )}
     </div>

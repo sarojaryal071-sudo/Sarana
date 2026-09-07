@@ -436,11 +436,17 @@ TOOL_DECLARATIONS = [
             "Reads the user's REAL Google Calendar events for a given time range. Use "
             "for 'what's on my calendar', 'what do I have today/tomorrow', 'do I have "
             "anything at X', 'what's my next appointment', 'what does my week look "
-            "like'. Requires the user to have connected Google Calendar first -- if "
-            "not connected, this returns [CALENDAR_NOT_CONNECTED]; if Calendar "
-            "integration itself isn't configured in this running environment at all "
-            "(a setup gap, not the user's account), this returns [CALENDAR_UNAVAILABLE] "
-            "instead -- these are different situations, never conflate them."
+            "like', and for a SPECIFIC single date -- 'open the 11th', 'show me "
+            "September 11th', 'what's on the 18th', 'go to the 3rd' -- in which case "
+            "start/end MUST span exactly that one calendar day (see their own "
+            "descriptions below); that single-day range is what makes the Presentation "
+            "Engine show a dedicated day view (that date's own event list, or an "
+            "honest 'no events' state) instead of the whole month. Requires the user "
+            "to have connected Google Calendar first -- if not connected, this returns "
+            "[CALENDAR_NOT_CONNECTED]; if Calendar integration itself isn't configured "
+            "in this running environment at all (a setup gap, not the user's account), "
+            "this returns [CALENDAR_UNAVAILABLE] instead -- these are different "
+            "situations, never conflate them."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -450,12 +456,20 @@ TOOL_DECLARATIONS = [
                     "description": (
                         "Start of the range, local date/time, ISO format e.g. "
                         "'2026-08-29T00:00:00' -- compute this from [CURRENT DATE & "
-                        "TIME] above, never guess today's date."
+                        "TIME] above, never guess today's date. For a request about "
+                        "ONE specific date (e.g. 'open the 11th'), this MUST be that "
+                        "date at 'T00:00:00' exactly -- never a narrower business-hours "
+                        "guess."
                     ),
                 },
                 "end": {
                     "type": "STRING",
-                    "description": "End of the range, local ISO datetime, same format as start.",
+                    "description": (
+                        "End of the range, local ISO datetime, same format as start. "
+                        "For a request about ONE specific date, this MUST be the very "
+                        "next calendar date at 'T00:00:00' (i.e. exactly 24 hours after "
+                        "start) so the range covers that whole day and none other."
+                    ),
                 },
             },
             "required": ["start", "end"],

@@ -1290,6 +1290,21 @@ input {
 .pw-calendar-event-location { color: var(--text-dim); font-size: 10px; }
 .pw-calendar-more-hint { font-size: 10px; color: var(--text-dim); margin-top: 6px; letter-spacing: 0.3px; }
 
+/* Day view ("open the 11th") — a specific date's own events, never the
+   month grid (see CalendarPresentation.jsx's own header for the real,
+   reported bug this fixes). Reuses .pw-calendar-events'/.pw-calendar-
+   event's own list styling below it (.pw-calendar-events-solo just
+   drops the top border/margin that rule normally uses to separate
+   itself from a grid that isn't rendered here). */
+.pw-calendar-day-heading {
+  font-size: 13px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--surface-accent, var(--pri));
+  margin-bottom: 10px;
+}
+.pw-calendar-events-solo { margin-top: 0; border-top: none; padding-top: 0; }
+
 /* ── Table ────────────────────────────────────────────────────────── */
 .pw-table-wrap { overflow-x: auto; }
 .pw-table { border-collapse: collapse; width: 100%; font-size: 12px; }

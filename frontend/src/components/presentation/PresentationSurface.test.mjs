@@ -189,9 +189,27 @@ test("CalendarPresentation only shows a focus_date drill-down when the backend a
 });
 
 test("production polish: clicking a day filters the ALREADY-FETCHED events client-side, never a new backend request", () => {
-  assert.match(calendarSrc, /const \[selectedDate, setSelectedDate\] = useState\(focusDate\);/);
+  // NOT seeded from focusDate — a real focusDate now renders the
+  // dedicated day view instead (see the next test), so this local
+  // preview state only ever matters for the month grid's own "peek at a
+  // day" click interaction.
+  assert.match(calendarSrc, /const \[selectedDate, setSelectedDate\] = useState\(null\);/);
   assert.match(calendarSrc, /events\.filter\(\(ev\) => eventDateIso\(ev\) === selectedDate\)/);
   assert.doesNotMatch(calendarSrc, /fetch\(|sendCommand|WebSocket|new XMLHttpRequest/, "day selection must stay entirely client-side");
+});
+
+test("a specific requested date (focus_date) renders a dedicated day view — real, reported bug fixed: this used to always show the whole month grid", () => {
+  assert.match(calendarSrc, /if \(focusDate\) \{/);
+  assert.match(calendarSrc, /<div className="pw-calendar-day-heading">\{formatDayHeading\(focusDate\)\}<\/div>/);
+  assert.match(calendarSrc, /emptyText="No events on this day\."/);
+  // The day-view branch returns before the month grid is ever built —
+  // never both rendered together.
+  const branchIdx = calendarSrc.indexOf("if (focusDate) {");
+  const gridIdx = calendarSrc.indexOf("function buildMonthGrid");
+  const returnIdx = calendarSrc.indexOf("return (", branchIdx);
+  const closeIdx = calendarSrc.indexOf("\n  }", returnIdx);
+  assert.ok(gridIdx < branchIdx, "buildMonthGrid is defined above the component, not called inside the day-view branch");
+  assert.doesNotMatch(calendarSrc.slice(branchIdx, closeIdx), /pw-calendar-grid/);
 });
 
 test("day cells are real, keyboard-accessible buttons, not click-handler divs", () => {
