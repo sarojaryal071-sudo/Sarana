@@ -88,6 +88,28 @@ def test_resolve_matches_open_bluetooth_settings_to_the_pane() -> None:
     assert entry["id"] == "bluetooth_settings"
     print("test_resolve_matches_open_bluetooth_settings_to_the_pane: PASS")
 
+def test_bluetooth_devices_reports_real_live_connection_status_not_pnp_driver_status() -> None:
+    """Real, reported bug fixed: the old command (Get-PnpDevice ... |
+    Select FriendlyName,Status) read PnP DRIVER status ('OK' for any
+    device that has ever paired, whether or not it's actually connected
+    right now) — every device silently looked "connected". Confirmed by
+    direct reproduction on real hardware: two genuinely paired
+    Bluetooth devices, one actually connected and one not, BOTH showed
+    Status: OK. Now uses the official Windows.Devices.Bluetooth WinRT
+    API's own ConnectionStatus property — the same API Windows' own
+    Bluetooth Settings page reads — which correctly told them apart in
+    that same real test (Connected vs Disconnected)."""
+    setup()
+    _, entry = ss.resolve("bluetooth devices")
+    cmd = entry["command"]
+    # The old, confirmed-misleading field must be gone from this query
+    # entirely -- never Select-Object FriendlyName,Status via Get-PnpDevice.
+    assert "Get-PnpDevice" not in cmd
+    # The real, verified-correct source of truth.
+    assert "Windows.Devices.Bluetooth.BluetoothDevice" in cmd
+    assert "ConnectionStatus" in cmd
+    print("test_bluetooth_devices_reports_real_live_connection_status_not_pnp_driver_status: PASS")
+
 def test_resolve_matches_display_settings() -> None:
     setup()
     kind, entry = ss.resolve("display settings")
@@ -344,6 +366,7 @@ if __name__ == "__main__":
     test_installed_apps_query_deliberately_avoids_the_win32_product_trap()
     test_resolve_matches_bluetooth_devices_to_the_query_not_the_settings_pane()
     test_resolve_matches_open_bluetooth_settings_to_the_pane()
+    test_bluetooth_devices_reports_real_live_connection_status_not_pnp_driver_status()
     test_resolve_matches_display_settings()
     test_resolve_returns_none_for_a_weak_or_nonsense_target_rather_than_guessing()
     test_open_pane_calls_os_startfile_with_the_exact_registered_uri()

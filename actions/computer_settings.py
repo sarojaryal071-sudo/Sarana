@@ -936,7 +936,9 @@ Return ONLY a valid JSON object:
 Rules:
 - Pick the single best matching action from the available list.
 - For volume_set: value is an integer 0-100.
-- For type_text: value is the exact text to type.
+- For type_text: value is the exact text to type. If the command asks you to WRITE something (a
+  note, message, email, etc.) rather than just naming an action, value must be that actual
+  composed text in full — never just the command restated.
 - For press_key: value is the key name (e.g. "f5", "tab", "enter").
 - For reload_n: value is an integer (number of times to reload).
 - If no clear match, pick the closest action.

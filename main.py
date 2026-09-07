@@ -790,7 +790,9 @@ TOOL_DECLARATIONS = [
         "name": "computer_settings",
         "description": (
             "Controls the computer: volume, brightness, window management, keyboard shortcuts, "
-            "typing text on screen, closing apps, fullscreen, dark mode, WiFi on/off, Bluetooth radio "
+            "typing text on screen (action='type_text', value=<the exact, complete text — YOU compose "
+            "it in full yourself, e.g. an actual finished note/message, never a description of one; see "
+            "value's own parameter description), closing apps, fullscreen, dark mode, WiFi on/off, Bluetooth radio "
             "on/off (action='bluetooth_on'/'bluetooth_off'), sleep (action='sleep' — suspends the "
             "machine; the result only confirms the OS accepted the request, never that the machine is "
             "now actually asleep — it can't be checked from inside a process that may itself get "
@@ -827,14 +829,34 @@ TOOL_DECLARATIONS = [
             "active playback devices and marks the current default — read-only; there is currently NO "
             "action to actually switch/change the default output device (e.g. 'switch to headphones') "
             "— if asked, say so honestly and suggest action='system_shortcut' value='sound devices' to "
-            "open the Settings pane for the user to pick it manually, never claim to have switched it."
+            "open the Settings pane for the user to pick it manually, never claim to have switched it. "
+            "IMPORTANT for type_text: this is generic OS-level typing (a search box, Notepad, a chat "
+            "message, a filename, quick on-screen notes) — for writing/inserting content INTO an open "
+            "Microsoft Word or Excel document specifically, prefer office_control instead (it uses the "
+            "app's own real object model, more reliable there). Either way, the SAME rule applies: "
+            "value must be the complete, finished text you compose yourself — never a restatement of "
+            "the user's own request or a description of what should be typed. Also never pass a "
+            "content-composition request as `description` instead of a direct action/value — "
+            "`description` only feeds a separate, lightweight intent-detector that guesses an action "
+            "from free text, it does NOT compose content, so a request like 'write a sick leave email' "
+            "given as `description` would get typed back out nearly verbatim instead of becoming an "
+            "actual email; always call with action='type_text' and your own fully-written `value` for "
+            "anything that needs real composed content."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "action":      {"type": "STRING", "description": "The action to perform, e.g. volume_set | toggle_wifi | sleep | bluetooth_on | bluetooth_off | clipboard_get | clipboard_set | restart | shutdown | minimize | maximize | system_shortcut | list_system_shortcuts | ..."},
-                "description": {"type": "STRING", "description": "Natural language description of what to do (used only when action is omitted)"},
-                "value":       {"type": "STRING", "description": "Optional value: volume level (0-100), text to type/clipboard_set, etc."},
+                "description": {"type": "STRING", "description": "Natural language description of what to do (used only when action is omitted) — NOT for content composition (see type_text note above); this only drives a lightweight action-guesser, not a writer."},
+                "value":       {
+                    "type": "STRING",
+                    "description": (
+                        "Volume level (0-100), clipboard_set text, or — for type_text — the exact, "
+                        "COMPLETE text to type: write it out in full yourself (a real finished email/"
+                        "note/message/etc. if that's what was asked for), never a description or "
+                        "summary of what to type."
+                    ),
+                },
                 "app":         {"type": "STRING", "description": "Process/application name for app_volume_set | app_mute | app_unmute, e.g. 'spotify', 'chrome', 'discord'"},
                 "confirmed":   {"type": "BOOLEAN", "description": "Set true only after the user has explicitly confirmed a consequential action (restart/shutdown) in THIS conversation — never infer it"}
             },
@@ -930,8 +952,10 @@ TOOL_DECLARATIONS = [
             "the app's own real object model — reliable for document CONTENT (cell values, formulas, "
             "text, bold/italic/underline formatting), unlike computer_control's accomplish() which is "
             "better for chrome-level actions (opening a dialog, clicking a ribbon tab) since Office's "
-            "ribbon has known-unreliable UI automation IDs. Prefer THIS tool over accomplish() whenever "
-            "the request is about what's actually IN the document/spreadsheet. Acts on whichever "
+            "ribbon has known-unreliable UI automation IDs. Prefer THIS tool over accomplish() AND over "
+            "computer_settings' generic type_text whenever the request is about what's actually IN the "
+            "document/spreadsheet — computer_settings' typing is for other apps' text fields, not Word/"
+            "Excel content. Acts on whichever "
             "Word/Excel window is currently ACTIVE — if none is open, launches a new VISIBLE one (never "
             "hidden). Every write is verified by reading it back before reporting "
             "[VERIFIED_SUCCESS]/[VERIFIED_FAILURE]/[INCONCLUSIVE] — read the tag honestly, never assume "
