@@ -1,5 +1,7 @@
+import os
 import platform as _platform
 import subprocess as _subprocess
+import sys
 
 # ── Nuclear: force CREATE_NO_WINDOW on EVERY subprocess call on Windows ───────
 # This patches Popen itself, so no per-file flag is needed anywhere.
@@ -14,17 +16,42 @@ if _platform.system() == "Windows":
 
     _subprocess.Popen = _Popen
 
+# ── Real, confirmed bug: sys.stdout/sys.stderr are None under the actual
+# desktop launch path ─────────────────────────────────────────────────────
+# The J.A.R.V.I.S desktop shortcut launches this file with pythonw.exe (no
+# console window) via Explorer/a .lnk — NOT python.exe from a terminal.
+# Confirmed by direct reproduction (Start-Process, detached, exactly how a
+# double-click launches it): under that exact launch path, both
+# sys.stdout and sys.stderr are genuinely None, not merely redirected to
+# nul, a standard CPython behavior for a windowed-subsystem process with
+# no console. This codebase prints constantly (every "[JARVIS] ...",
+# "[Dashboard] ..." status line here and elsewhere) and, critically,
+# Python's own http.server.BaseHTTPRequestHandler.send_response() calls
+# self.log_message() -> sys.stderr.write(...) BEFORE it sends any
+# response bytes — so under pythonw.exe, EVERY request to
+# ui.py's embedded local static server (which serves frontend/dist/
+# desktop.html to the Presentation Engine's QWebEngineView) raised an
+# unhandled AttributeError inside the request-handling thread and the
+# connection was torn down with zero bytes sent — Chromium's own
+# "ERR_EMPTY_RESPONSE", 100% reproducible on every attempt (not
+# transient), exactly the reported "Presentation Engine failed to load
+# after several attempts" with cards never rendering. Standard, minimal
+# fix for a windowed Python app: give both streams a real, safe no-op
+# target as early as possible, before anything else can print().
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 import array
 import asyncio
 import math
-import os
 import re
 import threading
 import time
 import json
-import sys
 import traceback
 import uuid
 from datetime import datetime
