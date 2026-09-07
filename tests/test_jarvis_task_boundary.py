@@ -245,19 +245,65 @@ def test_computer_settings_non_migrated_action_returns_its_real_result_not_done(
 
 
 # ── office_control: Phase 4 (Office capability) boundary ───────────────
-# task_engine.py's "office" domain covers essentially office_control.py's
-# entire real action surface, so the migrated set below is, deliberately,
-# nearly the whole tool — not a subset the way computer_settings.py's is.
+# task_engine.py's "office" domain originally covered essentially
+# office_control.py's entire real action surface. insert_text/
+# replace_text (content-bearing, potentially long-form composed prose)
+# were later carved back OUT of the migrated set — a real, reported bug
+# (see the insert_text test below) — since task_engine.py's own objective
+# parser is a deterministic regex, not a content composer. Only the
+# purely mechanical actions (format/save/Excel cells) stay migrated.
 
-def test_office_control_word_insert_text_is_redirected_in_jarvis_mode() -> None:
+def test_office_control_word_insert_text_is_never_redirected_even_in_jarvis_mode() -> None:
+    """Real, reported bug fixed: this used to be redirected here too —
+    Gemini would compose a genuinely complete, correct email as `text`,
+    this redirect threw that away, and the forced jarvis_task retry hit
+    task_engine.py's own DETERMINISTIC REGEX objective parser (never a
+    second LLM call, by design), which can't compose content — it just
+    grabbed everything after "write"/"insert" in the objective sentence
+    as literal text, so the email request got typed into the document
+    nearly VERBATIM instead. office_control() already does its own real
+    verified-write-then-read-back, so this loses no verification versus
+    the Task Engine — only the composition-breaking detour is gone. See
+    main.py's own _oc_migrated comment for the full story."""
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=True)
+        with patch.object(main_module, "office_control", return_value="[VERIFIED_SUCCESS] inserted.") as m_oc:
+            fr = await jarvis._execute_tool(_fc(
+                "office_control", app="word", action="insert_text",
+                text="Dear [Boss Name],\n\nI am writing to request sick leave...",
+            ))
+        m_oc.assert_called_once()
+        assert fr.response["result"] == "[VERIFIED_SUCCESS] inserted."
+    asyncio.run(_run())
+    print("test_office_control_word_insert_text_is_never_redirected_even_in_jarvis_mode: PASS")
+
+def test_office_control_word_replace_text_is_never_redirected_even_in_jarvis_mode() -> None:
+    """Same class of content (a `replace` value can be composed prose
+    too), same fix — see the insert_text test just above."""
+    async def _run():
+        jarvis = _jarvis(jarvis_mode=True)
+        with patch.object(main_module, "office_control", return_value="[VERIFIED_SUCCESS] replaced.") as m_oc:
+            fr = await jarvis._execute_tool(_fc(
+                "office_control", app="word", action="replace_text",
+                find="[PLACEHOLDER]", replace="a fully written paragraph here",
+            ))
+        m_oc.assert_called_once()
+        assert fr.response["result"] == "[VERIFIED_SUCCESS] replaced."
+    asyncio.run(_run())
+    print("test_office_control_word_replace_text_is_never_redirected_even_in_jarvis_mode: PASS")
+
+def test_office_control_word_format_selection_and_save_are_still_redirected_in_jarvis_mode() -> None:
+    """Regression guard for the OTHER direction: only insert_text/
+    replace_text (and their type/find_replace aliases) were carved out —
+    the purely mechanical actions stay migrated, exactly as before."""
     async def _run():
         jarvis = _jarvis(jarvis_mode=True)
         with patch.object(main_module, "office_control") as m_oc:
-            fr = await jarvis._execute_tool(_fc("office_control", app="word", action="insert_text", text="hi"))
+            fr = await jarvis._execute_tool(_fc("office_control", app="word", action="format_selection", bold=True))
         m_oc.assert_not_called()
         assert "[JARVIS_TASK_REQUIRED]" in fr.response["result"]
     asyncio.run(_run())
-    print("test_office_control_word_insert_text_is_redirected_in_jarvis_mode: PASS")
+    print("test_office_control_word_format_selection_and_save_are_still_redirected_in_jarvis_mode: PASS")
 
 def test_office_control_excel_set_cell_is_redirected_in_jarvis_mode() -> None:
     async def _run():
@@ -322,7 +368,9 @@ if __name__ == "__main__":
     test_computer_settings_non_migrated_action_is_never_redirected_even_in_jarvis_mode()
     test_computer_settings_volume_set_is_unaffected_outside_jarvis_mode()
     test_computer_settings_non_migrated_action_returns_its_real_result_not_done()
-    test_office_control_word_insert_text_is_redirected_in_jarvis_mode()
+    test_office_control_word_insert_text_is_never_redirected_even_in_jarvis_mode()
+    test_office_control_word_replace_text_is_never_redirected_even_in_jarvis_mode()
+    test_office_control_word_format_selection_and_save_are_still_redirected_in_jarvis_mode()
     test_office_control_excel_set_cell_is_redirected_in_jarvis_mode()
     test_office_control_save_is_redirected_in_jarvis_mode_for_both_apps()
     test_office_control_unknown_app_action_pair_is_never_redirected()

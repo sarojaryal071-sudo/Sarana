@@ -875,8 +875,16 @@ TOOL_DECLARATIONS = [
             "handles it; that decision belongs to JARVIS, not you. Currently covers: playing/"
             "searching a video on YouTube; opening/searching a website; system volume/sleep/"
             "restart/shutdown and Settings shortcuts (Wi-Fi, Bluetooth, battery, display, etc.); "
-            "Word/Excel content actions (insert/replace/format text, save, read or set a specific "
-            "spreadsheet cell); files/folders (list, find, largest, info, read, rename, create a "
+            "Word/Excel MECHANICAL actions ONLY — formatting a selection, saving, reading or setting a "
+            "specific spreadsheet cell. For WRITING/INSERTING or REPLACING actual content in a Word "
+            "document (an email, letter, poem, story, note, report — anything you compose), call "
+            "office_control directly instead, even in JARVIS mode — write the complete text yourself and "
+            "pass it as office_control's own `text` param. This is the one deliberate exception to 'always "
+            "use jarvis_task in JARVIS mode': the Task Engine understands objectives as short, deterministic "
+            "instructions (no second LLM call, by design), not open-ended composed prose, so a composition "
+            "request routed through here would get mangled into something like the objective sentence "
+            "itself typed literally into the document, instead of real content; "
+            "files/folders (list, find, largest, info, read, rename, create a "
             "folder, delete — always within the user's own home folder; delete needs an explicit "
             "confirmed=true after the user actually says yes); repository development (search the "
             "JARVIS codebase for a specific symbol/reference, run its existing test suite, or edit "
@@ -4105,9 +4113,34 @@ class JarvisLive:
                 # silently disappearing behind this redirect.
                 _oc_app = (args.get("app") or "").lower().strip()
                 _oc_action = (args.get("action") or "").lower().strip()
+                # Real, confirmed bug fixed: (word, insert_text) and
+                # (word, replace_text) used to be in this migrated set
+                # too. Confirmed live (a real Gemini Live session, JARVIS
+                # mode on): Gemini correctly calls THIS tool directly
+                # with a genuinely complete, well-composed email as
+                # `text` — but this redirect then threw that away and
+                # forced a retry through jarvis_task with a natural-
+                # language `objective` sentence instead. task_engine.py's
+                # own office domain parses that objective with a
+                # DETERMINISTIC REGEX (`_parse_office_action` — by
+                # design, never a second LLM call), which works for a
+                # short literal dictation ("insert 'hello'") but not for
+                # an open-ended composition request: the regex just
+                # grabs everything after "write"/"insert" as literal
+                # `text`, so an objective like "write a sick leave email
+                # ... in microsoft word" got typed into the document
+                # nearly VERBATIM instead of becoming a real email —
+                # exactly the reported bug. office_control() already
+                # does its own real verified-write-then-read-back (see
+                # this tool's own top-level description), so routing
+                # these two actions here directly loses no verification
+                # versus going through the Task Engine — it only removes
+                # a lossy, composition-breaking detour. The other
+                # actions below stay migrated: they're mechanical
+                # (formatting/saving) or Excel cell values (short,
+                # rarely open-ended prose), not general content
+                # composition.
                 _oc_migrated = {
-                    ("word", "insert_text"), ("word", "type"),
-                    ("word", "replace_text"), ("word", "find_replace"),
                     ("word", "format_selection"), ("word", "format"),
                     ("word", "save"),
                     ("excel", "set_cell"), ("excel", "get_cell"), ("excel", "save"),

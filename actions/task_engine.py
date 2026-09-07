@@ -908,7 +908,29 @@ def _parse_office_action(objective: str, context: "TaskContext | None" = None) -
 
     m = re.search(r"\b(?:insert|write|type)\b\s+(.+)", low)
     if m:
-        return {"app": "word", "action": "insert_text", "text": m.group(1).strip(" '\"")}
+        candidate = m.group(1).strip(" '\"")
+        # Real, confirmed bug fixed: this used to accept ANY match here,
+        # including a genuine composition REQUEST like "write a sick
+        # leave email ... in microsoft word" — everything after "write"
+        # got typed into the document nearly VERBATIM, since this is a
+        # DETERMINISTIC regex extraction (by design, never a second LLM
+        # call — see this function's own docstring), not a content
+        # composer. main.py's own jarvis_task tool description now
+        # steers Gemini to call office_control directly (with the real
+        # composed text) for exactly this case instead of routing
+        # through here at all — this is the remaining safety net for
+        # if that's ever bypassed: a handful of honest, deterministic
+        # tells that `candidate` DESCRIBES a piece of writing rather
+        # than IS one, in which case this falls through to the honest
+        # "couldn't determine an action" report below instead of
+        # fabricating garbage content.
+        _describes_a_composition_task = bool(re.search(
+            r"^(a|an|the)\s+[\w-]+\s+(email|letter|poem|story|message|note|memo|report|essay|"
+            r"paragraph|summary|document)\b",
+            candidate,
+        )) or "microsoft word" in candidate or re.search(r"\bin word\b", candidate)
+        if not _describes_a_composition_task:
+            return {"app": "word", "action": "insert_text", "text": candidate}
 
     cell_match = _CELL_REF_RE.search(objective)
     if cell_match:

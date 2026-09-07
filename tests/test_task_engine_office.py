@@ -116,6 +116,34 @@ def test_parse_office_action_insert_text() -> None:
     print("test_parse_office_action_insert_text: PASS")
 
 
+def test_parse_office_action_refuses_a_composition_request_never_types_it_literally() -> None:
+    """Real, reported bug fixed: "write a sick leave email ... in
+    microsoft word" used to match the same regex as a short literal
+    dictation ("write hello there") and get typed into the document
+    nearly VERBATIM — this is a deterministic regex extractor (never a
+    second LLM call, by design), not a content composer. main.py's own
+    jarvis_task description now steers Gemini to call office_control
+    directly (with real composed text) instead of routing a composition
+    request through here at all — this is the remaining safety net:
+    a composition-shaped objective must return None (an honest "can't
+    determine" — see _run_office's own INCONCLUSIVE report), never
+    fabricate garbage content."""
+    assert te._parse_office_action(
+        "write a sick leave email for 2 days to my boss in microsoft word"
+    ) is None
+    assert te._parse_office_action(
+        "write a sick leave email for 2 days, september 8 and 9 2026, to "
+        "my boss in microsoft word, inserting the full composed text with "
+        "placeholders for [boss name] and [colleague name]"
+    ) is None
+    assert te._parse_office_action("write a poem about the ocean in word") is None
+    # Genuine short literal dictation must keep working exactly as before.
+    assert te._parse_office_action("write hello there") is not None
+    assert te._parse_office_action("insert hello world") is not None
+    assert te._parse_office_action("type meeting notes for today") is not None
+    print("test_parse_office_action_refuses_a_composition_request_never_types_it_literally: PASS")
+
+
 def test_parse_office_action_set_cell_with_numeric_value() -> None:
     p = te._parse_office_action("set cell A1 to 5")
     assert p == {"app": "excel", "action": "set_cell", "cell": "A1", "value": 5}
@@ -224,6 +252,7 @@ def _run() -> None:
     test_parse_office_action_replace_text()
     test_parse_office_action_format_selection()
     test_parse_office_action_insert_text()
+    test_parse_office_action_refuses_a_composition_request_never_types_it_literally()
     test_parse_office_action_set_cell_with_numeric_value()
     test_parse_office_action_get_cell()
     test_parse_office_action_save_disambiguates_app()
