@@ -1030,9 +1030,14 @@ input {
    no visual benefit, so this ONE scoped override reverts it to filling
    its container -- the same shared component/JSX, a platform-
    appropriate CSS shape at the rendering boundary, per this stage's own
-   "keep platform-specific code thin" constraint. */
+   "keep platform-specific code thin" constraint.
+   position: relative (not static) — this panel still needs to be a
+   positioning context of its own for the corner-bracket marks below
+   (real DOM elements in PresentationSurface.jsx, position: absolute);
+   relative doesn't remove it from flex flow, so `flex: 1` below still
+   fills the container exactly as before. */
 .desktop-presentation-root .pw-surface {
-  position: static;
+  position: relative;
   width: 100%;
   max-height: none;
   flex: 1;
@@ -1119,6 +1124,50 @@ input {
 .pw-surface-btn:focus-visible { outline: 2px solid var(--surface-accent, var(--pri)); outline-offset: 1px; }
 .pw-surface-btn:disabled { opacity: 0.4; cursor: default; }
 
+/* HUD chrome clock — the reference cards' own live header timestamp. */
+.pw-surface-clock {
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ── Corner accent brackets ("targeting frame" read the visual brief's
+   reference cards share) — four small L-marks drawn with plain borders,
+   no images/SVG, deliberately kept OUT of .pw-surface's own box-shadow
+   declaration (see PresentationSurface.test.mjs's "exactly one
+   box-shadow" guard, just above). Real elements, not pseudo-elements
+   (see PresentationSurface.jsx), positioned against `.pw-surface` itself
+   — which is why the desktop override above switched static -> relative. */
+.pw-surface-corner {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+  opacity: 0.6;
+}
+.pw-surface-corner-tl { top: 5px; left: 5px; border-top: 1px solid var(--surface-accent, var(--pri)); border-left: 1px solid var(--surface-accent, var(--pri)); }
+.pw-surface-corner-tr { top: 5px; right: 5px; border-top: 1px solid var(--surface-accent, var(--pri)); border-right: 1px solid var(--surface-accent, var(--pri)); }
+.pw-surface-corner-bl { bottom: 5px; left: 5px; border-bottom: 1px solid var(--surface-accent, var(--pri)); border-left: 1px solid var(--surface-accent, var(--pri)); }
+.pw-surface-corner-br { bottom: 5px; right: 5px; border-bottom: 1px solid var(--surface-accent, var(--pri)); border-right: 1px solid var(--surface-accent, var(--pri)); }
+
+/* ── Footer telemetry strip — the reference cards' own small system-
+   status line. Every value shown is real, already-known internal state
+   (presentation `type`, surface `phase` — see PresentationSurface.jsx),
+   never an invented number. */
+.pw-surface-footer {
+  border-top: 1px solid var(--border);
+  padding: 4px 12px;
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .pw-surface-body {
   flex: 1;
   overflow-y: auto;
@@ -1175,7 +1224,8 @@ input {
 
 /* ── Weather ──────────────────────────────────────────────────────── */
 .pw-weather-location { font-size: 10px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; }
-.pw-weather-now { display: flex; align-items: baseline; gap: 14px; }
+.pw-weather-now { display: flex; align-items: center; gap: 14px; }
+.pw-weather-icon { color: var(--surface-accent, var(--pri)); flex-shrink: 0; }
 .pw-weather-temp { font-size: 30px; font-weight: 700; color: var(--white); line-height: 1; }
 .pw-weather-unit { font-size: 14px; color: var(--text-dim); margin-left: 2px; }
 .pw-weather-now-detail { display: flex; flex-direction: column; gap: 2px; }
@@ -1189,6 +1239,7 @@ input {
   padding: 6px 8px;
 }
 .pw-weather-day-label { font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-dim); }
+.pw-weather-day-icon { color: var(--surface-accent, var(--pri)); margin: 3px 0; }
 .pw-weather-day-condition { font-size: 11px; text-transform: capitalize; margin: 2px 0; }
 .pw-weather-day-range { display: flex; gap: 8px; font-size: 12px; }
 .pw-weather-day-high { color: var(--white); font-weight: 700; }
@@ -1223,6 +1274,13 @@ input {
 .pw-calendar-cell:focus-visible { outline: 2px solid var(--surface-accent, var(--pri)); outline-offset: 1px; }
 .pw-calendar-cell-empty { border-color: transparent; cursor: default; }
 .pw-calendar-cell-marked { color: var(--red); border-color: var(--red); font-weight: 700; }
+/* Today gets its own ring (the reference cards' circled "current day"
+   read) — a real date comparison (CalendarPresentation.jsx), independent
+   of `marked` (has-events, kept RED per the explicit brief above): today
+   can be marked or not, the ring is a separate, honest signal. One extra
+   inset box-shadow on the cell itself, not stacked onto .pw-surface's
+   own guarded declaration. */
+.pw-calendar-cell-today { box-shadow: inset 0 0 0 1px var(--surface-accent, var(--pri)); }
 .pw-calendar-cell-focused { background: var(--surface-accent, var(--pri)); color: var(--bg); border-color: var(--surface-accent, var(--pri)); }
 .pw-calendar-cell-focused:hover { color: var(--bg); }
 .pw-calendar-events { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }

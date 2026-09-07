@@ -217,3 +217,49 @@ test("StatusPresentation only draws a progress bar when a real numeric progress 
   assert.match(statusSrc, /typeof data\?\.progress === "number"/);
   assert.match(statusSrc, /hasProgress &&/);
 });
+
+// ── HUD chrome: corner brackets, header clock, footer telemetry ──────
+// (the "reference image" visual pass — a reskin of the SAME shared
+// .pw-surface chrome every type already renders inside, not a new
+// component/system.)
+
+test("four real corner-bracket elements are rendered, aria-hidden, purely decorative", () => {
+  const matches = surfaceSrc.match(/<span className="pw-surface-corner pw-surface-corner-\w\w" aria-hidden="true" \/>/g) || [];
+  assert.equal(matches.length, 4, "expected exactly the four documented corners (tl/tr/bl/br)");
+});
+
+test("the header clock is a real ticking value (setInterval-driven state), not a static string", () => {
+  assert.match(surfaceSrc, /const \[now, setNow\] = useState\(\(\) => new Date\(\)\);/);
+  assert.match(surfaceSrc, /setInterval\(\(\) => setNow\(new Date\(\)\), 1000\)/);
+  assert.match(surfaceSrc, /return \(\) => clearInterval\(id\);/);
+  assert.match(surfaceSrc, /<span className="pw-surface-clock" aria-hidden="true">\{clockLabel\}<\/span>/);
+});
+
+test("the footer telemetry strip only ever shows real, already-known state (presentation type + lifecycle phase), never an invented value", () => {
+  assert.match(surfaceSrc, /<div className="pw-surface-footer" aria-hidden="true">/);
+  assert.match(surfaceSrc, /\{\(presentation\?\.type \|\| "text"\)\.toUpperCase\(\)\} \/\/ \{phase\.toUpperCase\(\)\}/);
+});
+
+test("corner brackets stay OUT of .pw-surface's own guarded box-shadow declaration — separate rules, border-only", () => {
+  const rule = css.match(/\.pw-surface-corner \{[\s\S]*?\n\}/);
+  assert.ok(rule, "expected a .pw-surface-corner base rule");
+  assert.doesNotMatch(rule[0], /box-shadow/);
+});
+
+test("desktop's fill-mode override is position: relative (not static) — the corner marks still need SOME positioning context there", () => {
+  const rule = css.match(/\.desktop-presentation-root \.pw-surface \{[\s\S]*?\n\}/);
+  assert.ok(rule);
+  assert.match(rule[0], /position: relative;/);
+});
+
+test("calendar 'today' gets its own ring, independent of the marked-red has-events signal", () => {
+  assert.match(calendarSrc, /function todayIso\(\)/);
+  assert.match(calendarSrc, /const isToday = iso === today;/);
+  assert.match(css, /\.pw-calendar-cell-today \{ box-shadow: inset 0 0 0 1px var\(--surface-accent, var\(--pri\)\); \}/);
+});
+
+test("weather renders a real, deterministic condition icon (not a hardcoded glyph) for both the hero and each day tile", () => {
+  assert.match(weatherSrc, /function conditionIconKind\(condition\)/);
+  assert.match(weatherSrc, /<WeatherIcon condition=\{current\.condition\} size=\{44\}/);
+  assert.match(weatherSrc, /<WeatherIcon condition=\{d\.condition\} size=\{18\}/);
+});

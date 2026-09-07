@@ -39,6 +39,7 @@ const DISMISS_MS = 220;
 export default function PresentationSurface({ content, theme, expanded, persistent, onDismiss, onSetExpanded }) {
   const [phase, setPhase] = useState("materializing");
   const [dismissed, setDismissed] = useState(false);
+  const [now, setNow] = useState(() => new Date());
   const prevContentRef = useRef(content);
   const timerRef = useRef(null);
   const dismissTimerRef = useRef(null);
@@ -49,6 +50,15 @@ export default function PresentationSurface({ content, theme, expanded, persiste
   // replacing `content` entirely) left it dangling. Tracked and cleared
   // on unmount now, exactly like the other two timers in this component.
   useEffect(() => () => clearTimeout(dismissTimerRef.current), []);
+
+  // HUD chrome clock (visual brief's reference cards each show a live
+  // timestamp in the header) — a real ticking clock, not a fabricated
+  // data feed, and entirely local to this component; nothing else reads
+  // `now`, so it needs no new shared state.
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // Fresh mount (ContentPanel only renders this component while
   // `content` is non-null, so a NEW PresentationSurface instance always
@@ -103,18 +113,29 @@ export default function PresentationSurface({ content, theme, expanded, persiste
   const presentation = content?.presentation;
   const valid = isValidPresentation(presentation);
   const TypedRenderer = valid ? resolvePresentationComponent(presentation.type) : null;
+  const clockLabel = now.toLocaleTimeString(undefined, { hour12: false });
 
   return (
     <div
       className={`pw-surface pw-surface-${phase} pw-surface-theme-${theme} ${expanded ? "pw-surface-expanded" : ""}`.trim()}
       aria-live="polite"
     >
+      {/* HUD targeting-frame corner marks (visual brief's reference
+          cards) — four real DOM elements, not pseudo-elements, so they
+          work identically whether `.pw-surface` is the web overlay
+          (position: absolute) or desktop's fill-mode override (position:
+          relative — see index.css). Purely decorative, aria-hidden. */}
+      <span className="pw-surface-corner pw-surface-corner-tl" aria-hidden="true" />
+      <span className="pw-surface-corner pw-surface-corner-tr" aria-hidden="true" />
+      <span className="pw-surface-corner pw-surface-corner-bl" aria-hidden="true" />
+      <span className="pw-surface-corner pw-surface-corner-br" aria-hidden="true" />
       <div className="pw-surface-hdr">
         <span className="pw-surface-title">{content.title}</span>
         {persistent && (
           <span className="pw-surface-pin" title="Kept on screen" aria-label="Kept on screen" />
         )}
         <div className="pw-surface-spacer" />
+        <span className="pw-surface-clock" aria-hidden="true">{clockLabel}</span>
         <button
           className="pw-surface-btn"
           onClick={handleToggleExpand}
@@ -133,6 +154,14 @@ export default function PresentationSurface({ content, theme, expanded, persiste
         ) : (
           <div className="pw-surface-plain">{content.text}</div>
         )}
+      </div>
+      {/* Footer telemetry strip (visual brief's reference cards) — every
+          value here is real, already-known internal state (the active
+          presentation's own `type`, this surface's own lifecycle
+          `phase`) — never an invented number, matching this project's
+          "no fabricated data" rule everywhere else. */}
+      <div className="pw-surface-footer" aria-hidden="true">
+        JARVIS SURFACE // {(presentation?.type || "text").toUpperCase()} // {phase.toUpperCase()}
       </div>
     </div>
   );

@@ -78,6 +78,15 @@ function eventDateIso(ev) {
 // range the backend already sent (never a new fetch).
 const COMPACT_EVENT_COUNT = 4;
 
+// The reference cards' own circled "current day" read — a real local
+// date comparison, independent of `marked` (has-events, kept RED per
+// the explicit brief — see index.css's own .pw-calendar-cell-marked):
+// today can be marked or not, the ring is a separate, honest signal.
+function todayIso() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 export default function CalendarPresentation({ data, expanded = false }) {
   const [yearStr, monthStr] = (data?.month || "").split("-");
   const year = parseInt(yearStr, 10);
@@ -94,6 +103,7 @@ export default function CalendarPresentation({ data, expanded = false }) {
   }
 
   const cells = buildMonthGrid(year, month);
+  const today = todayIso();
   const filteredEvents = selectedDate ? events.filter((ev) => eventDateIso(ev) === selectedDate) : events;
   const shownEvents = expanded ? filteredEvents : filteredEvents.slice(0, COMPACT_EVENT_COUNT);
   const hiddenCount = filteredEvents.length - shownEvents.length;
@@ -110,11 +120,12 @@ export default function CalendarPresentation({ data, expanded = false }) {
           const iso = isoDate(year, month, day);
           const isMarked = marked.has(iso);
           const isSelected = iso === selectedDate;
+          const isToday = iso === today;
           return (
             <button
               key={iso}
               type="button"
-              className={`pw-calendar-cell${isMarked ? " pw-calendar-cell-marked" : ""}${isSelected ? " pw-calendar-cell-focused" : ""}`}
+              className={`pw-calendar-cell${isMarked ? " pw-calendar-cell-marked" : ""}${isToday ? " pw-calendar-cell-today" : ""}${isSelected ? " pw-calendar-cell-focused" : ""}`}
               onClick={() => setSelectedDate((cur) => (cur === iso ? null : iso))}
               aria-pressed={isSelected}
               aria-label={`${MONTH_NAMES[month - 1]} ${day}, ${year}${isMarked ? " (has events)" : ""}`}
