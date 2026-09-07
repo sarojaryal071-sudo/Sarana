@@ -82,6 +82,16 @@ function handleMessage(msg) {
     case "jarvis_mode_changed":
       _dispatch({ type: "JARVIS_MODE", value: msg.active });
       break;
+    case "presentation_control":
+      // Mirrors App.jsx's own identical case exactly — a real voice/text
+      // command ("expand that", "keep this on screen", "hide it") reaches
+      // desktop's embedded surface through the SAME dispatch a local
+      // button click already uses.
+      if (msg.action === "expand") _dispatch({ type: "PRESENTATION_EXPANDED", value: true });
+      else if (msg.action === "collapse") _dispatch({ type: "PRESENTATION_EXPANDED", value: false });
+      else if (msg.action === "dismiss") _dispatch({ type: "DISMISS_CONTENT" });
+      else if (msg.action === "keep_visible") _dispatch({ type: "PRESENTATION_PERSISTENT", value: true });
+      break;
     case "audio_cue":
       // Shared semantic audio event origin — main.py's own
       // _execute_tool() choke point already decided this; the exact same

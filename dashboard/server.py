@@ -1082,6 +1082,23 @@ class DashboardServer:
         later gets no replay of a stale cue."""
         await self._send_to_clients({"type": "audio_cue", "event": event})
 
+    async def broadcast_presentation_control(self, action: str) -> None:
+        """Server -> client "presentation_control" message: the user asked
+        JARVIS, in natural language, to change the CURRENTLY showing
+        information surface -- "expand that", "show me more", "keep this
+        on screen", "hide it"/"close this"/"dismiss it" -- and main.py's
+        presentation_control tool (the ONLY place this is ever called
+        from) decided which of "expand"/"collapse"/"dismiss"/
+        "keep_visible" that maps to. Gemini interprets the user's words;
+        JARVIS (this call) is what actually executes the state change --
+        the existing authority boundary, unchanged. Reaches a real
+        browser client over /ws AND (via set_local_sink()) an embedded
+        desktop Presentation Engine view identically -- one shared
+        surface, controllable from either input. Same non-history,
+        ephemeral-signal treatment as broadcast_state()/
+        broadcast_audio_cue() above."""
+        await self._send_to_clients({"type": "presentation_control", "action": action})
+
     async def broadcast_location_refresh_request(self, fresh: bool = False) -> None:
         """Location capabilities: server -> client signal asking the
         browser to take a fresh navigator.geolocation fix right now (see

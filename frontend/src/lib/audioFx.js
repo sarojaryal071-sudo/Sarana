@@ -129,6 +129,50 @@ function _clickBurst(ctx, dest, { startAt, count = 6, spread = 0.09, ...clickOpt
   }
 }
 
+// A converging click burst -- unlike _clickBurst's uniform random spread,
+// each click's own timing window narrows and its frequency rises as the
+// burst progresses, so components read as scattering INTO alignment
+// (ascending) or OUT of it (descending) rather than uniform noise. This
+// is the actual "precision mechanical assembly" texture -- components
+// don't click randomly, they converge.
+function _clickConverge(ctx, dest, { startAt, count = 8, spread = 0.14, freq = 3000, direction = 1, dur = 0.016, peak = 0.26 }) {
+  for (let i = 0; i < count; i++) {
+    const progress = i / Math.max(1, count - 1);           // 0..1 across the burst
+    const window = spread * (1 - progress * 0.7);           // narrows toward the end (converging)
+    const tOffset = direction > 0
+      ? progress * spread + (Math.random() - 0.5) * window * 0.4
+      : (1 - progress) * spread + (Math.random() - 0.5) * window * 0.4;
+    const f = freq * (direction > 0 ? 0.6 + progress * 0.9 : 1.5 - progress * 0.9) * (0.9 + Math.random() * 0.2);
+    _click(ctx, dest, { startAt: Math.max(startAt, startAt + tOffset), freq: f, dur, peak: peak * (0.7 + progress * 0.3) });
+  }
+}
+
+// A brief filtered-noise "servo whir" -- a bandpass sweep through noise,
+// the texture of a small precision motor/actuator engaging. Distinct
+// from _sweep (a pure tone) and _click (an instant metallic tick) --
+// this is what makes the transition read as mechanical movement, not
+// just electronic tones.
+function _whir(ctx, dest, { startAt, dur = 0.14, fromFreq = 900, toFreq = 2600, q = 8, peak = 0.14 }) {
+  const bufferSize = Math.max(1, Math.floor(ctx.sampleRate * dur));
+  const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  const filter = ctx.createBiquadFilter();
+  filter.type = "bandpass";
+  filter.Q.value = q;
+  filter.frequency.setValueAtTime(fromFreq, startAt);
+  filter.frequency.exponentialRampToValueAtTime(Math.max(1, toFreq), startAt + dur);
+  const gain = ctx.createGain();
+  src.connect(filter);
+  filter.connect(gain);
+  gain.connect(dest);
+  _envelope(ctx, gain, { attack: dur * 0.25, hold: dur * 0.2, decay: dur * 0.5, peak }, startAt);
+  src.start(startAt);
+  src.stop(startAt + dur + 0.02);
+}
+
 // ── theme (JARVIS vs SARANA) — one detune value, applied uniformly ───
 // rather than a second cue set per theme (section 9's own "shared
 // infrastructure with themes/variants, do not duplicate the whole
@@ -216,29 +260,92 @@ Object.assign(EVENTS, {
       _tone(ctx, dest, { freq: 220, type: "sawtooth", startAt: t + 0.07, attack: 0.002, decay: 0.09, peak: 0.3, detune: _detune() });
     },
   },
-  // Section 11 — the key requirement: a short cinematic mechanical-
-  // assembly sound. Layered from THREE real elements, in order: a burst
-  // of metallic micro-clicks (particles moving/snapping into place), a
-  // rising precision sweep (the assembly tightening/aligning), and one
-  // low final "lock" thump (system ready) -- restrained, ~450ms total.
+  // "Precision mechanical assembly" (explicit brief requirement, revised
+  // pass): tiny components moving -> converging -> a servo engaging ->
+  // magnetic snap -> lock. FOUR real layered elements, in this exact
+  // order, ~480ms total:
+  //   1. a CONVERGING click burst (_clickConverge, direction=1) —
+  //      components scattering INTO alignment, not uniform noise
+  //   2. a servo whir (_whir, rising) — the actuator engaging
+  //   3. a rising precision sweep — final tightening
+  //   4. a magnetic "snap" (one sharp high click) immediately INTO one
+  //      low final lock thump — the actual moment of engagement, not
+  //      just a tone fading in
+  // Restrained: no reverb, no pitch randomization beyond the click
+  // texture itself, nothing resembling a notification/laser/cartoon SFX.
   transition_sarana_to_jarvis: {
     priority: PRIORITY.CRITICAL, cooldownMs: 100,
     synth(ctx, dest, t) {
-      _clickBurst(ctx, dest, { startAt: t, count: 9, spread: 0.16, freq: 3400, dur: 0.018, peak: 0.28 });
-      _sweep(ctx, dest, { from: 260, to: 980, startAt: t + 0.1, dur: 0.2, type: "triangle", peak: 0.32, detune: -60 });
-      _tone(ctx, dest, { freq: 110, type: "square", startAt: t + 0.32, attack: 0.002, decay: 0.14, peak: 0.5, detune: -60 });
+      _clickConverge(ctx, dest, { startAt: t, count: 10, spread: 0.15, freq: 3200, direction: 1, dur: 0.016, peak: 0.24 });
+      _whir(ctx, dest, { startAt: t + 0.06, dur: 0.13, fromFreq: 700, toFreq: 2200, peak: 0.13 });
+      _sweep(ctx, dest, { from: 280, to: 1020, startAt: t + 0.16, dur: 0.16, type: "triangle", peak: 0.28, detune: -60 });
+      _click(ctx, dest, { startAt: t + 0.33, freq: 4200, dur: 0.012, peak: 0.32, q: 12 });
+      _tone(ctx, dest, { freq: 108, type: "square", startAt: t + 0.335, attack: 0.002, decay: 0.15, peak: 0.5, detune: -60 });
     },
   },
-  // Conceptual reverse: the same lock-thump FIRST (the JARVIS structure
-  // releasing), then the sweep DESCENDS and the clicks scatter/decay
-  // outward instead of converging — a real, mirrored, not merely
-  // "the same sound played backward" or a lazy transposition.
+  // Conceptual reverse, not merely reversed audio: the lock releases
+  // FIRST (JARVIS's structure letting go), the servo winds DOWN, the
+  // sweep DESCENDS, and the clicks scatter OUTWARD (_clickConverge with
+  // direction=-1) instead of converging — a real, mirrored deconstruction.
   transition_jarvis_to_sarana: {
     priority: PRIORITY.CRITICAL, cooldownMs: 100,
     synth(ctx, dest, t) {
-      _tone(ctx, dest, { freq: 130, type: "sine", startAt: t, attack: 0.002, decay: 0.1, peak: 0.4, detune: 40 });
-      _sweep(ctx, dest, { from: 900, to: 320, startAt: t + 0.08, dur: 0.22, type: "sine", peak: 0.3, detune: 40 });
-      _clickBurst(ctx, dest, { startAt: t + 0.24, count: 7, spread: 0.18, freq: 2600, dur: 0.02, peak: 0.2 });
+      _tone(ctx, dest, { freq: 128, type: "sine", startAt: t, attack: 0.002, decay: 0.09, peak: 0.4, detune: 40 });
+      _click(ctx, dest, { startAt: t + 0.005, freq: 4000, dur: 0.012, peak: 0.26, q: 12 });
+      _sweep(ctx, dest, { from: 940, to: 300, startAt: t + 0.1, dur: 0.17, type: "sine", peak: 0.26, detune: 40 });
+      _whir(ctx, dest, { startAt: t + 0.16, dur: 0.13, fromFreq: 2000, toFreq: 650, peak: 0.12 });
+      _clickConverge(ctx, dest, { startAt: t + 0.27, count: 8, spread: 0.17, freq: 2600, direction: -1, dur: 0.018, peak: 0.2 });
+    },
+  },
+  // ── presentation lifecycle (shared — belongs to PresentationSurface
+  // itself, see that component's own phase-transition effect; never
+  // reimplemented per renderer) ──────────────────────────────────────
+  // A subtle glass/electronic "forming" texture — restrained, quieter
+  // than the identity-transition cues (this happens far more often —
+  // every weather/calendar/search result — so it must never compete for
+  // attention the way a mode switch does).
+  presentation_materializing: {
+    priority: PRIORITY.NORMAL, cooldownMs: 250,
+    synth(ctx, dest, t) {
+      _whir(ctx, dest, { startAt: t, dur: 0.09, fromFreq: 1200, toFreq: 2600, peak: 0.08 });
+      _tone(ctx, dest, { freq: 720, type: "sine", startAt: t + 0.04, attack: 0.006, decay: 0.09, peak: 0.16 });
+    },
+  },
+  // A quick, quiet data-tick — plays once per reveal wave, not per row
+  // (see PresentationSurface's own reveal-count guard), so a six-row
+  // forecast doesn't fire six sounds.
+  presentation_reveal: {
+    priority: PRIORITY.AMBIENT, cooldownMs: 180,
+    synth(ctx, dest, t) {
+      _click(ctx, dest, { startAt: t, freq: 2600, dur: 0.014, peak: 0.14, q: 6 });
+    },
+  },
+  presentation_update: {
+    priority: PRIORITY.NORMAL, cooldownMs: 200,
+    synth(ctx, dest, t) {
+      _tone(ctx, dest, { freq: 640, type: "sine", startAt: t, attack: 0.004, decay: 0.07, peak: 0.14 });
+    },
+  },
+  presentation_expand: {
+    priority: PRIORITY.NORMAL, cooldownMs: 150,
+    synth(ctx, dest, t) {
+      _sweep(ctx, dest, { from: 500, to: 900, startAt: t, dur: 0.09, type: "sine", peak: 0.16 });
+    },
+  },
+  presentation_collapse: {
+    priority: PRIORITY.NORMAL, cooldownMs: 150,
+    synth(ctx, dest, t) {
+      _sweep(ctx, dest, { from: 900, to: 500, startAt: t, dur: 0.08, type: "sine", peak: 0.14 });
+    },
+  },
+  // The retraction — a small reverse-echo of materializing, ending
+  // (rather than beginning) with the whir, so it reads as the structure
+  // dissolving rather than a mirrored replay.
+  presentation_dismiss: {
+    priority: PRIORITY.NORMAL, cooldownMs: 150,
+    synth(ctx, dest, t) {
+      _tone(ctx, dest, { freq: 520, type: "sine", startAt: t, attack: 0.003, decay: 0.06, peak: 0.13 });
+      _whir(ctx, dest, { startAt: t + 0.03, dur: 0.08, fromFreq: 2200, toFreq: 1000, peak: 0.07 });
     },
   },
 });

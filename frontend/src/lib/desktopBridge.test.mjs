@@ -56,6 +56,26 @@ test("a 'jarvis_mode_changed' message dispatches JARVIS_MODE", () => {
   assert.deepEqual(dispatched, [{ type: "JARVIS_MODE", value: true }]);
 });
 
+test("a 'presentation_control' message with action=expand dispatches PRESENTATION_EXPANDED: true — mirrors App.jsx exactly", () => {
+  window.__jarvisBridge.receive({ type: "presentation_control", action: "expand" });
+  assert.deepEqual(dispatched, [{ type: "PRESENTATION_EXPANDED", value: true }]);
+});
+
+test("a 'presentation_control' message with action=collapse dispatches PRESENTATION_EXPANDED: false", () => {
+  window.__jarvisBridge.receive({ type: "presentation_control", action: "collapse" });
+  assert.deepEqual(dispatched, [{ type: "PRESENTATION_EXPANDED", value: false }]);
+});
+
+test("a 'presentation_control' message with action=dismiss dispatches DISMISS_CONTENT — the same action the dismiss button uses", () => {
+  window.__jarvisBridge.receive({ type: "presentation_control", action: "dismiss" });
+  assert.deepEqual(dispatched, [{ type: "DISMISS_CONTENT" }]);
+});
+
+test("a 'presentation_control' message with action=keep_visible dispatches PRESENTATION_PERSISTENT: true", () => {
+  window.__jarvisBridge.receive({ type: "presentation_control", action: "keep_visible" });
+  assert.deepEqual(dispatched, [{ type: "PRESENTATION_PERSISTENT", value: true }]);
+});
+
 test("an 'audio_cue' message never dispatches — it's played directly, not routed through the reducer", () => {
   assert.doesNotThrow(() => window.__jarvisBridge.receive({ type: "audio_cue", event: "blocked" }));
   assert.deepEqual(dispatched, []);

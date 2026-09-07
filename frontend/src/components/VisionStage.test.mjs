@@ -123,7 +123,7 @@ test("App.jsx mounts exactly ONE of <VisionStage> or <SaranaFace> at a time (a s
   assert.equal(usages.length, 1, "VisionStage must be rendered from exactly one place in App.jsx");
   assert.match(
     appSrc,
-    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,700}<SaranaFace/,
+    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,1600}<SaranaFace/,
     "VisionStage and SaranaFace must be the two branches of the SAME conditional, not two independently-rendered elements",
   );
 });

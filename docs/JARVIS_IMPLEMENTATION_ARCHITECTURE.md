@@ -989,3 +989,50 @@ Verification used a real Windows desktop launch (`python main.py`, real Gemini L
 Confirmed working end to end after both fixes: a real "what is the weather right now" query → real `windows_native` location → real Open-Meteo fetch → real `show_content()` → real cross-thread Qt signal → real local HTTP server → real React mount → real `WeatherPresentation` rendering real data inside the native window (verified via CDP screenshot showing "WEATHER / TODAY Overcast / TOMORROW Overcast / DAY AFTER TOMORROW Dense Drizzle"), zero console errors. A synthetic calendar-shaped payload (this environment has no real connected Google Calendar — see above) confirmed the SAME shared registry dispatches `CalendarPresentation` correctly too.
 
 **Tests:** `tests/test_dashboard_local_sink.py` (new), `tests/test_shared_audio_cue.py` (new), `tests/test_dotenv_loading.py` (new, real subprocess), plus new/updated cases in `tests/test_calendar_tools.py`, `tests/test_weather_tool.py`, `tests/test_phase7_lifecycle.py` (a shared test fake needed the new `set_local_sink` method), and new frontend tests for `useAudioFxLifecycle`, `desktopBridge`, and the `audio_cue` wiring in `App.jsx`.
+
+---
+
+## 26. The Universal JARVIS Information Surface
+
+Evolves the Presentation Engine from "a panel docked below the orb" into the actual brief: information becomes JARVIS's primary visual stage, the orb recedes behind it rather than shrinking beside it, and the surface itself gains real states (compact/expanded, persistent/transient) and a real control channel — all through the SAME shared model, never a second implementation per platform or per presentation type.
+
+### The overlay: orb recedes, never disappears
+
+`ContentPanel` moved from a sibling of `.identity-stage` (docked below, shrinking the orb) to a **child** of it (see `App.jsx`). `.pw-surface` itself changed from a bottom-docked flex panel to `position: absolute` — a glass card floating over the SAME stage the orb occupies, width `min(560px, 92%)`, centered, with real depth (a three-layer `box-shadow`: inset glass highlight, outer drop shadow, and one restrained `--surface-accent` glow — still one `box-shadow` declaration, one coherent glow source). `.identity-stage-defocused` (already existed from the prior stage, now actually exercised for its real purpose) blurs+dims the orb behind it — `filter: blur(2px) brightness(0.72)`, a background layer, not a swap.
+
+Desktop's embedded panel has no orb inside it to overlay (the native orb is a separate Qt widget entirely, dimmed by its own `QGraphicsOpacityEffect` — see §25) — one scoped override, `.desktop-presentation-root .pw-surface { position: static; ... }`, reverts the card to filling its own small dedicated strip instead of floating uselessly inside it. Same component, same JSX, a platform-appropriate CSS shape at the boundary — never a second surface implementation.
+
+A real bug caught before shipping: the `prefers-reduced-motion` override for materializing/dismissing originally set `transform: none`, which would have also stripped the essential `translateX(-50%)` centering the overlay's own `left: 50%` positioning depends on, shifting the whole card off-screen for reduced-motion users. Fixed with a shared `--pw-base-transform` custom property (`translateX(-50%)` on web, `none` on desktop) that every phase transform composes with, including the reduced-motion override.
+
+**Real verification:** a disposable Playwright harness (never committed) rendered the actual `App.jsx` DOM shape in a real browser — the screenshot shows the orb's concentric rings genuinely blurred/dimmed behind a real, correctly-positioned weather glass card, zero console errors.
+
+### Compact / expanded, and a real control channel
+
+`presentationExpanded`/`presentationPersistent` are lifted to `AssistantContext` (not local component state, and deliberately NOT nested inside `content`) — so both the surface's own expand button *and* a real voice/text command can drive the identical state, and an in-place content update (a "what about tomorrow?" follow-up) never resets them. `PresentationSurface` passes `expanded` straight to whichever typed renderer is active; each renderer decides its own compact-vs-full content:
+
+- **Weather** — `get_weather_data()` now fetches a real 7-day forecast (was 3) so "expand"/"show me the next five days" has real data to reveal; the spoken reply still reads only the first 3 (`format_weather_text()`'s own slice) so an ordinary "what's the weather" answer stays concise. Days 4+ get a real weekday name (`date.fromisoformat(...).strftime("%A")`), not a raw ISO string. Compact shows 2 days; expanded shows all 7.
+- **Calendar** — compact shows 4 events; expanded shows the full already-fetched list.
+- **Table** — compact shows 6 rows; expanded shows all.
+- **Search results** — compact shows 6 lines; expanded shows all.
+
+Every "+N more" hint and every expand/collapse is **client-side slicing of data already fetched** — expanding never re-fetches or re-queries anything, matching the brief's own "the surface must update in place" requirement.
+
+**The control channel:** a new `presentation_control` tool (`main.py`) — `expand`/`collapse`/`dismiss`/`keep_visible` — is how "expand that", "keep this on screen", "hide it" reach the surface. Gemini interprets intent (`core/prompt.txt`'s new INFORMATION SURFACE section); JARVIS executes it, the same authority boundary every other tool already respects. Delivery reuses the existing shared plumbing exactly: `dashboard.broadcast_presentation_control()` → `_send_to_clients()` → a real browser client **and** (via `set_local_sink()`, see §25) an embedded desktop view, identically, with **no direct `self.ui.*` call needed at all** — this is the first tool to prove that the local-sink relay built in §25 generalizes to entirely new message types with zero new plumbing.
+
+Persistence has one honest, visible surface: a small filled-dot indicator (`.pw-surface-pin`) next to the title when `keep_visible` was explicitly requested — no behavior currently keys off it (nothing auto-dismisses today), so it's real, disclosed state, not a promise of behavior not yet built.
+
+### Cinematic audio: presentation lifecycle events + a redesigned transition sound
+
+Six new shared `audioFx.js` events — `presentation_materializing`, `presentation_reveal`, `presentation_update`, `presentation_expand`, `presentation_collapse`, `presentation_dismiss` — wired into `PresentationSurface.jsx`'s own phase-transition effects (materialize → reveal, content-diff → update → reveal, dismiss). Because `PresentationSurface` is the literal shared component both platforms mount, this is automatically shared — no per-platform wiring, no per-renderer wiring. `presentation_reveal` fires once per materialize/update wave, never once per `.pw-reveal-item` row, so a 7-day forecast reveal doesn't fire seven sounds.
+
+The Sarana→JARVIS transition sound was rebuilt for a genuine "precision mechanical assembly" read: two new synthesis primitives — `_clickConverge()` (a click burst whose timing narrows and pitch rises as it progresses, so components read as *converging into alignment* rather than uniform noise) and `_whir()` (a bandpass-filtered noise sweep — a servo/actuator texture, distinct from a pure tone or an instant click). The forward transition layers: converging clicks → rising whir → rising sweep → one sharp "magnetic snap" click landing directly into the low lock tone. The reverse is a genuine mirror, not reversed audio: the lock releases *first*, the whir winds down, the sweep descends, and `_clickConverge(direction=-1)` scatters clicks *outward* instead of converging.
+
+**Real verification:** every presentation-lifecycle event, both transition sounds, and the existing wake/sleep/blocked/error cues were fired through the real embedded desktop view via the real bridge — zero console errors, confirmed via Chromium DevTools Protocol against the live page.
+
+### Google Calendar — reconfirmed, not re-diagnosed
+
+The real root cause and fix already shipped in §25 (missing `.env` loading + the honest `[CALENDAR_UNAVAILABLE]`/`[CALENDAR_NOT_CONNECTED]` split). Re-ran the live `[CALENDAR_CONFIG]` diagnostic on this machine for this stage — still `calendar_store_configured=False`, all OAuth vars `False`, unchanged since no `.env` exists here — confirming the fix's own honest behavior is stable, not that a new bug was found. Full calendar test suite re-run clean.
+
+**Files changed (this stage):** `frontend/src/App.jsx`, `frontend/src/state/AssistantContext.jsx`, `frontend/src/components/ContentPanel.jsx`, `frontend/src/components/presentation/PresentationSurface.jsx`, `WeatherPresentation.jsx`, `CalendarPresentation.jsx`, `TablePresentation.jsx`, `SearchResultsPresentation.jsx`, `frontend/src/lib/audioFx.js`, `frontend/src/lib/desktopBridge.js`, `frontend/src/desktop-presentation-main.jsx`, `frontend/src/index.css`, `main.py` (new `presentation_control` tool), `dashboard/server.py` (new `broadcast_presentation_control()`), `actions/weather.py` (7-day forecast + weekday labels), `core/prompt.txt`.
+
+**New tests:** `tests/test_presentation_control.py`, `frontend/src/state/AssistantContext.test.mjs`, `frontend/src/App.presentationControl.test.mjs`, plus new cases in `tests/test_dashboard_local_sink.py`, `tests/test_weather_tool.py`, `frontend/src/lib/audioFx.test.mjs`, `frontend/src/lib/desktopBridge.test.mjs`, and updates to three pre-existing frontend tests whose fixed-width source regexes fell out of date against genuinely larger (not incorrect) source regions — a recurring, disclosed maintenance cost of this project's own source-inspection testing convention, not a sign of anything actually wrong.

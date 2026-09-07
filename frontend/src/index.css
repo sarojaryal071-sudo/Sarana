@@ -973,33 +973,75 @@ input {
   background: transparent;
 }
 
-/* ── Presentation Engine: the one glass information surface (Track 3) ─
-   Deliberately restrained -- one thin border, one soft shadow, a low-
-   opacity blur -- never the "giant glowing border" / "excessive
+/* ── JARVIS Information Surface: the one glass presentation card ──────
+   The central UI change of this stage: this used to be a panel DOCKED
+   below the orb, shrinking it into a smaller area. It's now an overlay
+   floating OVER the orb's own stage (.identity-stage, its positioning
+   parent — see App.jsx's own comment for why this component moved
+   inside that container) — JARVIS temporarily uses its own primary
+   visual stage to communicate, exactly the brief's own "information
+   surface becomes the primary visual stage normally occupied by the
+   orb" requirement. The orb never disappears — .identity-stage-defocused
+   (App.jsx) blurs/dims it as a visible background layer behind this
+   card, not a swap.
+   Deliberately restrained -- one thin border, one soft shadow, one
+   controlled blur -- never the "giant glowing border" / "excessive
    gradients" look the brief explicitly warns against. --surface-accent
    is the ONE thing that actually varies between JARVIS/SARANA (see the
    theme classes below), same technique IdentityTransition's own
    --it-accent already established. */
 .pw-surface {
-  flex-shrink: 0;
-  max-height: 34%;
+  position: absolute;
+  left: 50%;
+  bottom: 7%;
+  width: min(560px, 92%);
+  max-height: 58%;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-top: 1px solid var(--border);
-  background: var(--panel-2);
-  background: linear-gradient(180deg, rgba(1, 15, 24, 0.86), rgba(1, 15, 24, 0.94));
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  /* Production polish: one faint inset top highlight layered with the
-     existing outer shadow (a single box-shadow DECLARATION, two comma-
-     separated values -- still exactly one glow source, not a second
-     stacked effect) -- the actual "glass" catch-light real glass panels
-     have, restrained enough not to read as a glowing border. */
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 -10px 28px -16px rgba(0, 0, 0, 0.65);
-  transition: opacity 240ms ease, transform 240ms ease, max-height 220ms ease;
+  border: 1px solid var(--border-a);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(1, 15, 24, 0.82), rgba(1, 15, 24, 0.93));
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  /* One faint inset top highlight (the "glass" catch-light) layered
+     with one outer shadow that now has real depth on every side (this
+     card floats over the orb rather than sitting flush against a page
+     edge) plus a single hairline of controlled cyan illumination at low
+     opacity -- restrained, never a glowing border. Still one box-shadow
+     DECLARATION, three comma-separated layers, one coherent glow
+     source (--surface-accent), not stacked unrelated effects. */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 28px 60px -22px rgba(0, 0, 0, 0.8),
+    0 0 26px -12px var(--surface-accent, transparent);
+  transition: opacity 240ms ease, transform 240ms ease, max-height 220ms ease, width 220ms ease;
+  z-index: 4;
 }
-.pw-surface-expanded { max-height: 62%; }
+.pw-surface-expanded { max-height: 78%; width: min(720px, 94%); }
+
+/* Desktop's embedded panel (desktop.html) has no orb inside it to
+   overlay -- the QWebEngineView IS already a small, dedicated strip of
+   real estate reserved purely for this surface (the native orb is
+   rendered outside it entirely, in ui.py's own Qt widgets, and dims via
+   a genuinely different mechanism -- QGraphicsOpacityEffect, see
+   ui.py's _set_presentation_focus()). Floating/centering the card
+   there would waste an already-small area on padding around itself for
+   no visual benefit, so this ONE scoped override reverts it to filling
+   its container -- the same shared component/JSX, a platform-
+   appropriate CSS shape at the rendering boundary, per this stage's own
+   "keep platform-specific code thin" constraint. */
+.desktop-presentation-root .pw-surface {
+  position: static;
+  width: 100%;
+  max-height: none;
+  flex: 1;
+  border-radius: 0;
+  border: none;
+  border-top: 1px solid var(--border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 -10px 28px -16px rgba(0, 0, 0, 0.65);
+}
+.desktop-presentation-root .pw-surface-expanded { max-height: none; width: 100%; }
 
 /* Cinematic materialize: a restrained "glass condensing" read rather than
    a flat modal fade/slide — starts very slightly scaled down AND less
@@ -1010,11 +1052,19 @@ input {
    the "forming" read without relying on an animated blur. Dismissal is
    the same motion in reverse, slightly faster (DISMISS_MS is shorter
    than MATERIALIZE_MS in PresentationSurface.jsx) — a deconstruction,
-   not just a fade-out. */
-.pw-surface-materializing { opacity: 0; transform: translateY(10px) scale(0.985); }
+   not just a fade-out.
+   --pw-base-transform carries the horizontal centering translateX(-50%)
+   that `.pw-surface`'s own `left: 50%` overlay positioning needs (see
+   above) — every phase composes it with its own translateY/scale rather
+   than repeating "translateX(-50%)" three times. Desktop's own scoped
+   override below resets it to nothing (that panel isn't centered via
+   left:50%, it fills its container). */
+.pw-surface { --pw-base-transform: translateX(-50%); }
+.desktop-presentation-root .pw-surface { --pw-base-transform: none; }
+.pw-surface-materializing { opacity: 0; transform: var(--pw-base-transform) translateY(10px) scale(0.985); }
 .pw-surface-active,
-.pw-surface-updating { opacity: 1; transform: translateY(0) scale(1); }
-.pw-surface-dismissing { opacity: 0; transform: translateY(6px) scale(0.99); }
+.pw-surface-updating { opacity: 1; transform: var(--pw-base-transform) translateY(0) scale(1); }
+.pw-surface-dismissing { opacity: 0; transform: var(--pw-base-transform) translateY(6px) scale(0.99); }
 
 .pw-surface-updating .pw-surface-hdr { animation: pw-pulse 420ms ease; }
 @keyframes pw-pulse {
@@ -1041,6 +1091,18 @@ input {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* "Kept on screen" — a small status indicator (brief's own "small status
+   indicators where meaningful"), a plain filled dot with no visible
+   label eating header width, never an emoji/icon glyph. Persistence is
+   real, explicit state (see AssistantContext.jsx's presentationPersistent)
+   — this is its only visible surface, deliberately restrained. */
+.pw-surface-pin {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--surface-accent, var(--pri));
+  flex-shrink: 0;
 }
 .pw-surface-spacer { flex: 1; }
 .pw-surface-btn {
@@ -1074,8 +1136,14 @@ input {
     transition: none !important;
     animation: none !important;
   }
+  /* transform: var(--pw-base-transform), NOT `none` — `none` would also
+     strip the essential translateX(-50%) centering this overlay's own
+     `left: 50%` positioning depends on (see .pw-surface's own comment),
+     shifting the whole card off-screen under reduced motion. Only the
+     animated offset (translateY/scale) is what reduced motion should
+     skip, never the base positioning. */
   .pw-surface-materializing,
-  .pw-surface-dismissing { opacity: 1; transform: none; }
+  .pw-surface-dismissing { opacity: 1; transform: var(--pw-base-transform); }
 }
 
 /* ── Shared data-reveal (belongs to the Presentation Engine itself, not
@@ -1126,6 +1194,7 @@ input {
 .pw-weather-day-high { color: var(--white); font-weight: 700; }
 .pw-weather-day-low { color: var(--text-dim); }
 .pw-weather-day-precip { font-size: 10px; color: var(--text-med); margin-top: 2px; }
+.pw-weather-more-hint { font-size: 10px; color: var(--text-dim); margin-top: 8px; letter-spacing: 0.3px; }
 
 /* ── Calendar: real dates, marked days in RED per the explicit brief ── */
 .pw-calendar-header { font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--surface-accent, var(--pri)); margin-bottom: 8px; }
@@ -1163,6 +1232,7 @@ input {
 .pw-calendar-event-time { color: var(--text-dim); font-size: 10px; min-width: 62px; }
 .pw-calendar-event-title { color: var(--white); flex: 1; }
 .pw-calendar-event-location { color: var(--text-dim); font-size: 10px; }
+.pw-calendar-more-hint { font-size: 10px; color: var(--text-dim); margin-top: 6px; letter-spacing: 0.3px; }
 
 /* ── Table ────────────────────────────────────────────────────────── */
 .pw-table-wrap { overflow-x: auto; }
@@ -1170,12 +1240,14 @@ input {
 .pw-table th, .pw-table td { border: 1px solid var(--border); padding: 5px 9px; text-align: left; }
 .pw-table th { color: var(--surface-accent, var(--pri)); font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase; }
 .pw-table td { color: var(--text); }
+.pw-table-more-hint { font-size: 10px; color: var(--text-dim); margin-top: 6px; letter-spacing: 0.3px; }
 
 /* ── Search results ───────────────────────────────────────────────── */
 .pw-search-meta { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
 .pw-search-mode { font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--surface-accent, var(--pri)); }
 .pw-search-query { font-size: 11px; color: var(--text-dim); }
 .pw-search-line { padding: 1px 0; }
+.pw-search-more-hint { font-size: 10px; color: var(--text-dim); margin-top: 6px; letter-spacing: 0.3px; }
 
 /* ── Generic information ──────────────────────────────────────────── */
 .pw-generic-body { white-space: pre-wrap; }

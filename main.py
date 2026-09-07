@@ -1129,6 +1129,42 @@ TOOL_DECLARATIONS = [
         },
     },
     {
+        "name": "presentation_control",
+        "description": (
+            "Changes the state of the information surface CURRENTLY showing "
+            "on screen (weather/calendar/search/table/status/etc.) in "
+            "response to the user asking about it directly — 'expand "
+            "that', 'show me more', 'keep this on screen', 'hide it', "
+            "'close this', 'dismiss it'. Only call this when a presentation "
+            "is actually visible and the user is clearly referring to it; "
+            "if nothing is currently shown, or it's unclear what 'that'/"
+            "'this' refers to, ask instead of guessing. This is purely a "
+            "visual state change — it never affects whether the underlying "
+            "task/data is still valid, and finishing a task does NOT by "
+            "itself dismiss its own presentation; only this tool (or the "
+            "user directly clicking dismiss) does that."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "enum": ["expand", "collapse", "dismiss", "keep_visible"],
+                    "description": (
+                        "'expand': reveal more detail ('expand that', 'show me more', "
+                        "'tell me more'). 'collapse': return to the normal view "
+                        "('collapse that', 'less detail', 'go back'). 'dismiss': "
+                        "hide it entirely ('hide it', 'close this', 'dismiss it', "
+                        "'get rid of it'). 'keep_visible': the user wants it to stay "
+                        "on screen rather than being replaced/closed later "
+                        "('keep this on screen', 'leave that up')."
+                    ),
+                },
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "gesture_mode",
         "description": (
             "Turns hand-gesture mouse control on or off, desktop only. "
@@ -3583,6 +3619,32 @@ class JarvisLive:
                         f"Done: face now showing '{_expr}' for about {_dur:.0f}s, "
                         "then returns to normal automatically — you don't need to reset it."
                     )
+
+            elif name == "presentation_control":
+                # The universal JARVIS Information Surface's own control
+                # channel — Gemini interprets "expand that"/"keep this on
+                # screen"/"hide it" into one of four actions; JARVIS
+                # (here) is what actually executes the state change,
+                # exactly the same authority boundary every other tool
+                # already respects. Deliberately no self.ui.* direct call
+                # (unlike show_content()): this ISN'T a "content" message
+                # -- DashboardServer.set_local_sink() (see that method's
+                # own docstring) already relays every non-"content"
+                # broadcast straight to desktop's embedded Presentation
+                # Engine view too, so ONE broadcast reaches both surfaces,
+                # identically, with no separate desktop call needed.
+                _pres_action = (args.get("action") or "").strip().lower()
+                if _pres_action not in ("expand", "collapse", "dismiss", "keep_visible"):
+                    result = "Please specify a valid presentation action."
+                elif not self._dashboard:
+                    # Same honest-degradation shape as other dashboard-
+                    # dependent features (see _make_remote_key()) --
+                    # never silently claims the surface changed when
+                    # there is no delivery path to it at all.
+                    result = "[PRESENTATION_UNAVAILABLE] No presentation surface is reachable right now."
+                else:
+                    asyncio.create_task(self._dashboard.broadcast_presentation_control(_pres_action))
+                    result = f"[PRESENTATION_{_pres_action.upper()}] Done."
 
             elif name == "gesture_mode":
                 # Desktop-only (see DESKTOP_ONLY_TOOLS) — controls the

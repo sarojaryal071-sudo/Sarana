@@ -35,6 +35,8 @@ is completely unaffected.
 """
 from __future__ import annotations
 
+from datetime import date as _date
+
 import requests
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
@@ -67,10 +69,15 @@ def _describe_code(code) -> str:
 
 
 def get_weather_data(latitude: float, longitude: float, place_label: str = "") -> dict:
-    """Fetches current conditions + a 3-day forecast from Open-Meteo and
+    """Fetches current conditions + a 7-day forecast from Open-Meteo and
     returns it as a structured dict -- the one real HTTP call/parse this
     module makes; get_weather_text() below formats the SAME dict into
-    prose rather than fetching separately. Shape:
+    prose rather than fetching separately. 7 days (not 3) so a genuine
+    "show me the next five days"/"expand that" request has real data to
+    reveal -- WeatherPresentation.jsx's own `expanded` prop decides how
+    many of these get shown by default vs. on request; the fetch itself
+    is deliberately never re-done just because the user asks to see more
+    of what was already fetched. Shape:
         {
           "location": str,               # place_label, "" if none given
           "current": {
@@ -100,7 +107,7 @@ def get_weather_data(latitude: float, longitude: float, place_label: str = "") -
             # (kept identical to the pre-split request -- see the daily
             # loop below, which still reports precipitation_sum per day)
             "timezone": "auto",
-            "forecast_days": 3,
+            "forecast_days": 7,
         },
         timeout=HTTP_TIMEOUT_S,
     )
@@ -128,8 +135,17 @@ def get_weather_data(latitude: float, longitude: float, place_label: str = "") -
     daily = data.get("daily")
     daily_units = data.get("daily_units", {})
     if daily and daily.get("time"):
-        for i, date in enumerate(daily["time"][:3]):
-            label = _DAY_LABELS[i] if i < len(_DAY_LABELS) else date
+        for i, date in enumerate(daily["time"][:7]):
+            if i < len(_DAY_LABELS):
+                label = _DAY_LABELS[i]
+            else:
+                # Day 4+: a real weekday name ("Friday"), not the raw
+                # ISO date string -- still honestly derived from the
+                # actual date Open-Meteo returned, never guessed.
+                try:
+                    label = _date.fromisoformat(date).strftime("%A")
+                except ValueError:
+                    label = date
             structured["daily"].append({
                 "label": label,
                 "date": date,
@@ -152,7 +168,17 @@ def format_weather_text(w: dict) -> str:
     returned (see that function's own docstring). Split out so a caller
     that already has the structured dict (main.py -- see its own
     presentation-broadcast use) never fetches Open-Meteo twice just to
-    get both the text and the structured shape for one response."""
+    get both the text and the structured shape for one response.
+
+    Deliberately only reads out the first 3 of `w["daily"]`'s now-7
+    entries -- get_weather_data() fetches a full week so the VISUAL
+    presentation can expand into it on request (see
+    WeatherPresentation.jsx's own `expanded` prop), but Gemini's SPOKEN
+    reply staying compact by default is a real, separate concern: nobody
+    wants "what's the weather" answered with a 7-day recitation. If the
+    user explicitly asks for more days ("what about this week"), that
+    request itself reaches Gemini as ordinary conversation text, not
+    through this fixed formatter."""
     cur = w["current"]
 
     lines = []
@@ -165,7 +191,7 @@ def format_weather_text(w: dict) -> str:
         f"wind {cur['wind']}{cur['wind_unit']}, "
         f"precipitation {cur['precipitation']}{cur['precipitation_unit']} right now."
     )
-    for day in w["daily"]:
+    for day in w["daily"][:3]:
         lines.append(
             f"{day['label']} ({day['date']}): {day['condition']}, "
             f"high {day['high']}{day['temp_unit']}, "

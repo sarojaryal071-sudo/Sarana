@@ -244,7 +244,7 @@ test("App.jsx imports and renders Orb exactly once, as the JARVIS-identity branc
 test("the central stage is a single conditional: VisionStage first, then an identity-stage wrapper choosing Orb or SaranaFace — never two mounted at once", () => {
   assert.match(
     appSrc,
-    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,600}identity === "jarvis"[\s\S]{0,200}<Orb[\s\S]{0,300}<SaranaFace/,
+    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,1600}identity === "jarvis"[\s\S]{0,200}<Orb[\s\S]{0,300}<SaranaFace/,
     "VisionStage, then identity-gated Orb/SaranaFace must be the branches of the SAME central-stage conditional",
   );
 });
@@ -262,7 +262,7 @@ test("Orb/SaranaFace are chosen via `identity` state, itself derived from state.
 test("VisionStage (camera/screen) still replaces the identity stage in-place, instantly — never renders alongside it as a second element", () => {
   assert.match(
     appSrc,
-    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,900}<SaranaFace/,
+    /visionRequest\s*\?\s*\(\s*<VisionStage[\s\S]{0,1600}<SaranaFace/,
     "VisionStage and the identity-stage branch must be the two arms of the SAME conditional",
   );
 });

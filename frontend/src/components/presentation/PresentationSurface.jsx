@@ -1,32 +1,43 @@
 // src/components/presentation/PresentationSurface.jsx — Track 3's ONE
-// reusable glass information surface. ContentPanel.jsx is the only
-// mount point (see that file) — every structured presentation (weather/
-// calendar/table/search_results/generic_information/status) and every
-// ordinary plain-text `content` message both render through this same
-// component, never a second modal/panel implementation per type
-// (section 4's own explicit requirement).
+// reusable glass information surface, now the JARVIS Information Surface
+// (see App.jsx's own header for how it's positioned as the primary
+// visual stage). ContentPanel.jsx is the only mount point (see that
+// file) — every structured presentation (weather/calendar/table/
+// search_results/generic_information/status) and every ordinary
+// plain-text `content` message both render through this same component,
+// never a second modal/panel implementation per type.
 //
-// Lifecycle (section 7): HIDDEN is simply "not mounted" (ContentPanel
-// renders nothing when `content` is null — no separate hidden DOM to
-// manage). While mounted, this component tracks its own local phase:
+// Lifecycle: HIDDEN is simply "not mounted" (ContentPanel renders
+// nothing when `content` is null). While mounted, this component tracks
+// its own local phase:
 //   materializing -> active -> [updating -> active]* -> dismissing
 // `materializing`/`dismissing` are brief, CSS-driven transitions (see
-// index.css's own .pw-surface-* rules); `updating` is a short pulse
-// when the SAME surface receives new content (a different title/text/
-// presentation while already mounted) — not a remount, not a fresh
-// materialize, just an honest "this just changed" cue. Expand/collapse
-// is a simple local toggle (`expanded`), not a phase — it doesn't affect
-// whether data is fresh, only how much of it is currently shown.
+// index.css's own .pw-surface-* rules); `updating` is a short pulse when
+// the SAME surface receives new content (a different title/text/
+// presentation while already mounted, e.g. a "what about tomorrow?"
+// follow-up) — not a remount, not a fresh materialize, just an honest
+// "this just changed" cue.
+//
+// `expanded`/`persistent` are NOT local state — they're lifted to
+// AssistantContext (see that file's own PRESENTATION_EXPANDED/
+// PRESENTATION_PERSISTENT actions) so BOTH the local expand button AND
+// main.py's presentation_control tool (a real voice/text command:
+// "expand that", "keep this on screen") control the exact same state —
+// one surface, controllable from either input. Compact vs. standard
+// sizing is not a separate literal mode: it falls out naturally from
+// how much a given renderer chooses to show at `expanded=false` — see
+// each renderer's own use of the `expanded` prop for what additional
+// data appears only when the user actually asks for more.
 import { useEffect, useRef, useState } from "react";
 import { resolvePresentationComponent, isValidPresentation } from "./registry";
+import { playAudioFx } from "../../lib/audioFx";
 
 const MATERIALIZE_MS = 260;
 const UPDATE_PULSE_MS = 420;
-const DISMISS_MS = 200;
+const DISMISS_MS = 220;
 
-export default function PresentationSurface({ content, theme, onDismiss }) {
+export default function PresentationSurface({ content, theme, expanded, persistent, onDismiss, onSetExpanded }) {
   const [phase, setPhase] = useState("materializing");
-  const [expanded, setExpanded] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const prevContentRef = useRef(content);
   const timerRef = useRef(null);
@@ -35,32 +46,44 @@ export default function PresentationSurface({ content, theme, onDismiss }) {
   // Production-polish fix (real resource-cleanup gap, found via audit):
   // handleDismiss()'s own setTimeout was previously untracked, so an
   // unmount for any OTHER reason before it fired (e.g. the parent
-  // replacing `content` entirely) left it dangling — harmless in
-  // practice (onDismiss just re-dispatches an already-idempotent
-  // DISMISS_CONTENT), but not genuinely cleaned up. Tracked and cleared
+  // replacing `content` entirely) left it dangling. Tracked and cleared
   // on unmount now, exactly like the other two timers in this component.
   useEffect(() => () => clearTimeout(dismissTimerRef.current), []);
 
   // Fresh mount (ContentPanel only renders this component while
   // `content` is non-null, so a NEW PresentationSurface instance always
-  // starts here) -- materialize once, then settle to active.
+  // starts here) -- materialize once, then settle to active. The reveal
+  // cue fires ONCE per materialize wave here, not per individual
+  // `.pw-reveal-item` inside whatever renderer mounts (see index.css) —
+  // a six-row forecast must not fire six sounds.
   useEffect(() => {
     setPhase("materializing");
-    timerRef.current = setTimeout(() => setPhase("active"), MATERIALIZE_MS);
+    playAudioFx("presentation_materializing");
+    timerRef.current = setTimeout(() => {
+      setPhase("active");
+      playAudioFx("presentation_reveal");
+    }, MATERIALIZE_MS);
     return () => clearTimeout(timerRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Content changed WHILE this same surface stays mounted (a later
-  // weather/calendar/etc. broadcast arriving) -- a brief "updating"
-  // pulse, never a re-materialize (the surface itself never leaves the
-  // DOM for this; see ContentPanel.jsx's own key-less rendering).
+  // weather/calendar/etc. broadcast arriving, e.g. a "what about
+  // tomorrow?" follow-up) -- a brief "updating" pulse, never a
+  // re-materialize (the surface itself never leaves the DOM for this;
+  // see ContentPanel.jsx's own key-less rendering) and never resets
+  // expanded/persistent (see AssistantContext.jsx's own CONTENT_MESSAGE
+  // case).
   useEffect(() => {
     if (prevContentRef.current === content) return undefined;
     prevContentRef.current = content;
     if (phase === "materializing") return undefined; // already animating in; don't also pulse
     setPhase("updating");
-    const t = setTimeout(() => setPhase("active"), UPDATE_PULSE_MS);
+    playAudioFx("presentation_update");
+    const t = setTimeout(() => {
+      setPhase("active");
+      playAudioFx("presentation_reveal");
+    }, UPDATE_PULSE_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content]);
@@ -68,7 +91,13 @@ export default function PresentationSurface({ content, theme, onDismiss }) {
   function handleDismiss() {
     setPhase("dismissing");
     setDismissed(true);
+    playAudioFx("presentation_dismiss");
     dismissTimerRef.current = setTimeout(onDismiss, DISMISS_MS);
+  }
+
+  function handleToggleExpand() {
+    playAudioFx(expanded ? "presentation_collapse" : "presentation_expand");
+    onSetExpanded(!expanded);
   }
 
   const presentation = content?.presentation;
@@ -82,10 +111,13 @@ export default function PresentationSurface({ content, theme, onDismiss }) {
     >
       <div className="pw-surface-hdr">
         <span className="pw-surface-title">{content.title}</span>
+        {persistent && (
+          <span className="pw-surface-pin" title="Kept on screen" aria-label="Kept on screen" />
+        )}
         <div className="pw-surface-spacer" />
         <button
           className="pw-surface-btn"
-          onClick={() => setExpanded((e) => !e)}
+          onClick={handleToggleExpand}
           aria-expanded={expanded}
           aria-label={expanded ? "Collapse" : "Expand"}
         >
@@ -96,7 +128,11 @@ export default function PresentationSurface({ content, theme, onDismiss }) {
         </button>
       </div>
       <div className="pw-surface-body">
-        {TypedRenderer ? <TypedRenderer data={presentation.data} /> : <div className="pw-surface-plain">{content.text}</div>}
+        {TypedRenderer ? (
+          <TypedRenderer data={presentation.data} expanded={expanded} />
+        ) : (
+          <div className="pw-surface-plain">{content.text}</div>
+        )}
       </div>
     </div>
   );

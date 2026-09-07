@@ -72,7 +72,13 @@ function eventDateIso(ev) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-export default function CalendarPresentation({ data }) {
+// Universal Information Surface's own compact/expanded state (see
+// PresentationSurface.jsx) — a compact glance shows a few upcoming
+// events; "expand that"/"show me more" reveals the rest of whatever
+// range the backend already sent (never a new fetch).
+const COMPACT_EVENT_COUNT = 4;
+
+export default function CalendarPresentation({ data, expanded = false }) {
   const [yearStr, monthStr] = (data?.month || "").split("-");
   const year = parseInt(yearStr, 10);
   const month = parseInt(monthStr, 10);
@@ -88,7 +94,9 @@ export default function CalendarPresentation({ data }) {
   }
 
   const cells = buildMonthGrid(year, month);
-  const shownEvents = selectedDate ? events.filter((ev) => eventDateIso(ev) === selectedDate) : events;
+  const filteredEvents = selectedDate ? events.filter((ev) => eventDateIso(ev) === selectedDate) : events;
+  const shownEvents = expanded ? filteredEvents : filteredEvents.slice(0, COMPACT_EVENT_COUNT);
+  const hiddenCount = filteredEvents.length - shownEvents.length;
 
   return (
     <div className="pw-calendar">
@@ -129,6 +137,9 @@ export default function CalendarPresentation({ data }) {
                 {ev.location && <span className="pw-calendar-event-location">{ev.location}</span>}
               </div>
             ))
+          )}
+          {!expanded && hiddenCount > 0 && (
+            <div className="pw-calendar-more-hint">+{hiddenCount} more — expand for the full list</div>
           )}
         </div>
       )}

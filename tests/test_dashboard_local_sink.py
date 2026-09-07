@@ -109,6 +109,41 @@ def test_broadcast_audio_cue_is_not_replayed_to_a_later_client() -> None:
     print("test_broadcast_audio_cue_is_not_replayed_to_a_later_client: PASS")
 
 
+def test_broadcast_presentation_control_reaches_both_a_real_ws_client_and_the_local_sink() -> None:
+    """The Universal Information Surface's own control channel: a real
+    voice/text command ("expand that") reaches main.py's
+    presentation_control tool, which calls this -- reaching a browser
+    AND (via the local sink) an embedded desktop view identically, one
+    shared surface controllable from either input."""
+    async def _run():
+        server = DashboardServer()
+        received_locally = []
+        server.set_local_sink(received_locally.append)
+
+        class _FakeWs:
+            def __init__(self):
+                self.received = []
+            async def send_json(self, msg):
+                self.received.append(msg)
+
+        fake_ws = _FakeWs()
+        server._clients.add(fake_ws)
+        await server.broadcast_presentation_control("expand")
+        assert received_locally == [{"type": "presentation_control", "action": "expand"}]
+        assert fake_ws.received == [{"type": "presentation_control", "action": "expand"}]
+    asyncio.run(_run())
+    print("test_broadcast_presentation_control_reaches_both_a_real_ws_client_and_the_local_sink: PASS")
+
+
+def test_broadcast_presentation_control_is_not_replayed_to_a_later_client() -> None:
+    async def _run():
+        server = DashboardServer()
+        await server.broadcast_presentation_control("dismiss")
+        assert all(m.get("type") != "presentation_control" for m in server._history)
+    asyncio.run(_run())
+    print("test_broadcast_presentation_control_is_not_replayed_to_a_later_client: PASS")
+
+
 def test_local_sink_exception_never_breaks_real_client_delivery() -> None:
     """A desktop-side bug (or the embedded view not being ready yet) must
     never take down delivery to a real, connected browser/phone client."""
@@ -164,6 +199,8 @@ if __name__ == "__main__":
     test_local_sink_receives_content_with_presentation_payload_unmodified()
     test_broadcast_audio_cue_reaches_both_a_real_ws_client_and_the_local_sink()
     test_broadcast_audio_cue_is_not_replayed_to_a_later_client()
+    test_broadcast_presentation_control_reaches_both_a_real_ws_client_and_the_local_sink()
+    test_broadcast_presentation_control_is_not_replayed_to_a_later_client()
     test_local_sink_exception_never_breaks_real_client_delivery()
     test_no_local_sink_is_a_complete_no_op_default_behavior_unchanged()
     print("\nAll dashboard-local-sink tests passed.")

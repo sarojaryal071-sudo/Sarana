@@ -50,6 +50,14 @@ test("the vocabulary covers section 12's required events (wake/sleep/listening/t
   for (const name of required) assert.ok(AUDIO_FX_EVENTS.includes(name), `missing event: ${name}`);
 });
 
+test("the vocabulary covers the shared presentation lifecycle events (materializing/reveal/update/expand/collapse/dismiss)", () => {
+  const required = [
+    "presentation_materializing", "presentation_reveal", "presentation_update",
+    "presentation_expand", "presentation_collapse", "presentation_dismiss",
+  ];
+  for (const name of required) assert.ok(AUDIO_FX_EVENTS.includes(name), `missing event: ${name}`);
+});
+
 // ── source-inspection: architecture/priority/mixing (section 13) ────
 
 test("no second audio engine: never imports lib/audioOut.js — a genuinely separate concern (see module's own header)", () => {
@@ -113,10 +121,22 @@ test("the Sarana->JARVIS and JARVIS->Sarana transitions are genuinely different 
   const jarvisBlock = src.slice(src.indexOf("transition_sarana_to_jarvis:"), src.indexOf("transition_jarvis_to_sarana:"));
   const saranaBlock = src.slice(src.indexOf("transition_jarvis_to_sarana:"));
   assert.notEqual(jarvisBlock.trim(), saranaBlock.trim());
-  assert.match(jarvisBlock, /_clickBurst/);
+  // "Precision mechanical assembly" (converging clicks + servo whir +
+  // sweep + magnetic snap into a lock tone) -- four distinct real
+  // elements, not a generic beep/tone.
+  assert.match(jarvisBlock, /_clickConverge/);
+  assert.match(jarvisBlock, /_whir/);
   assert.match(jarvisBlock, /_sweep/);
   assert.match(jarvisBlock, /_tone/);
-  assert.match(saranaBlock, /_clickBurst/);
+  assert.match(saranaBlock, /_clickConverge/);
+  assert.match(saranaBlock, /_whir/);
   assert.match(saranaBlock, /_sweep/);
   assert.match(saranaBlock, /_tone/);
+});
+
+test("the reverse transition genuinely scatters clicks OUTWARD (direction=-1), the forward one converges (direction=1) -- a real mirror, not a lazy reversal", () => {
+  const jarvisBlock = src.slice(src.indexOf("transition_sarana_to_jarvis:"), src.indexOf("transition_jarvis_to_sarana:"));
+  const saranaBlock = src.slice(src.indexOf("transition_jarvis_to_sarana:"));
+  assert.match(jarvisBlock, /direction: 1/);
+  assert.match(saranaBlock, /direction: -1/);
 });

@@ -70,6 +70,26 @@ const initialState = {
   // exactly as it always has, via ContentPanel's own plain fallback.
   content: null, // {title, text, presentation?: {type, data}} | null
 
+  // Universal Information Surface: expand/persistent are lifted OUT of
+  // content (deliberately NOT nested inside it) so an in-place update to
+  // the SAME surface (e.g. "what about tomorrow?" replacing the weather
+  // payload) never resets them — only an explicit user action
+  // (expand/collapse button, "keep this on screen", dismiss) changes
+  // these two fields. Both the local UI controls AND main.py's
+  // presentation_control tool (see App.jsx's "presentation_control" WS
+  // case) dispatch the SAME two actions below — one shared surface,
+  // controllable from either the user's click or their voice/text.
+  presentationExpanded: false,
+  // Persistence is deliberately separate from task completion (see
+  // main.py's presentation_control tool docstring) — a task finishing
+  // never implicitly dismisses its own presentation; only an explicit
+  // dismiss does. This flag only marks whether the user asked to
+  // deliberately keep it on screen (surfaced as a small "kept" indicator
+  // — see PresentationSurface.jsx) — it does not currently change
+  // whether anything auto-dismisses (nothing does), it is honest,
+  // visible state for a real, explicit request.
+  presentationPersistent: false,
+
   audioState: "idle", // idle | connecting | open | playing | error
   microphoneState: "idle", // idle | requesting | denied | unsupported | streaming | error
 
@@ -135,9 +155,17 @@ function reducer(state, action) {
         messages: appendMessage(state.messages, { speaker: "sys", text: action.text, ts: action.ts }),
       };
     case "CONTENT_MESSAGE":
+      // Deliberately does NOT touch presentationExpanded/presentationPersistent
+      // — an in-place update to the same surface (a follow-up like "what
+      // about tomorrow?") must not silently collapse an expanded view or
+      // forget the user asked to keep it on screen.
       return { ...state, content: { title: action.title, text: action.text, presentation: action.presentation ?? null } };
     case "DISMISS_CONTENT":
-      return { ...state, content: null };
+      return { ...state, content: null, presentationExpanded: false, presentationPersistent: false };
+    case "PRESENTATION_EXPANDED":
+      return { ...state, presentationExpanded: !!action.value };
+    case "PRESENTATION_PERSISTENT":
+      return { ...state, presentationPersistent: !!action.value };
     case "SPEECH_MUTE":
       return { ...state, speechMuted: !!action.value };
     case "RESET_FOR_LOGOUT":

@@ -56,7 +56,14 @@ test("ContentPanel renders nothing when content is null — HIDDEN is 'not mount
 });
 
 test("ContentPanel hosts exactly ONE PresentationSurface — no per-type modal/panel component of its own", () => {
-  assert.match(contentPanelSrc, /<PresentationSurface content=\{content\} theme=\{theme\} onDismiss=\{onDismiss\} \/>/);
+  const matches = contentPanelSrc.match(/<PresentationSurface\b/g) || [];
+  assert.equal(matches.length, 1, "exactly one PresentationSurface mount, never a per-type variant");
+  assert.match(contentPanelSrc, /content=\{content\}/);
+  assert.match(contentPanelSrc, /theme=\{theme\}/);
+  assert.match(contentPanelSrc, /expanded=\{expanded\}/);
+  assert.match(contentPanelSrc, /persistent=\{persistent\}/);
+  assert.match(contentPanelSrc, /onDismiss=\{onDismiss\}/);
+  assert.match(contentPanelSrc, /onSetExpanded=\{onSetExpanded\}/);
   assert.doesNotMatch(contentPanelSrc, /WeatherPresentation|CalendarPresentation|TablePresentation/, "ContentPanel must never import a typed renderer directly — only PresentationSurface does, via the registry");
 });
 
@@ -64,7 +71,9 @@ test("ContentPanel hosts exactly ONE PresentationSurface — no per-type modal/p
 
 test("falls back to plain text for an invalid/unsupported presentation payload, never crashes", () => {
   assert.match(surfaceSrc, /const valid = isValidPresentation\(presentation\);/);
-  assert.match(surfaceSrc, /TypedRenderer \? <TypedRenderer data=\{presentation\.data\} \/> : <div className="pw-surface-plain">\{content\.text\}<\/div>/);
+  assert.match(surfaceSrc, /TypedRenderer \? \(/);
+  assert.match(surfaceSrc, /<TypedRenderer data=\{presentation\.data\} expanded=\{expanded\} \/>/);
+  assert.match(surfaceSrc, /<div className="pw-surface-plain">\{content\.text\}<\/div>/);
 });
 
 test("lifecycle phases: materializing -> active, and updating on a later content change while still mounted", () => {
@@ -87,9 +96,15 @@ test("production polish: the dismiss timer is tracked and cleared on unmount, no
   assert.match(surfaceSrc, /useEffect\(\(\) => \(\) => clearTimeout\(dismissTimerRef\.current\), \[\]\);/);
 });
 
-test("expand/collapse is a local toggle, independent of the lifecycle phase", () => {
-  assert.match(surfaceSrc, /const \[expanded, setExpanded\] = useState\(false\)/);
-  assert.match(surfaceSrc, /setExpanded\(\(e\) => !e\)/);
+test("expand/collapse state is lifted to the shared reducer, not local — so both the button AND a real presentation_control command drive the same state", () => {
+  // Deliberately NOT a local useState — see PresentationSurface.jsx's
+  // own header for why: main.py's presentation_control tool (a real
+  // voice/text command) and this component's own expand button must
+  // both be able to change the exact same state, which local component
+  // state could never allow from outside the component.
+  assert.doesNotMatch(surfaceSrc, /useState\(false\).*expand/i);
+  assert.match(surfaceSrc, /expanded, persistent, onDismiss, onSetExpanded/);
+  assert.match(surfaceSrc, /onSetExpanded\(!expanded\)/);
 });
 
 test("theme is applied via a CSS class, driven by the caller's own already-computed identity — no second theme source", () => {
@@ -120,10 +135,19 @@ test("JARVIS and SARANA each contribute their own accent via a CSS custom proper
 test("respects prefers-reduced-motion — materialize/dismiss transforms are suppressed", () => {
   const anchor = css.indexOf(".pw-surface-plain {");
   assert.ok(anchor > -1);
-  const following = css.slice(anchor, anchor + 400);
+  const following = css.slice(anchor, anchor + 900);
   assert.match(following, /@media \(prefers-reduced-motion: reduce\) \{/);
   assert.match(following, /\.pw-surface,\s*\n\s*\.pw-surface-hdr \{[\s\S]*?transition: none !important;/);
-  assert.match(following, /\.pw-surface-materializing,\s*\n\s*\.pw-surface-dismissing \{ opacity: 1; transform: none; \}/);
+  // transform: var(--pw-base-transform), NOT a literal "none" — a plain
+  // `none` would also strip the essential translateX(-50%) centering
+  // the overlay's own `left: 50%` positioning depends on, shifting the
+  // whole card off-screen under reduced motion (a real bug caught before
+  // shipping — see index.css's own comment on this exact rule).
+  assert.match(following, /\.pw-surface-materializing,\s*\n\s*\.pw-surface-dismissing \{ opacity: 1; transform: var\(--pw-base-transform\); \}/);
+});
+
+test("the overlay's centering transform is preserved under reduced motion — never a literal 'transform: none' on the reduced-motion materializing/dismissing rule", () => {
+  assert.doesNotMatch(css, /\.pw-surface-materializing,\s*\n\s*\.pw-surface-dismissing \{ opacity: 1; transform: none; \}/);
 });
 
 test("marked calendar days use --red specifically, matching the explicit brief ('visually marked RED')", () => {
@@ -139,7 +163,12 @@ test("interactive buttons have a visible focus state (keyboard accessibility)", 
 test("WeatherPresentation renders only fields from `data` — no hardcoded temperature/condition values", () => {
   assert.doesNotMatch(weatherSrc, /\b\d{2,3}°/, "no literal degree value baked into the component");
   assert.match(weatherSrc, /current\.temperature/);
-  assert.match(weatherSrc, /daily\.map/);
+  assert.match(weatherSrc, /shownDaily\.map/);
+});
+
+test("WeatherPresentation's `expanded` prop only ever slices the ALREADY-fetched forecast, never re-fetches or invents extra days", () => {
+  assert.match(weatherSrc, /const shownDaily = expanded \? daily : daily\.slice\(0, COMPACT_DAY_COUNT\);/);
+  assert.doesNotMatch(weatherSrc, /fetch\(|sendCommand|WebSocket|new XMLHttpRequest/);
 });
 
 test("CalendarPresentation computes a REAL month grid from actual Date math — no calendar library, no invented events", () => {
@@ -177,7 +206,7 @@ test("SearchResultsPresentation never re-parses free text into fabricated struct
 
 test("TablePresentation renders exactly the caller-supplied columns/rows, no synthetic columns added", () => {
   assert.match(tableSrc, /columns\.map/);
-  assert.match(tableSrc, /rows\.map/);
+  assert.match(tableSrc, /shownRows\.map/);
 });
 
 test("GenericInfoPresentation supports both freeform body and structured items, honest empty state when neither is given", () => {

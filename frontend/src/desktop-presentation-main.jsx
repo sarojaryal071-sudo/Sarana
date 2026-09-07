@@ -58,7 +58,10 @@ function DesktopPresentationRoot() {
       <ContentPanel
         content={state.content}
         theme={identity}
+        expanded={state.presentationExpanded}
+        persistent={state.presentationPersistent}
         onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })}
+        onSetExpanded={(value) => dispatch({ type: "PRESENTATION_EXPANDED", value })}
       />
     </div>
   );

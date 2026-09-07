@@ -200,6 +200,71 @@ def test_get_weather_tool_calls_ui_show_content_even_without_a_dashboard() -> No
     print("test_get_weather_tool_calls_ui_show_content_even_without_a_dashboard: PASS")
 
 
+# ── 7-day forecast (Universal Information Surface's own "expand" needs
+# real data to reveal beyond day 3 — see actions/weather.py's own
+# updated docstring) ──────────────────────────────────────────────────
+
+_OPEN_METEO_7DAY_RESPONSE = {
+    "current_units": _OPEN_METEO_RESPONSE["current_units"],
+    "current": _OPEN_METEO_RESPONSE["current"],
+    "daily_units": _OPEN_METEO_RESPONSE["daily_units"],
+    "daily": {
+        "time": ["2026-08-27", "2026-08-28", "2026-08-29", "2026-08-30", "2026-08-31", "2026-09-01", "2026-09-02"],
+        "weather_code": [2, 61, 0, 1, 3, 2, 0],
+        "temperature_2m_max": [8.0, 6.0, 9.0, 7.0, 5.0, 6.5, 10.0],
+        "temperature_2m_min": [1.0, 2.0, 0.0, -1.0, 0.5, 1.5, 3.0],
+        "precipitation_probability_max": [10, 70, 5, 20, 40, 15, 0],
+        "precipitation_sum": [0.0, 4.2, 0.0, 1.0, 2.5, 0.5, 0.0],
+    },
+}
+
+
+def test_get_weather_data_requests_a_7_day_forecast() -> None:
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = _OPEN_METEO_7DAY_RESPONSE
+    mock_resp.raise_for_status.return_value = None
+    with patch("actions.weather.requests.get", return_value=mock_resp) as mock_get:
+        data = get_weather_data(60.17, 24.94)
+    assert mock_get.call_args.kwargs["params"]["forecast_days"] == 7
+    assert len(data["daily"]) == 7
+    print("test_get_weather_data_requests_a_7_day_forecast: PASS")
+
+
+def test_get_weather_data_days_beyond_2_use_a_real_weekday_name() -> None:
+    """Day 4+ (index >= 3, past "Today"/"Tomorrow"/"Day after tomorrow")
+    must be a real weekday derived from the actual date Open-Meteo
+    returned, never the raw ISO string and never guessed."""
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = _OPEN_METEO_7DAY_RESPONSE
+    mock_resp.raise_for_status.return_value = None
+    with patch("actions.weather.requests.get", return_value=mock_resp):
+        data = get_weather_data(60.17, 24.94)
+    assert data["daily"][0]["label"] == "Today"
+    assert data["daily"][1]["label"] == "Tomorrow"
+    assert data["daily"][2]["label"] == "Day after tomorrow"
+    # 2026-08-30 is a Sunday
+    assert data["daily"][3]["label"] == "Sunday"
+    assert data["daily"][3]["date"] == "2026-08-30"
+    print("test_get_weather_data_days_beyond_2_use_a_real_weekday_name: PASS")
+
+
+def test_format_weather_text_stays_compact_reading_only_the_first_3_days() -> None:
+    """The structured data carries a full week (for the visual surface's
+    own expand feature), but Gemini's SPOKEN reply must stay compact —
+    nobody wants "what's the weather" answered with a 7-day recitation."""
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = _OPEN_METEO_7DAY_RESPONSE
+    mock_resp.raise_for_status.return_value = None
+    with patch("actions.weather.requests.get", return_value=mock_resp):
+        data = get_weather_data(60.17, 24.94)
+    text = format_weather_text(data)
+    assert "Today" in text
+    assert "Tomorrow" in text
+    assert "Day after tomorrow" in text
+    assert "Sunday" not in text   # day 4 — present in the data, not in the spoken text
+    print("test_format_weather_text_stays_compact_reading_only_the_first_3_days: PASS")
+
+
 def test_get_weather_tool_unknown_place_is_honest() -> None:
     async def _run():
         jarvis = JarvisLive(HeadlessSurface(), auto_start=False)
@@ -269,6 +334,9 @@ if __name__ == "__main__":
     test_get_weather_tool_with_named_place_geocodes_first()
     test_get_weather_tool_broadcasts_the_weather_presentation_to_the_dashboard()
     test_get_weather_tool_calls_ui_show_content_even_without_a_dashboard()
+    test_get_weather_data_requests_a_7_day_forecast()
+    test_get_weather_data_days_beyond_2_use_a_real_weekday_name()
+    test_format_weather_text_stays_compact_reading_only_the_first_3_days()
     test_get_weather_tool_unknown_place_is_honest()
     test_get_weather_tool_without_location_reports_unavailable()
     test_get_weather_tool_desktop_without_location_is_honest_not_an_error()

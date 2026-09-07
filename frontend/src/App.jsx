@@ -251,6 +251,19 @@ export default function App() {
           case "content":
             dispatch({ type: "CONTENT_MESSAGE", title: msg.title, text: msg.text, presentation: msg.presentation ?? null });
             break;
+          case "presentation_control":
+            // Presentation commands ("expand that", "keep this on
+            // screen", "hide it") reach here through the EXISTING
+            // Gemini -> JARVIS authority boundary (main.py's
+            // presentation_control tool decides WHAT changed; this
+            // frontend only ever reflects it, never interprets the
+            // user's words itself — no second command parser). Same
+            // dispatch a local button click already uses.
+            if (msg.action === "expand") dispatch({ type: "PRESENTATION_EXPANDED", value: true });
+            else if (msg.action === "collapse") dispatch({ type: "PRESENTATION_EXPANDED", value: false });
+            else if (msg.action === "dismiss") dispatch({ type: "DISMISS_CONTENT" });
+            else if (msg.action === "keep_visible") dispatch({ type: "PRESENTATION_PERSISTENT", value: true });
+            break;
           case "file_received":
             dispatch({ type: "SYS_MESSAGE", text: `File received: ${msg.name}`, ts: null });
             break;
@@ -878,6 +891,18 @@ export default function App() {
               onStopped={handleVisionStopped}
             />
           ) : (
+            // The JARVIS Information Surface (ContentPanel) is now a
+            // CHILD of .identity-stage, not a sibling docked below it —
+            // it overlays the SAME stage the orb/face occupies (see
+            // index.css's .pw-surface's own position:absolute), so
+            // presenting information means JARVIS temporarily takes over
+            // its own primary visual stage rather than shrinking the
+            // orb into a smaller area underneath a separate panel. The
+            // orb never disappears — .identity-stage-defocused (applied
+            // whenever state.content is present) blurs/dims it as a
+            // background layer behind the surface, exactly the "orb
+            // recedes, doesn't vanish" contract this stage's own brief
+            // asks for.
             <div className={`identity-stage${identityFading ? " identity-stage-fading" : ""}${state.content ? " identity-stage-defocused" : ""}`}>
               {identity === "jarvis" ? (
                 <Orb status={displayStatus} assistantName={state.assistantName} />
@@ -885,9 +910,16 @@ export default function App() {
                 <SaranaFace status={displayStatus} assistantName={state.assistantName} expressionOverride={state.expressionOverride} />
               )}
               {identityPhase && <IdentityTransition phase={identityPhase} targetIdentity={targetIdentity} />}
+              <ContentPanel
+                content={state.content}
+                theme={identity}
+                expanded={state.presentationExpanded}
+                persistent={state.presentationPersistent}
+                onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })}
+                onSetExpanded={(value) => dispatch({ type: "PRESENTATION_EXPANDED", value })}
+              />
             </div>
           )}
-          <ContentPanel content={state.content} theme={identity} onDismiss={() => dispatch({ type: "DISMISS_CONTENT" })} />
           <Controls
             onSend={handleSend}
             onSendImage={handleSendImage}
