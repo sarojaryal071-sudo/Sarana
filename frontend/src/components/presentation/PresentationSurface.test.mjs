@@ -246,10 +246,9 @@ test("corner brackets stay OUT of .pw-surface's own guarded box-shadow declarati
   assert.doesNotMatch(rule[0], /box-shadow/);
 });
 
-test("desktop's fill-mode override is position: relative (not static) — the corner marks still need SOME positioning context there", () => {
-  const rule = css.match(/\.desktop-presentation-root \.pw-surface \{[\s\S]*?\n\}/);
-  assert.ok(rule);
-  assert.match(rule[0], /position: relative;/);
+test("desktop no longer overrides .pw-surface into a fill-mode docked panel — same floating, centered card as web, no split-screen", () => {
+  assert.doesNotMatch(css, /\.desktop-presentation-root \.pw-surface \{/);
+  assert.match(css, /\.desktop-presentation-root \{[\s\S]*?position: relative;/);
 });
 
 test("calendar 'today' gets its own ring, independent of the marked-red has-events signal", () => {

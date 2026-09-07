@@ -5,6 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>JARVIS Presentation</title>
     <meta name="theme-color" content="#00060a" />
+    <!-- index.css's shared `body { background: var(--bg); }` rule is
+         correct for the web build (index.html) but opaque here would
+         defeat the whole point of ui.py's transparent QWebEngineView
+         overlay (see that file's own comment) — the native orb behind
+         it would never show through. This entry only, highest
+         specificity, no risk to the shared stylesheet or index.html. -->
+    <style>body { background: transparent !important; }</style>
   </head>
   <body>
     <div id="root"></div>

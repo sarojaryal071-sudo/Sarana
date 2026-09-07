@@ -31,7 +31,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QPushButton, QScrollArea, QSizePolicy,
-    QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
+    QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
 
 # Desktop Presentation Engine integration: QWebEngineView hosts the SAME
@@ -92,6 +92,24 @@ _local_static_server = None   # keeps the ThreadingHTTPServer instance/thread al
 # genuine leeway for a transient failure, not an indefinite hang.
 _PRESENTATION_LOAD_MAX_RETRIES = 4
 _PRESENTATION_LOAD_RETRY_MS = 500
+
+
+def _PRESENTATION_DEGRADED_HTML(message: str) -> str:
+    """A real degraded state's own honest message — never a silent blank
+    overlay — but sized and positioned like the actual .pw-surface card
+    (bottom-centered, transparent page around it), not a full-bleed
+    opaque rectangle over the whole orb. Shared by both places this
+    integration can genuinely fail: no build yet, and retries exhausted
+    (see _build_content_panel()/_on_presentation_load_finished())."""
+    return (
+        "<body style='margin:0;background:transparent;'>"
+        "<div style=\"position:fixed;left:50%;bottom:7%;"
+        "transform:translateX(-50%);max-width:92%;padding:10px 16px;"
+        "border:1px solid #0f4060;border-radius:8px;"
+        "background:rgba(1,15,24,0.88);color:#7fa;"
+        "font-family:'Courier New',monospace;font-size:12px;\">"
+        f"{message}</div></body>"
+    )
 
 
 def _start_local_static_server(directory: Path) -> int:
@@ -2620,7 +2638,9 @@ class MainWindow(QMainWindow):
         self._left_panel = self._build_left_panel()
         body.addWidget(self._left_panel, stretch=0)
 
-        # Center column: HUD + resizable content panel via QSplitter
+        # Center column: HUD/orb stack, with the Presentation Engine as a
+        # floating overlay on top of it (see body.addWidget below) —
+        # never a separate docked half of the screen.
         self.hud = HudCanvas(face_path, _display)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         # SARANA Face UI task: desktop's SARANA identity, additive
@@ -2690,22 +2710,16 @@ class MainWindow(QMainWindow):
         # one; hidden until _apply_jarvis_mode() calls .start() on it.
         self._identity_transition = IdentityTransitionOverlay(self._hud_cam_stack)
 
-        self._center_split = QSplitter(Qt.Orientation.Vertical)
-        self._center_split.setStyleSheet(f"""
-            QSplitter::handle {{
-                background: {C.BORDER};
-                height: 4px;
-            }}
-            QSplitter::handle:hover {{
-                background: {C.PRI_DIM};
-            }}
-        """)
-        self._center_split.addWidget(self._hud_cam_stack)
-        self._center_split.addWidget(self._content_panel)
-        self._center_split.setStretchFactor(0, 3)
-        self._center_split.setStretchFactor(1, 1)
-        self._center_split.setCollapsible(0, False)
-        body.addWidget(self._center_split, stretch=5)
+        # Presentation Engine overlay: a transparent floating child of
+        # _hud_cam_stack (same pattern as _identity_transition just above)
+        # instead of a docked QSplitter half — real, reported bug fixed:
+        # the split screen the user explicitly does not want. Cards now
+        # appear where the orb naturally sits, matching the web build's
+        # own overlay exactly (see App.jsx's own header). Geometry is
+        # synced to _hud_cam_stack's full rect in resizeEvent below.
+        self._content_panel.setParent(self._hud_cam_stack)
+        self._content_panel.setGeometry(self._hud_cam_stack.rect())
+        body.addWidget(self._hud_cam_stack, stretch=5)
 
         self._right_panel = self._build_right_panel()
         body.addWidget(self._right_panel, stretch=0)
@@ -3220,6 +3234,12 @@ class MainWindow(QMainWindow):
                 (cw.height() - oh) // 2,
                 ow, oh,
             )
+        # Presentation Engine overlay — fills the orb/face stack exactly
+        # (see __init__/_push_to_presentation_webview()), always kept in
+        # sync even while hidden so it's correctly sized the moment it's
+        # first shown.
+        if hasattr(self, "_content_panel"):
+            self._content_panel.setGeometry(self._hud_cam_stack.rect())
         # Camera preview — bottom-right corner of the center/HUD area
         pw = _CameraPreview._W
         ph = self._cam_preview.height() or _CameraPreview._H
@@ -3649,12 +3669,15 @@ class MainWindow(QMainWindow):
         frontend already uses — see desktop-presentation-main.jsx's own
         header for the full architecture and this class's
         _push_to_presentation_webview()/receive_dashboard_message() for
-        how data reaches it. Hidden by default; appears the first time
-        show_content() is called and then stays docked for the rest of
-        the session (dismissing a specific presentation clears its
-        content but doesn't collapse this panel again — the same
-        "ContentPanel returns null, the surrounding layout doesn't
-        resize" behavior the web frontend already has).
+        how data reaches it. A transparent floating overlay sized to
+        match the orb's own stage (self._hud_cam_stack — see this
+        class's own __init__), not a docked panel: hidden by default,
+        raised and shown the first time show_content() is called, and
+        stays that way for the rest of the session (dismissing a
+        specific presentation clears its content but doesn't hide this
+        overlay again — the same "ContentPanel returns null, nothing
+        resizes" behavior the web frontend already has, since there's no
+        docked space to reclaim here either).
 
         Falls back to the old plain-text QTextEdit panel if PyQt6-
         WebEngine isn't installed (_WEBENGINE_OK — see this module's own
@@ -3662,12 +3685,12 @@ class MainWindow(QMainWindow):
         """
         w = QWidget()
         w.setObjectName("ContentPanel")
-        w.setStyleSheet(f"""
-            QWidget#ContentPanel {{
-                background: {C.PANEL};
-                border-top: 1px solid {C.BORDER_B};
-            }}
-        """)
+        # Transparent — this is now a floating overlay on top of the orb
+        # (see __init__), not a docked panel with its own visible
+        # background/separator; only the card React renders inside it
+        # (.pw-surface's own glass styling) should be visible.
+        w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        w.setStyleSheet("QWidget#ContentPanel { background: transparent; }")
         w.hide()
 
         lay = QVBoxLayout(w)
@@ -3690,10 +3713,17 @@ class MainWindow(QMainWindow):
             self._presentation_channel = QWebChannel(self._content_webview.page())
             self._presentation_channel.registerObject("presentationBridge", self._presentation_bridge)
             self._content_webview.page().setWebChannel(self._presentation_channel)
-            # A transparent Qt background behind the page's own dark
-            # background (see index.css's body{background:var(--bg)})
-            # avoids a white flash while the local page is still loading.
-            self._content_webview.page().setBackgroundColor(QColor(C.PANEL))
+            # Genuinely transparent — real, reported bug fixed: this used
+            # to be an opaque C.PANEL fill, correct back when this view
+            # was a docked panel with its own visible background, but
+            # this is now a floating overlay on top of the native orb
+            # (see __init__) and the orb must show through everywhere
+            # .pw-surface's own card doesn't cover. WA_TranslucentBackground
+            # on the widget itself is needed too — setBackgroundColor()
+            # alone only controls what the PAGE paints, not the Qt
+            # widget's own compositing.
+            self._content_webview.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            self._content_webview.page().setBackgroundColor(QColor(0, 0, 0, 0))
             # Real bug found via actual verification (Chromium DevTools
             # console against the live embedded page): Chromium's
             # autoplay policy blocks a page's AudioContext from starting
@@ -3748,14 +3778,16 @@ class MainWindow(QMainWindow):
                 self._content_webview.loadFinished.connect(self._on_presentation_load_finished)
             else:
                 # Real, disclosed degraded state — never a silent blank
-                # panel: the frontend simply hasn't been built yet
-                # (`cd frontend && npm run build`) on this machine.
-                self._content_webview.setHtml(
-                    "<body style='background:#01131f;color:#7fa;"
-                    "font-family:monospace;padding:16px;'>"
+                # overlay: the frontend simply hasn't been built yet
+                # (`cd frontend && npm run build`) on this machine. A
+                # small bottom-centered pill (transparent body, same
+                # spot .pw-surface itself normally sits), not a full-
+                # bleed opaque rectangle over the whole orb — this is an
+                # overlay now, not a docked panel (see __init__).
+                self._content_webview.setHtml(_PRESENTATION_DEGRADED_HTML(
                     "Presentation Engine unavailable — run "
-                    "<code>npm run build</code> in frontend/.</body>"
-                )
+                    "<code>npm run build</code> in frontend/."
+                ))
             lay.addWidget(self._content_webview)
         else:
             self._content_webview = None
@@ -3801,12 +3833,10 @@ class MainWindow(QMainWindow):
             return
         self._presentation_load_attempts += 1
         if self._presentation_load_attempts > _PRESENTATION_LOAD_MAX_RETRIES:
-            self._content_webview.setHtml(
-                "<body style='background:#01131f;color:#7fa;"
-                "font-family:monospace;padding:16px;'>"
+            self._content_webview.setHtml(_PRESENTATION_DEGRADED_HTML(
                 "Presentation Engine failed to load after several "
-                "attempts — restart JARVIS to try again.</body>"
-            )
+                "attempts — restart JARVIS to try again."
+            ))
             return
         url = self._content_webview.url()
         webview = self._content_webview
@@ -3865,11 +3895,14 @@ class MainWindow(QMainWindow):
                 self._content_display.textCursor().MoveOperation.Start
             )
 
-        first_show = not self._content_panel.isVisible()
+        # Floating overlay, not a docked panel (see __init__) — sync its
+        # geometry to the orb stage's CURRENT size before first showing
+        # it (a resize while it was still hidden wouldn't otherwise have
+        # updated it — see resizeEvent's own early-return-when-hidden
+        # note) and raise it above the orb/face.
+        self._content_panel.setGeometry(self._hud_cam_stack.rect())
         self._content_panel.show()
-        if first_show:
-            total = self._center_split.height()
-            self._center_split.setSizes([max(total - 220, 120), 220])
+        self._content_panel.raise_()
 
     def _set_presentation_focus(self, active: bool) -> None:
         """Slot — runs on the Qt main thread (QWebChannel invokes slots on
