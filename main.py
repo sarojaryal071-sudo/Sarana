@@ -944,14 +944,29 @@ TOOL_DECLARATIONS = [
             "'=SUM(A1:A5)', which is evaluated normally), get_cell (cell='A1'), save. "
             "save NEVER triggers Word/Excel's blocking native 'Save As' dialog for a document that's "
             "never been saved before — if it has no filename yet this returns [INCONCLUSIVE] asking the "
-            "user for one instead of risking a hang."
+            "user for one instead of risking a hang. "
+            "IMPORTANT for insert_text: YOU (Gemini) write the actual content — this tool only types "
+            "whatever literal string you give it. For 'write a sick leave email to my boss'/'write me a "
+            "poem about X'/'draft a cover letter', compose the COMPLETE finished text yourself (real "
+            "subject line, real salutation, real body paragraphs, real sign-off — whatever the content "
+            "type actually calls for) and pass that entire text as `text`. Never pass a description or "
+            "summary of what the content should contain (e.g. never text='a sick leave email with "
+            "salutation, subject, and body') — that gets typed into the document literally, verbatim."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
                 "app":       {"type": "STRING", "description": "'word' or 'excel'"},
                 "action":    {"type": "STRING", "description": "insert_text | replace_text | format_selection | save (word)  |  set_cell | get_cell | save (excel)"},
-                "text":      {"type": "STRING", "description": "Text to insert (word insert_text)"},
+                "text":      {
+                    "type": "STRING",
+                    "description": (
+                        "The COMPLETE, FINISHED text to insert (word insert_text) — write it out in "
+                        "full yourself; this is typed into the document exactly as given, never "
+                        "summarized or expanded further. Not a description of the content — the "
+                        "content itself."
+                    ),
+                },
                 "where":     {"type": "STRING", "description": "'cursor' (default) or 'end' (word insert_text)"},
                 "find":      {"type": "STRING", "description": "Text to find (word replace_text)"},
                 "replace":   {"type": "STRING", "description": "Replacement text (word replace_text)"},
@@ -1020,7 +1035,16 @@ TOOL_DECLARATIONS = [
                 "path":        {"type": "STRING", "description": "File/folder path or shortcut: desktop, downloads, documents, home"},
                 "destination": {"type": "STRING", "description": "Destination path for move/copy"},
                 "new_name":    {"type": "STRING", "description": "New name for rename"},
-                "content":     {"type": "STRING", "description": "Content for create_file/write"},
+                "content":     {
+                    "type": "STRING",
+                    "description": (
+                        "The COMPLETE, FINISHED file content for create_file/write — YOU (Gemini) "
+                        "write it out in full yourself (a story, poem, letter, email, notes, "
+                        "whatever was asked for); this is written to the file exactly as given, "
+                        "verbatim. Never a description or summary of what the content should "
+                        "contain — the content itself."
+                    ),
+                },
                 "name":        {"type": "STRING", "description": "File name to search for"},
                 "extension":   {"type": "STRING", "description": "File extension to search (e.g. .pdf)"},
                 "count":       {"type": "INTEGER", "description": "Number of results for largest"},
