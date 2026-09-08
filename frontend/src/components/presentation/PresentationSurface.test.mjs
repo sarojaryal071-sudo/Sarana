@@ -272,7 +272,22 @@ test("desktop no longer overrides .pw-surface into a fill-mode docked panel — 
 test("calendar 'today' gets its own ring, independent of the marked-red has-events signal", () => {
   assert.match(calendarSrc, /function todayIso\(\)/);
   assert.match(calendarSrc, /const isToday = iso === today;/);
-  assert.match(css, /\.pw-calendar-cell-today \{ box-shadow: inset 0 0 0 1px var\(--surface-accent, var\(--pri\)\); \}/);
+  assert.match(css, /\.pw-calendar-cell-today \{[\s\S]*?\n\}/);
+});
+
+test("today's cell has no square border of its own — real, reported bug fixed: a colored square border used to fight the circle for attention", () => {
+  const rule = css.match(/\.pw-calendar-cell-today \{[\s\S]*?\n\}/);
+  assert.ok(rule);
+  assert.match(rule[0], /border-color: transparent;/);
+});
+
+test("today's circle is a real, separate glowing element behind the day number, animated (reduced-motion aware)", () => {
+  const rule = css.match(/\.pw-calendar-cell-today::before \{[\s\S]*?\n\}/);
+  assert.ok(rule);
+  assert.match(rule[0], /border-radius: 50%;/);
+  assert.match(rule[0], /z-index: -1;/);
+  assert.match(rule[0], /animation: pw-today-glow/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*\.pw-calendar-cell-today::before \{ animation: none/);
 });
 
 test("weather renders a real, deterministic condition icon (not a hardcoded glyph) for both the hero and each day tile", () => {

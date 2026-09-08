@@ -1007,20 +1007,26 @@ input {
   min-height: 0;
   border: 1px solid var(--border-a);
   border-radius: 10px;
-  background: linear-gradient(180deg, rgba(1, 15, 24, 0.82), rgba(1, 15, 24, 0.93));
+  /* Diagonal sheen (was a flat top-to-bottom gradient) -- a real,
+     reported "everything reads flat/2D" gap: a single directional
+     light source across the glass reads as dimensional, a uniform
+     vertical fade doesn't. */
+  background: linear-gradient(155deg, rgba(4, 22, 34, 0.88) 0%, rgba(1, 12, 20, 0.9) 45%, rgba(1, 9, 16, 0.94) 100%);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  /* One faint inset top highlight (the "glass" catch-light) layered
-     with one outer shadow that now has real depth on every side (this
-     card floats over the orb rather than sitting flush against a page
-     edge) plus a single hairline of controlled cyan illumination at low
-     opacity -- restrained, never a glowing border. Still one box-shadow
-     DECLARATION, three comma-separated layers, one coherent glow
-     source (--surface-accent), not stacked unrelated effects. */
+  /* Still one box-shadow DECLARATION, three comma-separated layers, one
+     coherent glow source (--surface-accent) -- restrained, never
+     stacked unrelated effects (see PresentationSurface.test.mjs's own
+     "exactly one box-shadow" guard). A real, reported depth gap fixed
+     within that same constraint: the inset highlight widened from a
+     top-edge-only line to a full perimeter bevel (a lit edge reads as
+     a physical panel, a single top highlight reads as a flat sheet),
+     and the ambient glow softened/widened so it genuinely bleeds
+     outward past the card's own edge instead of hugging it tightly. */
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 28px 60px -22px rgba(0, 0, 0, 0.8),
-    0 0 26px -12px var(--surface-accent, transparent);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+    0 30px 70px -22px rgba(0, 0, 0, 0.82),
+    0 0 50px -6px var(--surface-accent, transparent);
   transition: opacity 240ms ease, transform 240ms ease, max-height 220ms ease, width 220ms ease;
   z-index: 4;
 }
@@ -1094,6 +1100,9 @@ input {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* A restrained holographic halo -- a real, reported "everything reads
+     flat" gap: flat solid-color text has no dimensionality at all. */
+  text-shadow: 0 0 10px var(--surface-accent, transparent);
 }
 /* "Kept on screen" — a small status indicator (brief's own "small status
    indicators where meaningful"), a plain filled dot with no visible
@@ -1140,15 +1149,22 @@ input {
    — which is why the desktop override above switched static -> relative. */
 .pw-surface-corner {
   position: absolute;
-  width: 12px;
-  height: 12px;
+  width: 18px;
+  height: 18px;
   pointer-events: none;
-  opacity: 0.6;
+  opacity: 0.85;
+  /* filter, not a box shadow (stays out of .pw-surface's OWN guarded
+     declaration above, and adds no shadow property to this rule either
+     -- see PresentationSurface.test.mjs's own "border-only" guard on
+     this exact block). A real, reported "flat bezel" fix:
+     bigger, thicker, glowing brackets read as a physical console
+     bezel; a thin thread of border color did not. */
+  filter: drop-shadow(0 0 3px var(--surface-accent, transparent));
 }
-.pw-surface-corner-tl { top: 5px; left: 5px; border-top: 1px solid var(--surface-accent, var(--pri)); border-left: 1px solid var(--surface-accent, var(--pri)); }
-.pw-surface-corner-tr { top: 5px; right: 5px; border-top: 1px solid var(--surface-accent, var(--pri)); border-right: 1px solid var(--surface-accent, var(--pri)); }
-.pw-surface-corner-bl { bottom: 5px; left: 5px; border-bottom: 1px solid var(--surface-accent, var(--pri)); border-left: 1px solid var(--surface-accent, var(--pri)); }
-.pw-surface-corner-br { bottom: 5px; right: 5px; border-bottom: 1px solid var(--surface-accent, var(--pri)); border-right: 1px solid var(--surface-accent, var(--pri)); }
+.pw-surface-corner-tl { top: 6px; left: 6px; border-top: 2px solid var(--surface-accent, var(--pri)); border-left: 2px solid var(--surface-accent, var(--pri)); }
+.pw-surface-corner-tr { top: 6px; right: 6px; border-top: 2px solid var(--surface-accent, var(--pri)); border-right: 2px solid var(--surface-accent, var(--pri)); }
+.pw-surface-corner-bl { bottom: 6px; left: 6px; border-bottom: 2px solid var(--surface-accent, var(--pri)); border-left: 2px solid var(--surface-accent, var(--pri)); }
+.pw-surface-corner-br { bottom: 6px; right: 6px; border-bottom: 2px solid var(--surface-accent, var(--pri)); border-right: 2px solid var(--surface-accent, var(--pri)); }
 
 /* ── Footer telemetry strip — the reference cards' own small system-
    status line. Every value shown is real, already-known internal state
@@ -1246,7 +1262,7 @@ input {
 .pw-weather-more-hint { font-size: 10px; color: var(--text-dim); margin-top: 8px; letter-spacing: 0.3px; }
 
 /* ── Calendar: real dates, marked days in RED per the explicit brief ── */
-.pw-calendar-header { font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--surface-accent, var(--pri)); margin-bottom: 8px; }
+.pw-calendar-header { font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--surface-accent, var(--pri)); margin-bottom: 8px; text-shadow: 0 0 8px var(--surface-accent, transparent); }
 .pw-calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
 .pw-calendar-weekday { font-size: 9px; text-align: center; color: var(--text-dim); letter-spacing: 0.5px; padding-bottom: 4px; }
 .pw-calendar-cell {
@@ -1259,7 +1275,12 @@ input {
      negative z-index there sits behind this cell's own number, never
      bleeding into a neighboring cell's stacking). */
   appearance: none;
-  background: transparent;
+  /* A subtle recessed-panel read (a real, reported "flat 2D" gap) — a
+     faint diagonal sheen plus an inset shadow, restrained enough to
+     stay out of the way of the day number/marked-dot/today-ring on top
+     of it. */
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.025), rgba(0, 0, 0, 0.16));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), inset 0 -5px 8px -7px rgba(0, 0, 0, 0.6);
   font-family: inherit;
   margin: 0;
   cursor: pointer;
@@ -1302,10 +1323,15 @@ input {
    confined to this cell's own isolated stacking context above) with a
    slow breathing glow, the reference cards' own circled "current day"
    read — restrained (one animation, modest opacity/scale range), never
-   a strobing effect. */
+   a strobing effect.
+   Real, reported bug fixed: this cell's own SQUARE border used to be
+   recolored to the accent too, so the circle read as "a circle trapped
+   inside a square frame" — two competing shapes. The reference's
+   current-day cell has no square border at all, just the circle
+   floating free; transparent here matches that exactly. */
 .pw-calendar-cell-today {
   color: var(--white);
-  border-color: var(--surface-accent, var(--pri));
+  border-color: transparent;
 }
 .pw-calendar-cell-today::before {
   content: "";
@@ -1314,9 +1340,14 @@ input {
   z-index: -1;
   border-radius: 50%;
   border: 1px solid var(--surface-accent, var(--pri));
+  /* A tighter inner ring plus a wider soft bloom (was one blur radius)
+     — a real, reported "flat 2D" gap: a single thin glow reads as a
+     line drawn on glass; a layered near/far glow reads as a genuinely
+     lit object with depth. */
   box-shadow:
-    0 0 6px 0 var(--surface-accent, var(--pri)),
-    inset 0 0 5px -1px var(--surface-accent, var(--pri));
+    0 0 4px 0 var(--surface-accent, var(--pri)),
+    0 0 16px 2px var(--surface-accent, var(--pri)),
+    inset 0 0 6px -1px var(--surface-accent, var(--pri));
   animation: pw-today-glow 2.4s ease-in-out infinite;
 }
 @keyframes pw-today-glow {
@@ -1349,6 +1380,7 @@ input {
   text-transform: uppercase;
   color: var(--surface-accent, var(--pri));
   margin-bottom: 10px;
+  text-shadow: 0 0 8px var(--surface-accent, transparent);
 }
 .pw-calendar-events-solo { margin-top: 0; border-top: none; padding-top: 0; }
 
