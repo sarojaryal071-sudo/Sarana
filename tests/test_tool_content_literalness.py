@@ -23,14 +23,16 @@ leave email... in ms word" typed the near-verbatim user utterance into
 the document. Real root cause this time: computer_settings also offers
 generic "typing text on screen" (action='type_text'), and its `value`/
 `description` params had the identical unguarded-content gap. Worse,
-`description` (used when `action` is omitted) feeds a SEPARATE,
-lightweight intent-detector sub-call (actions/computer_settings.py's
-own _detect_action(), a smaller/faster model whose only job is
-guessing an action from free text) -- not a content composer -- so a
-composition request routed through `description` would get typed back
-out nearly verbatim, no matter how well office_control's own text
-param was fixed. See the '_detect_action prompt' test below for that
-inner-prompt fix too.
+`description` (used when `action` is omitted) used to feed a SEPARATE
+live Gemini sub-call (actions/computer_settings.py's own
+_detect_action(), a smaller/faster model whose only job was guessing an
+action from free text) -- not a content composer -- so a composition
+request routed through `description` would get typed back out nearly
+verbatim, no matter how well office_control's own text param was fixed.
+_detect_action() has since been replaced entirely with a local difflib
+match (no LLM call at all) as part of a separate cleanup -- see the test
+below confirming that sub-prompt is genuinely gone, and
+tests/test_computer_settings.py for the real behavioral coverage.
 
 Run with:
     .venv/Scripts/python.exe -m tests.test_tool_content_literalness
@@ -110,15 +112,21 @@ def test_computer_settings_points_to_office_control_for_word_excel_content() -> 
     print("test_computer_settings_points_to_office_control_for_word_excel_content: PASS")
 
 
-def test_detect_action_sub_prompt_also_demands_composed_content_not_a_restated_command() -> None:
-    """Defense in depth: even if a description-only call ever does reach
-    actions/computer_settings.py's own _detect_action() sub-prompt, it
-    must not blindly echo the command back as `value`."""
+def test_detect_action_no_longer_has_a_sub_prompt_to_worry_about_at_all() -> None:
+    """Superseded, not just fixed: _detect_action() used to be a second
+    live Gemini call with its own composed-content instruction (defense
+    in depth for THAT path). It's now a local difflib match with no LLM
+    call at all — see tests/test_computer_settings.py's own
+    test_detect_action_matches_locally_without_a_second_gemini_call for
+    the real behavioral coverage. Nothing here can compose or mangle
+    content anymore because nothing here generates text; it only matches
+    an action NAME. This test just locks in that the old sub-prompt
+    genuinely stayed gone."""
     import inspect
     import actions.computer_settings as cs
     src = inspect.getsource(cs._detect_action)
-    assert "actual composed text in full" in src or "composed text" in src
-    print("test_detect_action_sub_prompt_also_demands_composed_content_not_a_restated_command: PASS")
+    assert "genai" not in src and "generate_content" not in src
+    print("test_detect_action_no_longer_has_a_sub_prompt_to_worry_about_at_all: PASS")
 
 
 if __name__ == "__main__":
@@ -129,5 +137,5 @@ if __name__ == "__main__":
     test_computer_settings_value_param_demands_complete_finished_content_for_type_text()
     test_computer_settings_description_param_is_explicitly_ruled_out_for_content_composition()
     test_computer_settings_points_to_office_control_for_word_excel_content()
-    test_detect_action_sub_prompt_also_demands_composed_content_not_a_restated_command()
+    test_detect_action_no_longer_has_a_sub_prompt_to_worry_about_at_all()
     print("\nAll tool-content-literalness tests passed.")

@@ -220,11 +220,55 @@ def _subject_note(subject: str | None) -> str:
     return f" [fact about {subject}]" if subject else ""
 
 
+def recall_memory(query: str, memory: dict | None = None) -> str:
+    """Local, no-network search across the CURRENT session's FULL memory
+    store — not just whatever fit in format_memory_for_prompt()'s own
+    per-category caps (15 preferences, 8 projects, etc.) or its 2000-char
+    safety net. Real gap fixed: a model can't look something up if it
+    doesn't know the thing exists, so a fact pushed out of that capped
+    view was previously unreachable, not just deprioritized — see that
+    function's own "(N more, not shown above)" hint, which is what tells
+    Gemini this tool is worth calling for a specific question the visible
+    core didn't answer. Plain substring match over key+value — no new
+    dependency, no second model call, matching this project's own
+    "no LLM call for a solvable-with-plain-Python problem" precedent."""
+    q = (query or "").strip().lower()
+    if not q:
+        return "No search term given."
+    memory = memory if memory is not None else load_memory()
+    hits = []
+    for category, entries in memory.items():
+        if not isinstance(entries, dict):
+            continue
+        for key, entry in entries.items():
+            val, subject = _entry_value_and_subject(entry)
+            if not val or q not in f"{key} {val}".lower():
+                continue
+            hits.append(f"{category}/{key.replace('_', ' ')}: {val}{_subject_note(subject)}")
+    if not hits:
+        return f"Nothing stored matches '{query}'."
+    return "\n".join(hits[:10])
+
+
 def format_memory_for_prompt(memory: dict | None) -> str:
     if not memory:
         return ""
 
     lines = []
+    # Real gap fixed: each category below is capped for prompt-budget
+    # reasons, but a fact just past the cap was previously invisible AND
+    # unreachable — nothing told Gemini it existed at all. `omitted`
+    # collects the KEYS (not values — no point spending prompt budget
+    # re-describing what's already in `recall_memory`'s own full-store
+    # search) that got cut, surfaced as one short index line at the end
+    # only when something actually was.
+    omitted: dict[str, list[str]] = {}
+
+    def _capped(label: str, entries: dict, n: int) -> list:
+        items = list(entries.items())
+        if len(items) > n:
+            omitted[label] = [k for k, _ in items[n:]]
+        return items[:n]
 
     identity  = memory.get("identity", {})
     id_fields = ["name", "age", "birthday", "city", "job", "language", "school", "nationality"]
@@ -245,7 +289,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     if prefs:
         lines.append("")
         lines.append("Preferences:")
-        for key, entry in list(prefs.items())[:15]:
+        for key, entry in _capped("preferences", prefs, 15):
             val, subject = _entry_value_and_subject(entry)
             if val:
                 lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_subject_note(subject)}")
@@ -254,7 +298,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     if projects:
         lines.append("")
         lines.append("Active Projects / Goals:")
-        for key, entry in list(projects.items())[:8]:
+        for key, entry in _capped("projects", projects, 8):
             val, subject = _entry_value_and_subject(entry)
             if val:
                 lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_subject_note(subject)}")
@@ -263,7 +307,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     if rels:
         lines.append("")
         lines.append("People in their life:")
-        for key, entry in list(rels.items())[:10]:
+        for key, entry in _capped("relationships", rels, 10):
             val, subject = _entry_value_and_subject(entry)
             if val:
                 lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_subject_note(subject)}")
@@ -272,7 +316,7 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     if wishes:
         lines.append("")
         lines.append("Wishes / Plans / Wants:")
-        for key, entry in list(wishes.items())[:8]:
+        for key, entry in _capped("wishes", wishes, 8):
             val, subject = _entry_value_and_subject(entry)
             if val:
                 lines.append(f"  - {key.replace('_', ' ').title()}: {val}{_subject_note(subject)}")
@@ -281,13 +325,21 @@ def format_memory_for_prompt(memory: dict | None) -> str:
     if notes:
         lines.append("")
         lines.append("Other notes:")
-        for key, entry in list(notes.items())[:8]:
+        for key, entry in _capped("notes", notes, 8):
             val, subject = _entry_value_and_subject(entry)
             if val:
                 lines.append(f"  - {key}: {val}{_subject_note(subject)}")
 
     if not lines:
         return ""
+
+    if omitted:
+        lines.append("")
+        parts = [f"{cat} ({', '.join(k.replace('_', ' ') for k in keys)})" for cat, keys in omitted.items()]
+        lines.append(
+            "More stored than fits here, not shown above — call recall_memory "
+            "if one of these sounds relevant: " + "; ".join(parts)
+        )
 
     # "ABOUT THIS PERSON" (unchanged wording) still governs personal facts
     # and unattributed shared facts — the added sentence exists ONLY to

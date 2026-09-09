@@ -43,6 +43,23 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 
+# ── Real, related bug: a REAL console can still crash a print() ──────────
+# The guard above fixes streams that are None (no console at all). A
+# genuine console has the opposite problem: its codepage often can't
+# encode what this codebase actually prints (emoji, arrows, non-Latin
+# names/text — "[SendMessage] \U0001f4e8 ..." on cp1252, Devanagari text
+# in a status line on cp437, etc.) — print() then raises
+# UnicodeEncodeError, and if that happens on a path with no surrounding
+# try/except (e.g. inside the Live API receive loop), it takes the whole
+# session down over a single unprintable character. reconfigure() (real
+# TextIOWrapper streams only — the devnull files just opened above
+# support it too) makes an unencodable character get substituted instead
+# of raising, on both stdout and stderr, everywhere in the process.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="backslashreplace")
+del _stream
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 import array
@@ -123,7 +140,7 @@ from google import genai
 from google.genai import types
 from core.assistant_surface import AssistantSurface
 from memory.memory_manager import (
-    load_memory, update_memory, format_memory_for_prompt,
+    load_memory, update_memory, format_memory_for_prompt, recall_memory,
     save_session_summary, pop_last_session,
     set_active_owner, clear_active_session, start_persistence_worker,
     owner_language, upcoming_events_for_prompt,
@@ -846,7 +863,36 @@ TOOL_DECLARATIONS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "action":      {"type": "STRING", "description": "The action to perform, e.g. volume_set | toggle_wifi | sleep | bluetooth_on | bluetooth_off | clipboard_get | clipboard_set | restart | shutdown | minimize | maximize | system_shortcut | list_system_shortcuts | ..."},
+                "action": {
+                    "type": "STRING",
+                    "description": "The action to perform.",
+                    # Real, confirmed bug fixed: this used to be a loose
+                    # "e.g. ... | ..." example list, so the model often
+                    # sent free text via `description` instead — which
+                    # fell through to an entire SECOND Gemini call inside
+                    # this tool just to guess an action name from it (see
+                    # actions/computer_settings.py's own _detect_action()
+                    # docstring). A real enum leaves little reason to ever
+                    # need that fallback. Kept in exact sync with that
+                    # module's own _ALL_ACTIONS — see
+                    # tests/test_computer_settings.py's own regression
+                    # guard for that.
+                    "enum": [
+                        "app_mute", "app_unmute", "app_volume_set", "bluetooth_off", "bluetooth_on",
+                        "brightness_down", "brightness_up", "clipboard_get", "clipboard_set", "close_app",
+                        "close_tab", "close_window", "copy", "cut", "dark_mode", "enter", "escape",
+                        "file_explorer", "find_on_page", "focus_search", "full_screen", "fullscreen",
+                        "go_back", "go_forward", "list_audio_devices", "list_system_shortcuts",
+                        "lock_screen", "maximize", "minimize", "mute", "new_tab", "next_tab", "open_run",
+                        "open_settings", "page_down", "page_up", "paste", "pause_video", "play_pause",
+                        "press_key", "prev_tab", "redo", "refresh_page", "reload", "reload_n", "restart",
+                        "save", "screen_off", "screenshot", "scroll_bottom", "scroll_down", "scroll_top",
+                        "scroll_up", "select_all", "show_desktop", "shutdown", "sleep", "sleep_display",
+                        "snap_left", "snap_right", "switch_window", "system_shortcut", "task_manager",
+                        "toggle_mute", "toggle_wifi", "type_text", "undo", "unmute", "volume_down",
+                        "volume_set", "volume_up", "zoom_in", "zoom_out", "zoom_reset",
+                    ],
+                },
                 "description": {"type": "STRING", "description": "Natural language description of what to do (used only when action is omitted) — NOT for content composition (see type_text note above); this only drives a lightweight action-guesser, not a writer."},
                 "value":       {
                     "type": "STRING",
@@ -1564,6 +1610,26 @@ TOOL_DECLARATIONS = [
         }
     },
     {
+        "name": "recall_memory",
+        "description": (
+            "Searches this user's FULL long-term memory store for a specific fact — use this "
+            "when a question is clearly about something you should know (a name, a preference, "
+            "a project detail, a plan) but it isn't in what you already have from [WHAT YOU KNOW "
+            "ABOUT THIS PERSON] above. That block only carries a budgeted core (the most recently "
+            "updated facts per category) plus a hint listing anything left out — call this with a "
+            "word from that hint, or from the question itself, to fetch the rest. Local search, no "
+            "network — call it freely, it costs nothing. Returns the real matching facts, or says "
+            "honestly that nothing matches; never invent an answer this doesn't return."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {"type": "STRING", "description": "A word or phrase to search for, e.g. a name, topic, or the omitted key from the memory hint."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "cancel_active_task",
         "description": (
             "Stops or withdraws a backend task you are currently running or just "
@@ -2041,6 +2107,16 @@ class JarvisLive:
         # by _set_user_profile() on the next real login.
         self._logged_out: bool = False
         self.session              = None
+        # Real bug fixed: session_resumption was always requested (see
+        # _build_config()) but the handle the server sends back was never
+        # kept, so a reconnect never actually resumed anything — see
+        # _receive_audio()'s own session_resumption_update handling.
+        # Deliberately in-memory only, never persisted to disk: a fresh
+        # process start should NOT continue yesterday's conversation (that
+        # would break the session-summary/"yesterday we talked about"
+        # morning-briefing flow, which depends on a session actually
+        # ending).
+        self._resumption_handle   = None
         self.audio_in_queue       = None
         self.out_queue            = None
         self._loop                = None
@@ -2876,7 +2952,11 @@ class JarvisLive:
             input_audio_transcription={},
             system_instruction="\n".join(parts),
             tools=[{"function_declarations": TOOL_DECLARATIONS + self._plugin_registry.get_tool_declarations()}],
-            session_resumption=types.SessionResumptionConfig(),
+            # Real bug fixed: this always requested resumption but never
+            # actually offered a handle to resume WITH, so it was a no-op —
+            # see self._resumption_handle's own docstring (__init__) for
+            # where the handle actually gets captured.
+            session_resumption=types.SessionResumptionConfig(handle=self._resumption_handle),
             # Sliding-window compression: session never dies from a full context
             # window — JARVIS can stay in one conversation for hours
             context_window_compression=types.ContextWindowCompressionConfig(
@@ -4155,6 +4235,9 @@ class JarvisLive:
                     r = await loop.run_in_executor(None, lambda: office_control(parameters=args))
                     result = r or "Done."
 
+            elif name == "recall_memory":
+                result = recall_memory(args.get("query", ""))
+
             elif name == "desktop_control":
                 r = await loop.run_in_executor(None, lambda: desktop_control(parameters=args, player=self.ui))
                 result = r or "Done."
@@ -4714,6 +4797,31 @@ class JarvisLive:
                             _entry = self._pending_tool_calls.get(_cid)
                             if _entry:
                                 _entry["cancelled"] = True
+
+                    # getattr, not response.session_resumption_update
+                    # directly (unlike the response fields above) — the
+                    # real SDK's LiveServerMessage always has this field,
+                    # but this project's own existing test doubles for a
+                    # receive-loop response (tests/test_barge_in.py,
+                    # tests/test_tool_call_async.py) only ever construct
+                    # the handful of fields THEIR OWN test cares about, a
+                    # convention already established before this change —
+                    # tolerating that here is a smaller, more honest fix
+                    # than editing every one of them to add a field their
+                    # own test has no reason to know about.
+                    if getattr(response, "session_resumption_update", None):
+                        # Real, confirmed bug fixed: _build_config() has
+                        # always turned session_resumption ON, but nothing
+                        # ever captured the handle the server sends back —
+                        # every reconnect (a dropped connection, a voice/
+                        # mode switch that rebuilds the session) silently
+                        # started a brand-new, empty session. `resumable`
+                        # is False on some updates (a transient mid-turn
+                        # checkpoint the server itself says not to use) —
+                        # only a resumable one is worth keeping.
+                        _sru = response.session_resumption_update
+                        if _sru.resumable and _sru.new_handle:
+                            self._resumption_handle = _sru.new_handle
         except Exception as e:
             # ASCII-only — same reasoning as _receive_audio()'s startup
             # print above: this line sits directly on the error path that

@@ -211,6 +211,29 @@ def test_unverified_action_keeps_bare_done_string_unchanged() -> None:
     print("test_unverified_action_keeps_bare_done_string_unchanged: PASS")
 
 
+def test_detect_action_matches_locally_without_a_second_gemini_call() -> None:
+    """Real, confirmed bug fixed: this used to be an entire extra live
+    Gemini call just to translate free text into an action name. Now a
+    local difflib match — no network, deterministic, and it also pulls
+    a numeric value out of the description for the common case."""
+    assert cs._detect_action("turn the volume down") == {"action": "volume_down", "value": None}
+    assert cs._detect_action("set the volume to 30") == {"action": "volume_set", "value": 30}
+    assert cs._detect_action("bluetuth on") == {"action": "bluetooth_on", "value": None}
+    print("test_detect_action_matches_locally_without_a_second_gemini_call: PASS")
+
+
+def test_tool_declaration_action_enum_stays_in_sync_with_the_real_action_set() -> None:
+    """main.py's own computer_settings tool declaration hardcodes the
+    action enum (a plain Python list, matching every other tool
+    declaration's style) — this is the guard that keeps it from silently
+    drifting out of sync with the module that actually dispatches them."""
+    from main import TOOL_DECLARATIONS
+    decl = next(t for t in TOOL_DECLARATIONS if t["name"] == "computer_settings")
+    declared = set(decl["parameters"]["properties"]["action"]["enum"])
+    assert declared == set(cs._ALL_ACTIONS)
+    print("test_tool_declaration_action_enum_stays_in_sync_with_the_real_action_set: PASS")
+
+
 if __name__ == "__main__":
     test_shutdown_without_confirmation_is_blocked_and_never_calls_the_real_command()
     test_shutdown_with_confirmed_true_proceeds()
@@ -230,4 +253,6 @@ if __name__ == "__main__":
     test_clipboard_set_then_get_real_round_trip()
     test_clipboard_set_with_no_text_is_inconclusive_not_a_crash()
     test_unverified_action_keeps_bare_done_string_unchanged()
+    test_detect_action_matches_locally_without_a_second_gemini_call()
+    test_tool_declaration_action_enum_stays_in_sync_with_the_real_action_set()
     print("\nAll computer_settings tests passed.")
